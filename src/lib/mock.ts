@@ -258,9 +258,17 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'delete_folder':
       folders.splice(folders.findIndex((f) => f.id === args.id), 1);
       return null;
-    case 'move_folder':
-      folders.find((f) => f.id === args.id)!.parentId = args.parentId;
+    case 'move_folder': {
+      const moving = folders.find((f) => f.id === args.id)!;
+      moving.parentId = args.parentId ?? null;
+      const siblings = folders
+        .filter((f) => f.parentId === moving.parentId && f.id !== moving.id)
+        .sort((a, b) => a.position - b.position);
+      const at = args.beforeId == null ? -1 : siblings.findIndex((f) => f.id === args.beforeId);
+      siblings.splice(at < 0 ? siblings.length : at, 0, moving);
+      siblings.forEach((f, i) => (f.position = i));
       return null;
+    }
     case 'set_folder_expanded':
       folders.find((f) => f.id === args.id)!.expanded = args.expanded;
       return null;

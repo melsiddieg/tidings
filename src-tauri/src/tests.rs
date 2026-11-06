@@ -259,6 +259,28 @@ fn full_database_workflow() {
 }
 
 #[test]
+fn folders_can_be_reordered() {
+    let (conn, dir) = temp_db();
+    let a = db::create_folder(&conn, "A", None).unwrap();
+    let b = db::create_folder(&conn, "B", None).unwrap();
+    let c = db::create_folder(&conn, "C", None).unwrap();
+    let order = |conn: &rusqlite::Connection| -> Vec<String> {
+        let mut f = db::folders(conn).unwrap();
+        f.retain(|x| x.parent_id.is_none());
+        f.sort_by_key(|x| x.position);
+        f.into_iter().map(|x| x.title).collect()
+    };
+    db::move_folder(&conn, c, None, Some(a)).unwrap(); // C before A
+    assert_eq!(order(&conn), ["C", "A", "B"]);
+    db::move_folder(&conn, c, None, Some(b)).unwrap(); // C between A and B
+    assert_eq!(order(&conn), ["A", "C", "B"]);
+    db::move_folder(&conn, a, None, None).unwrap(); // A to the end
+    assert_eq!(order(&conn), ["C", "B", "A"]);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn settings_validation() {
     let mut s = crate::settings::Settings::default();
     s.proxy = "ftp://nope".into();

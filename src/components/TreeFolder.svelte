@@ -13,6 +13,30 @@
   const unread = $derived(store.folderUnread.get(folder.id) ?? 0);
   const selected = $derived(store.scope.kind === 'folder' && store.scope.id === folder.id);
   const dropKey = $derived(`folder:${folder.id}`);
+  const zone = $derived(drag.over?.startsWith(`${dropKey}:`) ? drag.over.slice(dropKey.length + 1) : null);
+
+  type Zone = 'before' | 'into' | 'after';
+
+  /** The sibling that follows this folder once `movingId` is taken out of the list. */
+  function folderAfter(movingId: number): number | null {
+    const siblings = store.tree.folders
+      .filter((f) => f.parentId === folder.parentId && f.id !== movingId)
+      .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title));
+    const index = siblings.findIndex((f) => f.id === folder.id);
+    return siblings[index + 1]?.id ?? null;
+  }
+
+  /** Where a dragged item would land: above this folder, inside it, or below it. */
+  function zoneFor(e: DragEvent): Zone {
+    // Feeds always go inside a folder; feeds and folders are separate lists.
+    if (drag.item?.type !== 'folder') return 'into';
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const y = (e.clientY - rect.top) / rect.height;
+    if (y < 0.28) return 'before';
+    // An open folder's children follow its row, so "below" would be ambiguous there.
+    if (y > 0.72 && !folder.expanded) return 'after';
+    return 'into';
+  }
 
   function menu(e: MouseEvent) {
     store.openMenu(e, [
@@ -32,24 +56,32 @@
     if (!item || (item.type === 'folder' && item.id === folder.id)) return;
     e.preventDefault();
     e.stopPropagation();
-    drag.over = dropKey;
+    drag.over = `${dropKey}:${zoneFor(e)}`;
   }
 
   function ondrop(e: DragEvent) {
     e.preventDefault();
     e.stopPropagation();
     const item = drag.item;
+    const where = zoneFor(e);
     endDrag();
     if (!item) return;
-    if (item.type === 'feed') store.moveFeed(item.id, folder.id, null);
-    else if (item.id !== folder.id) store.moveFolder(item.id, folder.id, null);
+    if (item.type === 'feed') {
+      store.moveFeed(item.id, folder.id, null);
+    } else if (item.id !== folder.id) {
+      if (where === 'before') store.moveFolder(item.id, folder.parentId, folder.id);
+      else if (where === 'after') store.moveFolder(item.id, folder.parentId, folderAfter(item.id));
+      else store.moveFolder(item.id, folder.id, null);
+    }
   }
 </script>
 
 <div
   class="tree-row"
   class:selected
-  class:drop-into={drag.over === dropKey}
+  class:drop-into={zone === 'into'}
+  class:drop-before={zone === 'before'}
+  class:drop-after={zone === 'after'}
   style:--depth={depth}
   role="treeitem"
   aria-selected={selected}
@@ -59,7 +91,7 @@
   ondragstart={(e) => startDrag(e, { type: 'folder', id: folder.id })}
   ondragend={endDrag}
   {ondragover}
-  ondragleave={() => drag.over === dropKey && (drag.over = null)}
+  ondragleave={() => zone && (drag.over = null)}
   {ondrop}
   onclick={() => store.selectScope({ kind: 'folder', id: folder.id })}
   ondblclick={() => store.toggleFolder(folder.id)}

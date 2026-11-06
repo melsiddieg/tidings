@@ -58,7 +58,8 @@ Data folder:
 
 ## Installing on Linux
 
-Linux packages for x86_64 are in `release/linux/` after a Linux build (see below).
+Linux packages for x86_64 come from the GitHub Actions build (Actions tab, artifact
+`tidings-Linux`) or from `scripts/build-linux.sh` (see below).
 They need glibc 2.35 or newer, so they work on Ubuntu 22.04 and later, Linux Mint 21+,
 Pop!_OS 22.04+, Debian 12+, Fedora 36+, Arch, CachyOS, EndeavourOS and Manjaro.
 
@@ -82,7 +83,7 @@ Remove it later with `./install.sh --uninstall`.
 **Fedora, openSUSE:**
 
 ```bash
-sudo dnf install ./tidings-0.1.0-1.x86_64.rpm
+sudo dnf install ./Tidings-0.1.0-1.x86_64.rpm
 ```
 
 **Any distribution:** the AppImage carries its own libraries:
@@ -157,10 +158,25 @@ Output in `release/linux/`: `.deb`, `.rpm`, `.AppImage`, a portable `.tar.gz` an
 MEMORY=1100m JOBS=2 LTO=false scripts/build-linux.sh
 ```
 
-### Continuous integration
+### Releases
 
-`.github/workflows/build.yml` builds Linux and macOS packages on GitHub Actions when
-you push a tag such as `v0.1.0`, or when you start it from the Actions tab.
+Downloads are on the [releases page](https://github.com/melsiddieg/tidings/releases).
+Versions follow [Semantic Versioning](https://semver.org); changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
+To publish a new version:
+
+```bash
+scripts/bump-version.sh 0.2.0      # sets the version in all four files
+# add a "## [0.2.0] - YYYY-MM-DD" section to CHANGELOG.md, then:
+git commit -am "Release 0.2.0"
+git tag v0.2.0 && git push && git push --tags
+```
+
+Pushing the tag starts `.github/workflows/build.yml`. It checks that the tag, the
+version files and the changelog agree, builds Linux and macOS packages, and publishes
+a release with all files and `SHA256SUMS`. You can also start the workflow by hand
+from the Actions tab to build without releasing.
 
 The macOS build is not signed. The first time, right-click the app and choose **Open**,
 or remove the quarantine flag: `xattr -dr com.apple.quarantine Tidings.app`.
