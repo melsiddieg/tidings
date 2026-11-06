@@ -5,6 +5,18 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
+### Added
+- Favorites. Right-click a feed or folder and choose "Add to Favorites"; favorites
+  appear in their own sidebar section under All articles and Starred.
+
+### Changed
+- Feeds and folders now share one order, so a feed can sit above or between folders.
+  Drag any feed or folder onto the top or bottom edge of another row to place it
+  before or after; drop on the middle of a folder to move it inside. Your existing
+  order is kept when you upgrade.
+
 ## [0.2.0] - 2026-11-06
 
 ### Added
@@ -54,6 +66,7 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/melsiddieg/tidings/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/melsiddieg/tidings/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/melsiddieg/tidings/releases/tag/v0.1.0

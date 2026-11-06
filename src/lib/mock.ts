@@ -18,18 +18,18 @@ function emit(event: string, payload: unknown) {
 const now = Math.floor(Date.now() / 1000);
 
 const folders: Folder[] = [
-  { id: 1, parentId: null, title: 'Technology', position: 0, expanded: true },
-  { id: 2, parentId: null, title: 'World News', position: 1, expanded: true },
-  { id: 3, parentId: null, title: 'Science', position: 2, expanded: false },
-  { id: 4, parentId: 1, title: 'Linux & Free Software', position: 0, expanded: true },
+  { id: 1, parentId: null, title: 'Technology', position: 0, expanded: true, pinned: 0 },
+  { id: 2, parentId: null, title: 'World News', position: 1, expanded: true, pinned: 0 },
+  { id: 3, parentId: null, title: 'Science', position: 2, expanded: false, pinned: 0 },
+  { id: 4, parentId: 1, title: 'Linux & Free Software', position: 0, expanded: true, pinned: 0 },
 ];
 
 function feed(id: number, folderId: number | null, title: string, url: string, extra: Partial<Feed> = {}): Feed {
   return {
     id, folderId, title, feedTitle: title, customTitle: null, url, siteUrl: url.replace(/\/feed.*|\/rss.*/, ''),
-    description: null, position: id, iconVersion: null, updateInterval: null, retentionMode: null,
+    description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
-    lastError: null, unread: 0, total: 0, ...extra,
+    lastError: null, unread: 0, total: 0, pinned: 0, ...extra,
   };
 }
 
@@ -244,13 +244,33 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       feeds.splice(feeds.findIndex((f) => f.id === args.id), 1);
       articles = articles.filter((a) => a.feedId !== args.id);
       return null;
-    case 'move_feed': {
-      const f = feeds.find((x) => x.id === args.id)!;
-      f.folderId = args.folderId;
+    case 'move_feed':
+    case 'move_folder': {
+      type Ref = { kind: 'feed' | 'folder'; id: number };
+      const isFeed = cmd === 'move_feed';
+      const parent = (isFeed ? args.folderId : args.parentId) ?? null;
+      const moving = isFeed ? feeds.find((f) => f.id === args.id)! : folders.find((f) => f.id === args.id)!;
+      if (isFeed) (moving as Feed).folderId = parent;
+      else (moving as Folder).parentId = parent;
+      const siblings: { ref: Ref; item: { position: number } }[] = [
+        ...folders.filter((f) => f.parentId === parent).map((f) => ({ ref: { kind: 'folder' as const, id: f.id }, item: f })),
+        ...feeds.filter((f) => f.folderId === parent).map((f) => ({ ref: { kind: 'feed' as const, id: f.id }, item: f })),
+      ]
+        .filter((x) => !(x.ref.kind === (isFeed ? 'feed' : 'folder') && x.ref.id === args.id))
+        .sort((a, b) => a.item.position - b.item.position);
+      const before: Ref | null = args.before ?? null;
+      const at = before ? siblings.findIndex((x) => x.ref.kind === before.kind && x.ref.id === before.id) : -1;
+      siblings.splice(at < 0 ? siblings.length : at, 0, { ref: { kind: isFeed ? 'feed' : 'folder', id: args.id }, item: moving });
+      siblings.forEach((x, i) => (x.item.position = i));
+      return null;
+    }
+    case 'set_pinned': {
+      const t = args.item.kind === 'feed' ? feeds.find((f) => f.id === args.item.id) : folders.find((f) => f.id === args.item.id);
+      if (t) t.pinned = args.pinned ? Math.floor(Date.now() / 1000) : 0;
       return null;
     }
     case 'create_folder':
-      folders.push({ id: ++nextId, parentId: args.parentId ?? null, title: args.title, position: 99, expanded: true });
+      folders.push({ id: ++nextId, parentId: args.parentId ?? null, title: args.title, position: 999, expanded: true, pinned: 0 });
       return nextId;
     case 'rename_folder':
       folders.find((f) => f.id === args.id)!.title = args.title;
@@ -258,17 +278,6 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'delete_folder':
       folders.splice(folders.findIndex((f) => f.id === args.id), 1);
       return null;
-    case 'move_folder': {
-      const moving = folders.find((f) => f.id === args.id)!;
-      moving.parentId = args.parentId ?? null;
-      const siblings = folders
-        .filter((f) => f.parentId === moving.parentId && f.id !== moving.id)
-        .sort((a, b) => a.position - b.position);
-      const at = args.beforeId == null ? -1 : siblings.findIndex((f) => f.id === args.beforeId);
-      siblings.splice(at < 0 ? siblings.length : at, 0, moving);
-      siblings.forEach((f, i) => (f.position = i));
-      return null;
-    }
     case 'set_folder_expanded':
       folders.find((f) => f.id === args.id)!.expanded = args.expanded;
       return null;

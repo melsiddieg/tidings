@@ -2,7 +2,9 @@
   import Icon from '../lib/Icon.svelte';
   import { drag, endDrag } from '../lib/dnd.svelte';
   import { store } from '../lib/store.svelte';
-  import { countLabel, relativeAgo } from '../lib/util';
+  import { childKey, countLabel, relativeAgo } from '../lib/util';
+  import FeedIcon from './FeedIcon.svelte';
+  import type { ItemRef } from '../lib/types';
   import TreeFolder from './TreeFolder.svelte';
   import FeedRow from './FeedRow.svelte';
 
@@ -25,6 +27,15 @@
     ]);
   }
 
+  function favoriteMenu(e: MouseEvent, ref: ItemRef) {
+    store.openMenu(e, [
+      { label: 'Refresh', icon: 'refresh', action: () => (ref.kind === 'feed' ? store.refresh({ feedIds: [ref.id] }) : store.refresh({ folderId: ref.id })) },
+      { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead(ref.kind === 'feed' ? { kind: 'feed', id: ref.id } : { kind: 'folder', id: ref.id }) },
+      { separator: true },
+      { label: 'Remove from Favorites', icon: 'star', action: () => store.setPinned(ref, false) },
+    ]);
+  }
+
   // Dropping on the empty part of the list moves an item to the top level.
   function onRootDragOver(e: DragEvent) {
     if (!drag.item) return;
@@ -37,8 +48,7 @@
     const item = drag.item;
     endDrag();
     if (!item) return;
-    if (item.type === 'feed') store.moveFeed(item.id, null, null);
-    else store.moveFolder(item.id, null, null);
+    store.moveItem(item, null, null);
   }
 
   const status = $derived.by(() => {
@@ -76,6 +86,31 @@
       </button>
     </div>
 
+    {#if store.favorites.length > 0}
+      <div class="section-title"><span>Favorites</span></div>
+      <div class="group">
+        {#each store.favorites as fav (`${fav.ref.kind}:${fav.ref.id}`)}
+          {@const isFeed = fav.ref.kind === 'feed'}
+          {@const unread = isFeed ? (store.feedById.get(fav.ref.id)?.unread ?? 0) : (store.folderUnread.get(fav.ref.id) ?? 0)}
+          {@const selected = store.scope.kind === fav.ref.kind && 'id' in store.scope && store.scope.id === fav.ref.id}
+          <button
+            class="item"
+            class:selected
+            onclick={() => store.selectScope(fav.ref.kind === 'feed' ? { kind: 'feed', id: fav.ref.id } : { kind: 'folder', id: fav.ref.id })}
+            oncontextmenu={(e) => favoriteMenu(e, fav.ref)}
+          >
+            {#if isFeed}
+              <FeedIcon feed={store.feedById.get(fav.ref.id)} size={16} />
+            {:else}
+              <Icon name="folder" size={16} />
+            {/if}
+            <span class="label">{fav.title}</span>
+            {#if unread > 0}<span class="count">{countLabel(unread)}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
     <div class="section-title">
       <span>Subscriptions</span>
       <button class="icon-btn mini" title="New folder" onclick={() => (store.dialog = { kind: 'folder', folderId: null, parentId: null })}>
@@ -84,11 +119,12 @@
     </div>
 
     <div class="tree" role="tree">
-      {#each store.root.folders as node (node.folder.id)}
-        <TreeFolder {node} depth={0} />
-      {/each}
-      {#each store.root.feeds as feed (feed.id)}
-        <FeedRow {feed} depth={0} />
+      {#each store.root.children as child (childKey(child))}
+        {#if child.kind === 'folder'}
+          <TreeFolder node={child.node} depth={0} />
+        {:else}
+          <FeedRow feed={child.feed} depth={0} />
+        {/if}
       {/each}
     </div>
 

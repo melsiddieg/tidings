@@ -107,6 +107,34 @@ fn migrate(conn: &Connection) -> Result<()> {
             COMMIT;",
         )?;
     }
+    if version < 2 {
+        // v2: favorites, and one shared order for feeds and folders in the same parent.
+        conn.execute_batch(
+            "BEGIN;
+            ALTER TABLE feeds ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE folders ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            COMMIT;",
+        )?;
+        normalize_positions(conn)?;
+        conn.execute_batch("PRAGMA user_version = 2;")?;
+    }
+    Ok(())
+}
+
+/// Gives every parent a single 0..n order, folders first, then feeds,
+/// so the tree looks the same as before the shared order existed.
+pub fn normalize_positions(conn: &Connection) -> Result<()> {
+    let parents: Vec<Option<i64>> = {
+        let mut stmt = conn.prepare(
+            "SELECT parent_id FROM folders UNION SELECT folder_id FROM feeds",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for parent in parents {
+        let items = children(conn, parent, true)?;
+        renumber(conn, &items)?;
+    }
     Ok(())
 }
 
@@ -120,7 +148,7 @@ pub fn clear_new_flags(conn: &Connection) -> Result<()> {
 // Models sent to the UI
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Folder {
     pub id: i64,
@@ -128,6 +156,8 @@ pub struct Folder {
     pub title: String,
     pub position: i64,
     pub expanded: bool,
+    /// When it was added to Favorites (Unix time), 0 if it is not a favorite.
+    pub pinned: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +184,8 @@ pub struct Feed {
     pub last_error: Option<String>,
     pub unread: i64,
     pub total: i64,
+    /// When it was added to Favorites (Unix time), 0 if it is not a favorite.
+    pub pinned: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,7 +268,7 @@ pub struct ListQuery {
 
 pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
     let mut stmt = conn.prepare(
-        "SELECT id, parent_id, title, position, expanded FROM folders
+        "SELECT id, parent_id, title, position, expanded, pinned FROM folders
          ORDER BY position, lower(title)",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -246,6 +278,7 @@ pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
             title: r.get(2)?,
             position: r.get(3)?,
             expanded: r.get(4)?,
+            pinned: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -258,7 +291,8 @@ const FEED_COLUMNS: &str = "
     f.icon_version, f.update_interval, f.retention_mode, f.retention_value,
     f.full_text, f.paused, f.last_fetched, f.last_success, f.last_error,
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0 AND a.is_deleted = 0),
-    (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0)";
+    (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0),
+    f.pinned";
 
 fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
@@ -282,6 +316,7 @@ fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         last_error: r.get(17)?,
         unread: r.get(18)?,
         total: r.get(19)?,
+        pinned: r.get(20)?,
     })
 }
 
@@ -784,11 +819,7 @@ pub fn insert_feed(
     title: Option<&str>,
     site_url: Option<&str>,
 ) -> Result<i64> {
-    let position: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position) + 1, 0) FROM feeds WHERE folder_id IS ?1",
-        [folder_id],
-        |r| r.get(0),
-    )?;
+    let position = next_position(conn, folder_id)?;
     conn.execute(
         "INSERT INTO feeds (url, folder_id, title, site_url, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -852,43 +883,95 @@ pub fn delete_feed(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Puts `id` before `before` (or at the end) in a sibling list and renumbers positions.
-fn reorder(
-    conn: &Connection,
-    table: &str,
-    parent_col: &str,
-    parent: Option<i64>,
-    id: i64,
-    before: Option<i64>,
-) -> Result<()> {
-    let mut ids: Vec<i64> = {
-        let sql = format!(
-            "SELECT id FROM {table} WHERE {parent_col} IS ?1 AND id != ?2 ORDER BY position, id"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![parent, id], |r| r.get(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-    let index = before.and_then(|b| ids.iter().position(|x| *x == b)).unwrap_or(ids.len());
-    ids.insert(index, id);
-    let sql = format!("UPDATE {table} SET position = ?1, {parent_col} = ?2 WHERE id = ?3");
+/// A feed or a folder in the subscription tree. Both share one order per parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Item {
+    Folder { id: i64 },
+    Feed { id: i64 },
+}
+
+fn next_position(conn: &Connection, parent: Option<i64>) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(p) + 1, 0) FROM (
+            SELECT position AS p FROM folders WHERE parent_id IS ?1
+            UNION ALL SELECT position FROM feeds WHERE folder_id IS ?1)",
+        [parent],
+        |r| r.get(0),
+    )?)
+}
+
+/// The direct children of `parent` in display order.
+fn children(conn: &Connection, parent: Option<i64>, folders_first: bool) -> Result<Vec<Item>> {
+    let order = if folders_first { "kind, position, t" } else { "position, kind, t" };
+    let sql = format!(
+        "SELECT kind, id FROM (
+            SELECT 0 AS kind, id, position, lower(title) AS t FROM folders WHERE parent_id IS ?1
+            UNION ALL
+            SELECT 1, id, position, lower(COALESCE(NULLIF(custom_title, ''), title)) FROM feeds
+            WHERE folder_id IS ?1)
+         ORDER BY {order}"
+    );
     let mut stmt = conn.prepare(&sql)?;
-    for (pos, item) in ids.iter().enumerate() {
-        stmt.execute(params![pos as i64, parent, item])?;
+    let rows = stmt.query_map([parent], |r| {
+        let kind: i64 = r.get(0)?;
+        let id: i64 = r.get(1)?;
+        Ok(if kind == 0 { Item::Folder { id } } else { Item::Feed { id } })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+fn renumber(conn: &Connection, items: &[Item]) -> Result<()> {
+    let mut folder = conn.prepare_cached("UPDATE folders SET position = ?1 WHERE id = ?2")?;
+    let mut feed = conn.prepare_cached("UPDATE feeds SET position = ?1 WHERE id = ?2")?;
+    for (pos, item) in items.iter().enumerate() {
+        match item {
+            Item::Folder { id } => folder.execute(params![pos as i64, id])?,
+            Item::Feed { id } => feed.execute(params![pos as i64, id])?,
+        };
     }
     Ok(())
 }
 
-pub fn move_feed(conn: &Connection, id: i64, folder_id: Option<i64>, before: Option<i64>) -> Result<()> {
-    reorder(conn, "feeds", "folder_id", folder_id, id, before)
+/// Moves a feed or folder into `parent` (None = top level), placed before `before`
+/// or at the end, and renumbers that parent's children.
+pub fn move_item(conn: &Connection, item: Item, parent: Option<i64>, before: Option<Item>) -> Result<()> {
+    match item {
+        Item::Folder { id } => {
+            if let Some(p) = parent {
+                if folder_subtree(conn, id)?.contains(&p) {
+                    return Err(Error::msg("A folder cannot be moved into itself"));
+                }
+            }
+            conn.execute("UPDATE folders SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+        }
+        Item::Feed { id } => {
+            conn.execute("UPDATE feeds SET folder_id = ?2 WHERE id = ?1", params![id, parent])?;
+        }
+    }
+    let mut list = children(conn, parent, false)?;
+    list.retain(|x| *x != item);
+    let index = before.and_then(|b| list.iter().position(|x| *x == b)).unwrap_or(list.len());
+    list.insert(index, item);
+    renumber(conn, &list)
+}
+
+pub fn move_feed(conn: &Connection, id: i64, folder_id: Option<i64>, before: Option<Item>) -> Result<()> {
+    move_item(conn, Item::Feed { id }, folder_id, before)
+}
+
+/// Adds to or removes from Favorites.
+pub fn set_pinned(conn: &Connection, item: Item, pinned: bool) -> Result<()> {
+    let value = if pinned { now() } else { 0 };
+    match item {
+        Item::Folder { id } => conn.execute("UPDATE folders SET pinned = ?2 WHERE id = ?1", params![id, value])?,
+        Item::Feed { id } => conn.execute("UPDATE feeds SET pinned = ?2 WHERE id = ?1", params![id, value])?,
+    };
+    Ok(())
 }
 
 pub fn create_folder(conn: &Connection, title: &str, parent_id: Option<i64>) -> Result<i64> {
-    let position: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position) + 1, 0) FROM folders WHERE parent_id IS ?1",
-        [parent_id],
-        |r| r.get(0),
-    )?;
+    let position = next_position(conn, parent_id)?;
     conn.execute(
         "INSERT INTO folders (title, parent_id, position) VALUES (?1, ?2, ?3)",
         params![title, parent_id, position],
@@ -947,11 +1030,6 @@ pub fn delete_folder(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn move_folder(conn: &Connection, id: i64, parent_id: Option<i64>, before: Option<i64>) -> Result<()> {
-    if let Some(parent) = parent_id {
-        if folder_subtree(conn, id)?.contains(&parent) {
-            return Err(Error::msg("A folder cannot be moved into itself"));
-        }
-    }
-    reorder(conn, "folders", "parent_id", parent_id, id, before)
+pub fn move_folder(conn: &Connection, id: i64, parent_id: Option<i64>, before: Option<Item>) -> Result<()> {
+    move_item(conn, Item::Folder { id }, parent_id, before)
 }

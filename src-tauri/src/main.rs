@@ -117,6 +117,7 @@ fn main() {
             commands::rename_folder,
             commands::delete_folder,
             commands::move_folder,
+            commands::set_pinned,
             commands::set_folder_expanded,
             commands::refresh_feeds,
             commands::import_opml,

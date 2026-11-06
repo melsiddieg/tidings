@@ -8,6 +8,7 @@ import type {
   Candidate,
   Counts,
   FeedPatch,
+  ItemRef,
   ImportStats,
   ListQuery,
   ReaderPage,
@@ -58,14 +59,15 @@ export const api = {
     call<number>('add_feed', { url, folderId, title }),
   updateFeed: (id: number, patch: FeedPatch) => call<void>('update_feed', { id, patch }),
   deleteFeed: (id: number) => call<void>('delete_feed', { id }),
-  moveFeed: (id: number, folderId: number | null, beforeId: number | null) =>
-    call<void>('move_feed', { id, folderId, beforeId }),
+  moveFeed: (id: number, folderId: number | null, before: ItemRef | null) =>
+    call<void>('move_feed', { id, folderId, before }),
+  setPinned: (item: ItemRef, pinned: boolean) => call<void>('set_pinned', { item, pinned }),
   createFolder: (title: string, parentId: number | null) =>
     call<number>('create_folder', { title, parentId }),
   renameFolder: (id: number, title: string) => call<void>('rename_folder', { id, title }),
   deleteFolder: (id: number) => call<void>('delete_folder', { id }),
-  moveFolder: (id: number, parentId: number | null, beforeId: number | null) =>
-    call<void>('move_folder', { id, parentId, beforeId }),
+  moveFolder: (id: number, parentId: number | null, before: ItemRef | null) =>
+    call<void>('move_folder', { id, parentId, before }),
   setFolderExpanded: (id: number, expanded: boolean) =>
     call<void>('set_folder_expanded', { id, expanded }),
   refresh: (opts: { feedIds?: number[]; folderId?: number } = {}) =>

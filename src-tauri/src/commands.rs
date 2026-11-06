@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, ListQuery, Scope, Tree};
+use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
 use crate::discover::{self, Candidate};
 use crate::error::{Error, Result};
 use crate::feeds;
@@ -264,9 +264,15 @@ pub fn move_feed(
     state: AppStateRef<'_>,
     id: i64,
     folder_id: Option<i64>,
-    before_id: Option<i64>,
+    before: Option<Item>,
 ) -> Result<()> {
-    db::move_feed(&state.db(), id, folder_id, before_id)
+    db::move_feed(&state.db(), id, folder_id, before)
+}
+
+/// Adds a feed or folder to Favorites, or removes it.
+#[tauri::command]
+pub fn set_pinned(state: AppStateRef<'_>, item: Item, pinned: bool) -> Result<()> {
+    db::set_pinned(&state.db(), item, pinned)
 }
 
 #[tauri::command]
@@ -297,9 +303,9 @@ pub fn move_folder(
     state: AppStateRef<'_>,
     id: i64,
     parent_id: Option<i64>,
-    before_id: Option<i64>,
+    before: Option<Item>,
 ) -> Result<()> {
-    db::move_folder(&state.db(), id, parent_id, before_id)
+    db::move_folder(&state.db(), id, parent_id, before)
 }
 
 #[tauri::command]

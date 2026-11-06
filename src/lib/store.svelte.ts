@@ -7,6 +7,9 @@ import type {
   Feed,
   FeedUpdated,
   Filter,
+  FolderNode,
+  ItemRef,
+  TreeChild,
   ListQuery,
   MenuItem,
   RefreshProgress,
@@ -15,7 +18,7 @@ import type {
   Tab,
   Tree,
 } from './types';
-import { buildTree, flattenFeeds } from './util';
+import { buildTree, childRef, flattenFeeds, sameItem } from './util';
 
 const PAGE = 150;
 const MAIN_TAB: Tab = { id: 'main', kind: 'main' };
@@ -118,6 +121,27 @@ class Store {
   root = $derived(buildTree(this.tree));
   feedOrder = $derived(flattenFeeds(this.root));
   feedById = $derived(new Map(this.tree.feeds.map((f) => [f.id, f])));
+  nodeById = $derived.by(() => {
+    const map = new Map<number, FolderNode>();
+    const walk = (children: TreeChild[]) => {
+      for (const c of children) {
+        if (c.kind === 'folder') {
+          map.set(c.node.folder.id, c.node);
+          walk(c.node.children);
+        }
+      }
+    };
+    walk(this.root.children);
+    return map;
+  });
+  /** Favorite feeds and folders, in the order they were added. */
+  favorites = $derived.by(() => {
+    const items = [
+      ...this.tree.folders.filter((f) => f.pinned > 0).map((f) => ({ ref: { kind: 'folder', id: f.id } as ItemRef, title: f.title, pinned: f.pinned })),
+      ...this.tree.feeds.filter((f) => f.pinned > 0).map((f) => ({ ref: { kind: 'feed', id: f.id } as ItemRef, title: f.title, pinned: f.pinned })),
+    ];
+    return items.sort((a, b) => a.pinned - b.pinned || a.title.localeCompare(b.title));
+  });
   folderById = $derived(new Map(this.tree.folders.map((f) => [f.id, f])));
   unreadTotal = $derived(this.tree.feeds.reduce((sum, f) => sum + f.unread, 0));
   folderUnread = $derived.by(() => {
@@ -728,21 +752,40 @@ class Store {
     );
   }
 
-  async moveFeed(id: number, folderId: number | null, beforeId: number | null) {
+  /** Moves a feed or folder into `parentId` (null = top level), before `before` or at the end. */
+  async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null) {
+    if (sameItem(item, before)) return;
     try {
-      await api.moveFeed(id, folderId, beforeId);
+      if (item.kind === 'feed') await api.moveFeed(item.id, parentId, before);
+      else await api.moveFolder(item.id, parentId, before);
       await this.reloadTree();
     } catch (err) {
       this.error(err);
     }
   }
 
-  async moveFolder(id: number, parentId: number | null, beforeId: number | null) {
+  /** The item that follows `target` in its parent, once `moving` is taken out. */
+  itemAfter(parentId: number | null, target: ItemRef, moving: ItemRef): ItemRef | null {
+    const siblings = (parentId == null ? this.root.children : (this.nodeById.get(parentId)?.children ?? []))
+      .map(childRef)
+      .filter((r) => !sameItem(r, moving));
+    const index = siblings.findIndex((r) => sameItem(r, target));
+    return index >= 0 ? (siblings[index + 1] ?? null) : null;
+  }
+
+  isPinned(item: ItemRef): boolean {
+    const pinned = item.kind === 'feed' ? this.feedById.get(item.id)?.pinned : this.folderById.get(item.id)?.pinned;
+    return (pinned ?? 0) > 0;
+  }
+
+  async setPinned(item: ItemRef, pinned: boolean) {
+    const target = item.kind === 'feed' ? this.feedById.get(item.id) : this.folderById.get(item.id);
+    if (target) target.pinned = pinned ? Math.floor(Date.now() / 1000) : 0;
     try {
-      await api.moveFolder(id, parentId, beforeId);
-      await this.reloadTree();
+      await api.setPinned(item, pinned);
     } catch (err) {
       this.error(err);
+      await this.reloadTree();
     }
   }
 

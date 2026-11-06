@@ -28,7 +28,9 @@ Source: <https://github.com/melsiddieg/tidings>
 - Light, dark, sepia and system themes, six accent colors, serif/sans/mono reading font, adjustable text size.
 
 **Subscriptions**
-- Folders with any depth. Drag and drop feeds and folders to reorder or move them.
+- Folders with any depth. Drag and drop to put any feed or folder anywhere, including
+  feeds above folders.
+- Favorites: pin feeds and folders to the top of the sidebar.
 - Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
 - Per-feed properties: custom name, update interval, archive rule, always load full text, pause updates.

@@ -1,4 +1,4 @@
-import type { Feed, Folder, FolderNode, RootNode, Tree } from './types';
+import type { Feed, Folder, FolderNode, ItemRef, RootNode, TreeChild, Tree } from './types';
 
 const DAY = 86_400_000;
 
@@ -110,35 +110,43 @@ export function buildTree(tree: Tree): RootNode {
     list.push(f);
     feedsByFolder.set(f.folderId, list);
   }
-  const sortFolders = (a: Folder, b: Folder) => a.position - b.position || a.title.localeCompare(b.title);
-  const sortFeeds = (a: Feed, b: Feed) => a.position - b.position || a.title.localeCompare(b.title);
   const seen = new Set<number>();
-  const build = (folder: Folder): FolderNode => {
-    seen.add(folder.id);
-    return {
-      folder,
-      folders: (byParent.get(folder.id) ?? [])
-        .filter((f) => !seen.has(f.id))
-        .sort(sortFolders)
-        .map(build),
-      feeds: (feedsByFolder.get(folder.id) ?? []).sort(sortFeeds),
-    };
+  // Feeds and folders share one order; on a tie, folders come first.
+  const childrenOf = (parent: number | null): TreeChild[] => {
+    const folders = (byParent.get(parent) ?? []).filter((f) => !seen.has(f.id));
+    folders.forEach((f) => seen.add(f.id));
+    const items: [number, number, string, () => TreeChild][] = [
+      ...folders.map((f): [number, number, string, () => TreeChild] => [f.position, 0, f.title, () => ({ kind: 'folder', node: { folder: f, children: childrenOf(f.id) } })]),
+      ...(feedsByFolder.get(parent) ?? []).map((f): [number, number, string, () => TreeChild] => [f.position, 1, f.title, () => ({ kind: 'feed', feed: f })]),
+    ];
+    items.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]));
+    return items.map((i) => i[3]());
   };
-  return {
-    folders: (byParent.get(null) ?? []).sort(sortFolders).map(build),
-    feeds: (feedsByFolder.get(null) ?? []).sort(sortFeeds),
-  };
+  return { children: childrenOf(null) };
+}
+
+export function childKey(child: TreeChild): string {
+  return child.kind === 'folder' ? `folder:${child.node.folder.id}` : `feed:${child.feed.id}`;
+}
+
+export function childRef(child: TreeChild): ItemRef {
+  return child.kind === 'folder' ? { kind: 'folder', id: child.node.folder.id } : { kind: 'feed', id: child.feed.id };
+}
+
+export function sameItem(a: ItemRef | null | undefined, b: ItemRef | null | undefined): boolean {
+  return !!a && !!b && a.kind === b.kind && a.id === b.id;
 }
 
 /** Feeds in the same order the sidebar shows them. */
 export function flattenFeeds(root: RootNode): Feed[] {
   const out: Feed[] = [];
-  const walk = (node: FolderNode) => {
-    node.folders.forEach(walk);
-    out.push(...node.feeds);
+  const walk = (children: TreeChild[]) => {
+    for (const c of children) {
+      if (c.kind === 'feed') out.push(c.feed);
+      else walk(c.node.children);
+    }
   };
-  root.folders.forEach(walk);
-  out.push(...root.feeds);
+  walk(root.children);
   return out;
 }
 
@@ -162,8 +170,8 @@ export function folderOptions(root: RootNode, exclude?: number): { id: number; t
   const walk = (node: FolderNode, depth: number) => {
     if (node.folder.id === exclude) return;
     out.push({ id: node.folder.id, title: node.folder.title, depth });
-    node.folders.forEach((child) => walk(child, depth + 1));
+    for (const c of node.children) if (c.kind === 'folder') walk(c.node, depth + 1);
   };
-  root.folders.forEach((n) => walk(n, 0));
+  for (const c of root.children) if (c.kind === 'folder') walk(c.node, 0);
   return out;
 }

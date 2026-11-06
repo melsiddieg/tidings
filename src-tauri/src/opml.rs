@@ -172,15 +172,31 @@ pub fn export(conn: &Connection) -> Result<String> {
         folders: &[db::Folder],
         feeds: &[db::Feed],
     ) -> std::io::Result<()> {
-        for folder in folders.iter().filter(|f| f.parent_id == parent) {
-            let mut el = BytesStart::new("outline");
-            el.push_attribute(("text", folder.title.as_str()));
-            el.push_attribute(("title", folder.title.as_str()));
-            writer.write_event(Event::Start(el))?;
-            write_level(writer, Some(folder.id), folders, feeds)?;
-            writer.write_event(Event::End(BytesEnd::new("outline")))?;
+        // Feeds and folders share one order, so write them interleaved.
+        enum Child<'a> {
+            Folder(&'a db::Folder),
+            Feed(&'a db::Feed),
         }
-        for feed in feeds.iter().filter(|f| f.folder_id == parent) {
+        let mut kids: Vec<(i64, u8, Child)> = folders
+            .iter()
+            .filter(|f| f.parent_id == parent)
+            .map(|f| (f.position, 0, Child::Folder(f)))
+            .chain(feeds.iter().filter(|f| f.folder_id == parent).map(|f| (f.position, 1, Child::Feed(f))))
+            .collect();
+        kids.sort_by_key(|(pos, kind, _)| (*pos, *kind));
+        for (_, _, child) in kids {
+            let feed = match child {
+                Child::Folder(folder) => {
+                    let mut el = BytesStart::new("outline");
+                    el.push_attribute(("text", folder.title.as_str()));
+                    el.push_attribute(("title", folder.title.as_str()));
+                    writer.write_event(Event::Start(el))?;
+                    write_level(writer, Some(folder.id), folders, feeds)?;
+                    writer.write_event(Event::End(BytesEnd::new("outline")))?;
+                    continue;
+                }
+                Child::Feed(feed) => feed,
+            };
             let mut el = BytesStart::new("outline");
             el.push_attribute(("type", "rss"));
             el.push_attribute(("text", feed.title.as_str()));

@@ -1,6 +1,6 @@
 //! Integration tests that run every database query against a real SQLite file.
 
-use crate::db::{self, ListQuery, Scope};
+use crate::db::{self, Item, ListQuery, Scope};
 use crate::feeds;
 use crate::opml;
 use crate::sanitize;
@@ -201,7 +201,7 @@ fn full_database_workflow() {
     assert_eq!(added, 0);
 
     // Moving: feed reordering and folder cycle protection.
-    db::move_feed(&conn, feed_b, Some(rust), Some(feed_a)).unwrap();
+    db::move_feed(&conn, feed_b, Some(rust), Some(Item::Feed { id: feed_a })).unwrap();
     let tree = db::tree(&conn).unwrap();
     let b = tree.feeds.iter().find(|f| f.id == feed_b).unwrap();
     let a = tree.feeds.iter().find(|f| f.id == feed_a).unwrap();
@@ -270,12 +270,82 @@ fn folders_can_be_reordered() {
         f.sort_by_key(|x| x.position);
         f.into_iter().map(|x| x.title).collect()
     };
-    db::move_folder(&conn, c, None, Some(a)).unwrap(); // C before A
+    db::move_folder(&conn, c, None, Some(Item::Folder { id: a })).unwrap(); // C before A
     assert_eq!(order(&conn), ["C", "A", "B"]);
-    db::move_folder(&conn, c, None, Some(b)).unwrap(); // C between A and B
+    db::move_folder(&conn, c, None, Some(Item::Folder { id: b })).unwrap(); // C between A and B
     assert_eq!(order(&conn), ["A", "C", "B"]);
     db::move_folder(&conn, a, None, None).unwrap(); // A to the end
     assert_eq!(order(&conn), ["C", "B", "A"]);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Top-level children in display order, as "kind:title".
+fn root_order(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut out: Vec<(i64, u8, String)> = Vec::new();
+    for f in db::folders(conn).unwrap().into_iter().filter(|f| f.parent_id.is_none()) {
+        out.push((f.position, 0, format!("folder:{}", f.title)));
+    }
+    for f in db::feeds(conn).unwrap().into_iter().filter(|f| f.folder_id.is_none()) {
+        out.push((f.position, 1, format!("feed:{}", f.title)));
+    }
+    out.sort();
+    out.into_iter().map(|(_, _, s)| s).collect()
+}
+
+#[test]
+fn feeds_and_folders_share_one_order() {
+    let (conn, dir) = temp_db();
+    let tech = db::create_folder(&conn, "Tech", None).unwrap();
+    let news = db::create_folder(&conn, "News", None).unwrap();
+    let jb = db::insert_feed(&conn, "https://jb.example/rss", None, Some("Jupiter"), None).unwrap();
+    assert_eq!(root_order(&conn), ["folder:Tech", "folder:News", "feed:Jupiter"]);
+
+    // A feed can go to the very top, above every folder.
+    db::move_feed(&conn, jb, None, Some(Item::Folder { id: tech })).unwrap();
+    assert_eq!(root_order(&conn), ["feed:Jupiter", "folder:Tech", "folder:News"]);
+    // ...or between two folders.
+    db::move_feed(&conn, jb, None, Some(Item::Folder { id: news })).unwrap();
+    assert_eq!(root_order(&conn), ["folder:Tech", "feed:Jupiter", "folder:News"]);
+    // A folder can go below a feed.
+    db::move_folder(&conn, tech, None, None).unwrap();
+    assert_eq!(root_order(&conn), ["feed:Jupiter", "folder:News", "folder:Tech"]);
+    // New items go to the end of the shared order.
+    db::insert_feed(&conn, "https://late.example/rss", None, Some("Late"), None).unwrap();
+    assert_eq!(root_order(&conn).last().unwrap(), "feed:Late");
+
+    // The OPML export keeps the mixed order.
+    let xml = opml::export(&conn).unwrap();
+    let pos = |needle: &str| xml.find(needle).unwrap();
+    assert!(pos("Jupiter") < pos("News") && pos("News") < pos("Tech") && pos("Tech") < pos("Late"));
+
+    // Favorites.
+    db::set_pinned(&conn, Item::Feed { id: jb }, true).unwrap();
+    db::set_pinned(&conn, Item::Folder { id: news }, true).unwrap();
+    let tree = db::tree(&conn).unwrap();
+    assert!(tree.feeds.iter().find(|f| f.id == jb).unwrap().pinned > 0);
+    assert!(tree.folders.iter().find(|f| f.id == news).unwrap().pinned > 0);
+    db::set_pinned(&conn, Item::Feed { id: jb }, false).unwrap();
+    assert_eq!(db::feed(&conn, jb).unwrap().pinned, 0);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn migration_keeps_the_old_look() {
+    // Before v2, folders and feeds were numbered separately, both from 0.
+    let (conn, dir) = temp_db();
+    let a = db::create_folder(&conn, "A", None).unwrap();
+    let b = db::create_folder(&conn, "B", None).unwrap();
+    let f = db::insert_feed(&conn, "https://f.example/rss", None, Some("F"), None).unwrap();
+    conn.execute("UPDATE folders SET position = 0 WHERE id = ?1", [a]).unwrap();
+    conn.execute("UPDATE folders SET position = 1 WHERE id = ?1", [b]).unwrap();
+    conn.execute("UPDATE feeds SET position = 0 WHERE id = ?1", [f]).unwrap();
+    db::normalize_positions(&conn).unwrap();
+    // Folders stay first, as the old sidebar showed them.
+    assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 2);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -385,4 +455,38 @@ async fn live_network() {
     // resolve names on its own.)
     assert!(crate::net::resolve_public("localhost.localtest.me").await.is_err());
     assert!(crate::net::resolve_public("blog.rust-lang.org").await.is_ok());
+}
+
+/// Migrates a copy of a real database: TIDINGS_DB_COPY=/path cargo test -- --ignored real_db
+#[test]
+#[ignore]
+fn real_db_migration() {
+    let path = std::env::var("TIDINGS_DB_COPY").expect("set TIDINGS_DB_COPY");
+    let before: Vec<(i64, Option<i64>, String)> = {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let mut s = c.prepare("SELECT id, parent_id, title FROM folders ORDER BY parent_id, position, lower(title)").unwrap();
+        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(|x| x.unwrap()).collect()
+    };
+    let conn = db::open(std::path::Path::new(&path)).unwrap();
+    let tree = db::tree(&conn).unwrap();
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    // Folder order inside each parent is unchanged.
+    let mut after = tree.folders.clone();
+    after.sort_by_key(|f| (f.parent_id, f.position));
+    let after: Vec<(i64, Option<i64>, String)> = after.into_iter().map(|f| (f.id, f.parent_id, f.title)).collect();
+    assert_eq!(v, 2);
+    assert_eq!(before.len(), after.len());
+    let by_parent = |list: &[(i64, Option<i64>, String)], p: Option<i64>| list.iter().filter(|x| x.1 == p).map(|x| x.0).collect::<Vec<_>>();
+    for f in &before {
+        assert_eq!(by_parent(&before, f.1), by_parent(&after, f.1), "folder order changed under {:?}", f.1);
+    }
+    // Within every parent, all folders come before all feeds (the old look).
+    for parent in tree.folders.iter().map(|f| Some(f.id)).chain([None]) {
+        let max_folder = tree.folders.iter().filter(|f| f.parent_id == parent).map(|f| f.position).max();
+        let min_feed = tree.feeds.iter().filter(|f| f.folder_id == parent).map(|f| f.position).min();
+        if let (Some(a), Some(b)) = (max_folder, min_feed) {
+            assert!(a < b, "feeds above folders under {parent:?}");
+        }
+    }
+    println!("migrated: {} folders, {} feeds", tree.folders.len(), tree.feeds.len());
 }

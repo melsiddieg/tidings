@@ -2,46 +2,26 @@
   import Icon from '../lib/Icon.svelte';
   import TreeFolder from './TreeFolder.svelte';
   import FeedRow from './FeedRow.svelte';
-  import { drag, endDrag, startDrag } from '../lib/dnd.svelte';
+  import { drag, endDrag, startDrag, zoneFor, zoneOf, type Zone } from '../lib/dnd.svelte';
   import { store } from '../lib/store.svelte';
-  import type { FolderNode } from '../lib/types';
-  import { countLabel } from '../lib/util';
+  import type { FolderNode, ItemRef } from '../lib/types';
+  import { childKey, countLabel, sameItem } from '../lib/util';
 
   let { node, depth }: { node: FolderNode; depth: number } = $props();
 
   const folder = $derived(node.folder);
+  const ref = $derived<ItemRef>({ kind: 'folder', id: node.folder.id });
   const unread = $derived(store.folderUnread.get(folder.id) ?? 0);
   const selected = $derived(store.scope.kind === 'folder' && store.scope.id === folder.id);
-  const dropKey = $derived(`folder:${folder.id}`);
-  const zone = $derived(drag.over?.startsWith(`${dropKey}:`) ? drag.over.slice(dropKey.length + 1) : null);
-
-  type Zone = 'before' | 'into' | 'after';
-
-  /** The sibling that follows this folder once `movingId` is taken out of the list. */
-  function folderAfter(movingId: number): number | null {
-    const siblings = store.tree.folders
-      .filter((f) => f.parentId === folder.parentId && f.id !== movingId)
-      .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title));
-    const index = siblings.findIndex((f) => f.id === folder.id);
-    return siblings[index + 1]?.id ?? null;
-  }
-
-  /** Where a dragged item would land: above this folder, inside it, or below it. */
-  function zoneFor(e: DragEvent): Zone {
-    // Feeds always go inside a folder; feeds and folders are separate lists.
-    if (drag.item?.type !== 'folder') return 'into';
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const y = (e.clientY - rect.top) / rect.height;
-    if (y < 0.28) return 'before';
-    // An open folder's children follow its row, so "below" would be ambiguous there.
-    if (y > 0.72 && !folder.expanded) return 'after';
-    return 'into';
-  }
+  const key = $derived(`folder:${folder.id}`);
+  const zone = $derived(zoneFor(key));
+  const pinned = $derived(folder.pinned > 0);
 
   function menu(e: MouseEvent) {
     store.openMenu(e, [
       { label: 'Refresh', icon: 'refresh', action: () => store.refresh({ folderId: folder.id }) },
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'folder', id: folder.id }) },
+      { label: pinned ? 'Remove from Favorites' : 'Add to Favorites', icon: 'star', action: () => store.setPinned(ref, !pinned) },
       { separator: true },
       { label: 'Add feed here…', icon: 'plus', action: () => (store.dialog = { kind: 'add-feed', folderId: folder.id }) },
       { label: 'New subfolder…', icon: 'folder-plus', action: () => (store.dialog = { kind: 'folder', folderId: null, parentId: folder.id }) },
@@ -51,28 +31,31 @@
     ]);
   }
 
+  /** Top edge: before this folder. Middle: inside it. Bottom edge: after it.
+   *  An open folder's children follow its row, so its bottom edge means "inside". */
+  function where(e: DragEvent): Zone {
+    const z = zoneOf(e, true);
+    return z === 'after' && folder.expanded ? 'into' : z;
+  }
+
   function ondragover(e: DragEvent) {
     const item = drag.item;
-    if (!item || (item.type === 'folder' && item.id === folder.id)) return;
+    if (!item || sameItem(item, ref)) return;
     e.preventDefault();
     e.stopPropagation();
-    drag.over = `${dropKey}:${zoneFor(e)}`;
+    drag.over = `${key}:${where(e)}`;
   }
 
   function ondrop(e: DragEvent) {
     e.preventDefault();
     e.stopPropagation();
     const item = drag.item;
-    const where = zoneFor(e);
+    const z = where(e);
     endDrag();
-    if (!item) return;
-    if (item.type === 'feed') {
-      store.moveFeed(item.id, folder.id, null);
-    } else if (item.id !== folder.id) {
-      if (where === 'before') store.moveFolder(item.id, folder.parentId, folder.id);
-      else if (where === 'after') store.moveFolder(item.id, folder.parentId, folderAfter(item.id));
-      else store.moveFolder(item.id, folder.id, null);
-    }
+    if (!item || sameItem(item, ref)) return;
+    if (z === 'into') store.moveItem(item, folder.id, null);
+    else if (z === 'before') store.moveItem(item, folder.parentId, ref);
+    else store.moveItem(item, folder.parentId, store.itemAfter(folder.parentId, ref, item));
   }
 </script>
 
@@ -88,7 +71,7 @@
   aria-expanded={folder.expanded}
   tabindex="-1"
   draggable="true"
-  ondragstart={(e) => startDrag(e, { type: 'folder', id: folder.id })}
+  ondragstart={(e) => startDrag(e, ref)}
   ondragend={endDrag}
   {ondragover}
   ondragleave={() => zone && (drag.over = null)}
@@ -113,10 +96,11 @@
 </div>
 
 {#if folder.expanded}
-  {#each node.folders as child (child.folder.id)}
-    <TreeFolder node={child} depth={depth + 1} />
-  {/each}
-  {#each node.feeds as feed (feed.id)}
-    <FeedRow {feed} depth={depth + 1} />
+  {#each node.children as child (childKey(child))}
+    {#if child.kind === 'folder'}
+      <TreeFolder node={child.node} depth={depth + 1} />
+    {:else}
+      <FeedRow feed={child.feed} depth={depth + 1} />
+    {/if}
   {/each}
 {/if}

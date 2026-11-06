@@ -12,6 +12,8 @@ export interface Folder {
   title: string;
   position: number;
   expanded: boolean;
+  /** Unix time it was added to Favorites, 0 if not a favorite. */
+  pinned: number;
 }
 
 export interface Feed {
@@ -35,6 +37,8 @@ export interface Feed {
   lastError: string | null;
   unread: number;
   total: number;
+  /** Unix time it was added to Favorites, 0 if not a favorite. */
+  pinned: number;
 }
 
 export interface Tree {
@@ -169,15 +173,18 @@ export type Tab =
   | { id: string; kind: 'article'; articleId: number; feedId: number | null; title: string }
   | { id: string; kind: 'web'; url: string; title: string };
 
+/** A feed or folder. Both share one order inside their parent. */
+export type ItemRef = { kind: 'folder'; id: number } | { kind: 'feed'; id: number };
+
+export type TreeChild = { kind: 'folder'; node: FolderNode } | { kind: 'feed'; feed: Feed };
+
 export interface FolderNode {
   folder: Folder;
-  folders: FolderNode[];
-  feeds: Feed[];
+  children: TreeChild[];
 }
 
 export interface RootNode {
-  folders: FolderNode[];
-  feeds: Feed[];
+  children: TreeChild[];
 }
 
 export interface MenuItem {
