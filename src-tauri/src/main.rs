@@ -6,6 +6,7 @@ mod db;
 mod discover;
 mod error;
 mod feeds;
+mod media;
 mod menu;
 mod net;
 mod opml;

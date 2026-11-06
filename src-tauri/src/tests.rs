@@ -359,6 +359,27 @@ async fn live_network() {
     assert!(page.html.len() > 500);
     println!("reader: {} ({} bytes)", page.title, page.html.len());
 
+    // Podcast audio: tracker stripping and a ranged slice through the media proxy.
+    let cache = crate::media::ResolvedUrls::default();
+    let lup = crate::media::strip_trackers(
+        "https://dts.podtrac.com/redirect.mp3/mgln.ai/e/211/rss.art19.com/episodes/b6a6899c-93e0-412a-9222-6ad13baca403.mp3",
+    );
+    assert!(lup.starts_with("https://rss.art19.com/"));
+    let chunk = crate::media::fetch(&net, &cache, &lup, Some("bytes=1000-")).await.unwrap();
+    assert_eq!(chunk.status, 206);
+    assert_eq!(chunk.bytes.len() as u64, crate::media::CHUNK);
+    println!("audio slice: {} bytes, {:?}, {}", chunk.bytes.len(), chunk.content_range, chunk.mime);
+
+    // A large podcast feed (about 19 MB) parses and keeps its audio enclosures.
+    let bsd = Url::parse("https://feeds.fireside.fm/bsdnow/rss").unwrap();
+    let resp = net.feed.get(bsd.as_str()).send().await.unwrap();
+    let bytes = crate::net::read_limited(resp, crate::net::MAX_FEED_BYTES).await.unwrap();
+    let started = std::time::Instant::now();
+    let podcast = feeds::parse_feed(&bytes, &bsd, true).unwrap();
+    let with_audio = podcast.articles.iter().filter(|a| a.enclosure_type.as_deref().is_some_and(|t| t.starts_with("audio/"))).count();
+    println!("bsdnow: {} episodes, {} with audio, parsed in {:?}", podcast.articles.len(), with_audio, started.elapsed());
+    assert!(with_audio > 100);
+
     // The image client's resolver must refuse names that point to private addresses.
     // (Checked on the resolver itself, because a proxy from the environment would
     // resolve names on its own.)

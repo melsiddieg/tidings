@@ -84,6 +84,16 @@ export function iconUrl(feedId: number, version: number | null): string | null {
   return `tidings://localhost/icon/${feedId}?v=${version}`;
 }
 
+/** Audio is streamed through the Rust media proxy, never fetched by the web view. */
+export function mediaUrl(url: string): string {
+  if (!inTauri) return url;
+  const bytes = new TextEncoder().encode(url);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `tidings://localhost/media/${b64}`;
+}
+
 export function errorText(err: unknown): string {
   if (typeof err === 'string') return err;
   if (err instanceof Error) return err.message;

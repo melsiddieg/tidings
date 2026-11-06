@@ -170,7 +170,7 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     id: a.id, feedId: a.feedId, title: a.title, url: a.url, author: a.author, published: a.published,
     isRead: a.isRead, isStarred: a.isStarred, isNew: a.isNew, html, blockedImages: blocked,
     showingFullText: full && !!a.full, hasFullText: !!a.full,
-    enclosureUrl: a.hasEnclosure ? 'https://cdn.example.com/episode.mp3' : null,
+    enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
   };
 }

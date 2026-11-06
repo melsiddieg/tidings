@@ -21,7 +21,9 @@ Source: <https://github.com/melsiddieg/tidings>
 - Status filters: All, Unread, New (this session), Starred.
 - Search over titles, text and authors.
 - Next/previous unread across feeds, and Akregator-style keyboard navigation (`?` lists all keys).
-- Podcast and video attachments are shown and open in your default app.
+- **Podcast player** with resume, seeking, 0.8×–2× speed and volume. Audio streams
+  through Tidings' own proxy in byte ranges, and download-tracking redirects
+  (Podtrac, Chartable, Podsights, OP3 and others) are skipped.
 - Right-to-left text (Arabic, Hebrew, Persian) is detected per article.
 - Light, dark, sepia and system themes, six accent colors, serif/sans/mono reading font, adjustable text size.
 

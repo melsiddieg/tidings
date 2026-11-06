@@ -33,6 +33,8 @@ pub struct AppState {
     pub images: Mutex<LruCache<String, Arc<CachedImage>>>,
     /// Recently extracted web pages (reader tabs), keyed by URL.
     pub pages: Mutex<LruCache<String, Arc<crate::reader::Extracted>>>,
+    /// Final audio URLs after redirects, for the podcast player.
+    pub media: crate::media::ResolvedUrls,
     pub data_dir: PathBuf,
 }
 
@@ -57,6 +59,7 @@ impl AppState {
             progress: Mutex::new(Progress::default()),
             images: Mutex::new(LruCache::new(NonZeroUsize::new(400).unwrap())),
             pages: Mutex::new(LruCache::new(NonZeroUsize::new(40).unwrap())),
+            media: Default::default(),
             data_dir,
         })
     }

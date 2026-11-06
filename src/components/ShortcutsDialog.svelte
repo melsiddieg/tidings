@@ -25,6 +25,7 @@
         [['S'], 'Star or unstar'],
         [['M'], 'Mark read or unread'],
         [['C'], 'Copy link'],
+        [['⇧', 'P'], 'Play or pause podcast'],
         [['⇧', 'A'], 'Mark all as read'],
         [['Delete'], 'Delete article'],
         [['R'], 'Refresh this feed or folder'],

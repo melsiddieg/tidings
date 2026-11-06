@@ -154,7 +154,10 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let etag = header(ETAG);
     let last_modified = header(LAST_MODIFIED);
     let bytes = net::read_limited(response, net::MAX_FEED_BYTES).await?;
-    let parsed = parse_feed(&bytes, &final_url, settings.strip_tracking)?;
+    let (parse_url, strip) = (final_url.clone(), settings.strip_tracking);
+    let parsed = tokio::task::spawn_blocking(move || parse_feed(&bytes, &parse_url, strip))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))??;
 
     let (mode, value) =
         retention_for(info.retention_mode.as_deref(), info.retention_value, &settings);

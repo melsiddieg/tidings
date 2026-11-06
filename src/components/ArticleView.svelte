@@ -4,6 +4,7 @@
   import FeedIcon from './FeedIcon.svelte';
   import ArticleBody from './ArticleBody.svelte';
   import { api, errorText } from '../lib/api';
+  import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
   import type { ArticleDetail } from '../lib/types';
   import { copyText, enclosureLabel, hostOf, longTime } from '../lib/util';
@@ -199,9 +200,28 @@
           {#if detail.author}<div class="byline" dir="auto">By {detail.author}</div>{/if}
         </header>
 
-        {#if detail.enclosureUrl}
+        {#if detail.enclosureUrl && isAudio(detail.enclosureType, detail.enclosureUrl)}
+          {@const d = detail}
+          {@const current = player.isCurrent(d.enclosureUrl)}
+          <div class="enclosure episode-card" class:current>
+            <button
+              class="episode-play"
+              aria-label={current && player.playing ? 'Pause' : 'Play episode'}
+              onclick={() => d.enclosureUrl && player.play({ articleId: d.id, feedId: d.feedId, title: d.title, url: d.enclosureUrl, type: d.enclosureType })}
+            >
+              <Icon name={current && player.playing ? 'pause-fill' : 'play'} size={18} stroke={0} />
+            </button>
+            <span class="enclosure-text">
+              <strong>{current ? (player.playing ? 'Playing' : 'Paused') : 'Play episode'}</strong>
+              <span>{hostOf(d.enclosureUrl)} · streamed privately through Tidings</span>
+            </span>
+            <button class="icon-btn" title="Open the audio file in your default app" onclick={() => store.openExternal(d.enclosureUrl)}>
+              <Icon name="external" size={14} />
+            </button>
+          </div>
+        {:else if detail.enclosureUrl}
           <button class="enclosure" onclick={() => store.openExternal(detail?.enclosureUrl)}>
-            <span class="enclosure-icon"><Icon name={detail.enclosureType?.startsWith('audio') ? 'headphones' : 'paperclip'} size={18} /></span>
+            <span class="enclosure-icon"><Icon name="paperclip" size={18} /></span>
             <span class="enclosure-text">
               <strong>{enclosureLabel(detail.enclosureType)}</strong>
               <span>{hostOf(detail.enclosureUrl)} · opens in your default app</span>

@@ -13,7 +13,8 @@ use reqwest::{Client, ClientBuilder, Proxy, Response};
 use crate::error::{Error, Result};
 use crate::settings::Settings;
 
-pub const MAX_FEED_BYTES: usize = 20 * 1024 * 1024;
+// Podcast feeds with long archives can exceed 20 MB (BSD Now is about 19 MB).
+pub const MAX_FEED_BYTES: usize = 50 * 1024 * 1024;
 pub const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 pub const MAX_ICON_BYTES: usize = 512 * 1024;

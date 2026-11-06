@@ -9,6 +9,8 @@
   import ReaderTab from './components/ReaderTab.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
   import Toasts from './components/Toasts.svelte';
+  import PlayerBar from './components/PlayerBar.svelte';
+  import { player } from './lib/player.svelte';
   import AddFeedDialog from './components/AddFeedDialog.svelte';
   import FeedDialog from './components/FeedDialog.svelte';
   import FolderDialog from './components/FolderDialog.svelte';
@@ -150,6 +152,10 @@
       case 'A':
         store.markAllRead();
         break;
+      case 'P':
+        if (!player.episode) return;
+        player.toggle();
+        break;
       case 'x':
         if (!onMain) store.closeTab(store.activeTabId);
         else return;
@@ -201,6 +207,7 @@
       </section>
     {/each}
   </main>
+  <PlayerBar />
 
   {#if store.dialog?.kind === 'add-feed'}
     <AddFeedDialog dialog={store.dialog} />
@@ -225,7 +232,7 @@
 <style>
   .app {
     display: grid;
-    grid-template-rows: var(--titlebar-h) 1fr;
+    grid-template-rows: var(--titlebar-h) minmax(0, 1fr) auto;
     height: 100vh;
     background: var(--bg-titlebar);
     opacity: 0;

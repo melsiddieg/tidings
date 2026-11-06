@@ -4,6 +4,7 @@
 //!   returns it. The web view never contacts image hosts itself, so no cookies,
 //!   no referrer, and the proxy setting applies to images too.
 //! - `tidings://localhost/icon/<feed id>` returns the stored favicon of a feed.
+//! - `tidings://localhost/media/<base64url>` streams podcast audio in byte ranges.
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use reqwest::header::ACCEPT;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{AppHandle, Manager};
 
+use crate::media;
 use crate::net;
 use crate::state::{AppState, CachedImage};
 
@@ -37,7 +39,14 @@ pub async fn handle(app: &AppHandle, request: Request<Vec<u8>>) -> Response<Vec<
     };
     let state = state.inner().clone();
     let path = request.uri().path().to_string();
-    if let Some(rest) = path.strip_prefix("/img/") {
+    let range = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if let Some(rest) = path.strip_prefix("/media/") {
+        proxy_media(&state, rest, range.as_deref()).await
+    } else if let Some(rest) = path.strip_prefix("/img/") {
         proxy_image(&state, rest).await
     } else if let Some(rest) = path.strip_prefix("/icon/") {
         feed_icon(&state, rest)
@@ -56,22 +65,54 @@ fn feed_icon(state: &AppState, rest: &str) -> Response<Vec<u8>> {
     }
 }
 
-async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
-    let Some(target) = URL_SAFE_NO_PAD
+/// Decodes and checks a proxied URL: http(s) only, and no private addresses
+/// unless the user routes traffic through their own proxy.
+fn decode_target(state: &AppState, encoded: &str) -> Result<String, StatusCode> {
+    let target = URL_SAFE_NO_PAD
         .decode(encoded.trim_end_matches('/'))
         .ok()
         .and_then(|b| String::from_utf8(b).ok())
-    else {
-        return empty(StatusCode::BAD_REQUEST);
-    };
-    let Ok(url) = url::Url::parse(&target) else { return empty(StatusCode::BAD_REQUEST) };
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let url = url::Url::parse(&target).map_err(|_| StatusCode::BAD_REQUEST)?;
     if !matches!(url.scheme(), "http" | "https") {
-        return empty(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN);
     }
     let proxied = !state.settings().proxy.is_empty();
     if !proxied && !net::host_is_allowed_for_images(&url) {
-        return empty(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN);
     }
+    Ok(target)
+}
+
+async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Response<Vec<u8>> {
+    let target = match decode_target(state, encoded) {
+        Ok(t) => t,
+        Err(code) => return empty(code),
+    };
+    let source = if state.settings().strip_tracking { media::strip_trackers(&target) } else { target };
+    match media::fetch(&state.net(), &state.media, &source, range).await {
+        Ok(chunk) => {
+            let mut builder = Response::builder()
+                .status(chunk.status)
+                .header(header::CONTENT_TYPE, chunk.mime)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CONTENT_LENGTH, chunk.bytes.len())
+                .header(header::CACHE_CONTROL, "no-store")
+                .header("X-Content-Type-Options", "nosniff");
+            if let Some(cr) = chunk.content_range {
+                builder = builder.header(header::CONTENT_RANGE, cr);
+            }
+            builder.body(chunk.bytes).unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
+        }
+        Err(_) => empty(StatusCode::BAD_GATEWAY),
+    }
+}
+
+async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
+    let target = match decode_target(state, encoded) {
+        Ok(t) => t,
+        Err(code) => return empty(code),
+    };
 
     if let Some(hit) = state.images.lock().unwrap_or_else(|e| e.into_inner()).get(&target).cloned() {
         return image_response(&hit.mime, hit.bytes.clone(), 86_400);
@@ -80,7 +121,7 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
     let net = state.net();
     let response = match net
         .image
-        .get(url.as_str())
+        .get(target.as_str())
         .header(ACCEPT, "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8")
         .send()
         .await
