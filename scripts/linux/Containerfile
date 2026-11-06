@@ -1,0 +1,56 @@
+# Build environment for Linux x86_64 packages of Tidings.
+#
+# Runs natively on arm64 or x86_64 hosts. On arm64 (Apple silicon) it cross-compiles
+# to x86_64 using Ubuntu's multiarch packages, which is much faster than emulation.
+# Ubuntu 22.04 is used so the binary needs glibc 2.35 or newer: it runs on
+# Ubuntu 22.04+, Debian 12+, Fedora, Arch/CachyOS and their derivatives.
+FROM docker.io/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Native arch packages come from the default mirror; x86_64 (amd64) libraries from
+# the main archive. On an x86_64 host both lines describe the same architecture.
+RUN set -eux; \
+    native="$(dpkg --print-architecture)"; \
+    if [ "$native" != "amd64" ]; then \
+        dpkg --add-architecture amd64; \
+        sed -i "s/^deb /deb [arch=$native] /" /etc/apt/sources.list; \
+        printf '%s\n' \
+          'deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse' \
+          'deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse' \
+          'deb [arch=amd64] http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse' \
+          > /etc/apt/sources.list.d/amd64.list; \
+        cross="gcc-x86-64-linux-gnu g++-x86-64-linux-gnu"; \
+    else \
+        cross=""; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential $cross pkg-config curl ca-certificates file xz-utils \
+        libwebkit2gtk-4.1-dev:amd64 libxdo-dev:amd64 librsvg2-dev:amd64; \
+    rm -rf /var/lib/apt/lists/*
+
+# Node.js for the Vite build and the Tauri CLI.
+ARG NODE_VERSION=22.22.3
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in arm64) a=arm64;; amd64) a=x64;; *) exit 1;; esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${a}.tar.xz" \
+      | tar -xJ -C /usr/local --strip-components=1
+
+# Rust with the x86_64 Linux target.
+ARG RUST_VERSION=1.89.0
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" \
+          --target x86_64-unknown-linux-gnu
+
+# Cross-compilation settings (harmless on an x86_64 host).
+ENV PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
+    CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ \
+    AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
+
+WORKDIR /work

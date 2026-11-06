@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tidings
+GenericName=Feed Reader
+Comment=A private, secure RSS and Atom feed reader
+Exec=tidings
+Icon=tidings
+Terminal=false
+Categories=Network;News;Feed;
+Keywords=rss;atom;feed;news;opml;
+StartupWMClass=tidings

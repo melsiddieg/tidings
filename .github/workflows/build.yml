@@ -1,0 +1,59 @@
+# Builds Tidings for Linux (x86_64) and macOS (universal) on every tag push,
+# or when started by hand from the Actions tab. Packages are attached to the run.
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            args: ''
+            bundles: target/release/bundle
+          - os: macos-latest
+            args: '--target universal-apple-darwin'
+            bundles: target/universal-apple-darwin/release/bundle
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - run: npm ci
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - run: npx tauri build ${{ matrix.args }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tidings-${{ runner.os }}
+          path: |
+            src-tauri/${{ matrix.bundles }}/deb/*.deb
+            src-tauri/${{ matrix.bundles }}/rpm/*.rpm
+            src-tauri/${{ matrix.bundles }}/appimage/*.AppImage
+            src-tauri/${{ matrix.bundles }}/dmg/*.dmg
+          if-no-files-found: ignore
