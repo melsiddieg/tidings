@@ -35,6 +35,11 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - All network traffic goes through `net.rs` clients. The web view must never load remote
   resources: images use `tidings://localhost/img/<base64url>`; the CSP in `tauri.conf.json`
   blocks everything else. Do not loosen the CSP or add remote URLs to it.
+- One deliberate exception: `media-src` allows `http://127.0.0.1:*`. WebKitGTK plays media
+  through GStreamer, which cannot read `tidings://` URLs, so on Linux podcast audio comes from
+  `media_server.rs`: a server bound to 127.0.0.1 on a random port that only answers URLs with
+  a random secret token, and that serves through the same `protocol::proxy_media` code.
+  macOS keeps using `tidings://`. Do not extend this to other directives or hosts.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file
@@ -49,6 +54,7 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 | `src-tauri/src/main.rs` window builder | Overlay title bar and traffic-light position | macOS-only cfg. |
 | `src-tauri/src/menu.rs` | Native menu bar | macOS only. Other platforms rely on keyboard handling in `src/App.svelte` (`isMac` check). |
 | `src/App.svelte` / `src/lib/store.svelte.ts` | `data-platform` comes from `std::env::consts::OS` (`app_info`) | Will be `freebsd` / `openbsd`; CSS only special-cases `macos`. |
+| `main.rs` `start_media_server`, `media_server.rs` | Loopback audio server (GStreamer cannot read custom schemes) | Linux-only cfg. The BSDs also use WebKitGTK + GStreamer, so extend the cfg to them; `random_token` reads `/dev/urandom`, which exists there too. |
 | `commands::set_badge` | Dock / launcher badge | Errors are ignored; expect a no-op on the BSDs. |
 | `db::open`, `state.rs` | `#[cfg(unix)]` file modes 0600/0700 | Works on any Unix. |
 | Data folder | Tauri `app_data_dir()` (XDG on Linux) | Check where it resolves on each BSD. |

@@ -427,6 +427,8 @@ pub struct AppInfo {
     pub version: &'static str,
     pub data_dir: String,
     pub platform: &'static str,
+    /// Linux: base URL of the loopback audio server. None elsewhere.
+    pub media_base: Option<String>,
 }
 
 #[tauri::command]
@@ -435,5 +437,6 @@ pub fn app_info(state: AppStateRef<'_>) -> AppInfo {
         version: env!("CARGO_PKG_VERSION"),
         data_dir: state.data_dir.display().to_string(),
         platform: std::env::consts::OS,
+        media_base: state.media_base.get().cloned(),
     }
 }

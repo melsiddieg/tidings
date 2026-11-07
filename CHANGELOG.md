@@ -5,6 +5,15 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-06
+
+### Fixed
+- Podcast playback on Linux. WebKitGTK plays media through GStreamer, which cannot read
+  the app's `tidings://` URLs, so episodes failed with "This episode could not be played".
+  On Linux, audio now comes from a small server that listens only on 127.0.0.1, on a
+  random port, and only answers URLs that carry a random secret token. It uses the same
+  media proxy as before, so tracker stripping and the proxy setting still apply.
+
 ## [0.3.0] - 2026-11-06
 
 ### Added
@@ -66,7 +75,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/melsiddieg/tidings/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/melsiddieg/tidings/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/melsiddieg/tidings/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/melsiddieg/tidings/releases/tag/v0.1.0

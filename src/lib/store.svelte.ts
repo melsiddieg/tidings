@@ -1,5 +1,5 @@
 // Application state and actions. Components read from `store` and call its methods.
-import { api, errorText, on } from './api';
+import { api, errorText, on, setMediaBase } from './api';
 import type {
   AppInfo,
   ArticleItem,
@@ -201,6 +201,7 @@ class Store {
       this.settings = settings;
       this.tree = tree;
       this.info = info;
+      setMediaBase(info.mediaBase);
     } catch (err) {
       this.error(err);
     }

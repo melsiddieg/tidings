@@ -55,9 +55,10 @@ const ATOM: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </feed>"#;
 
 fn temp_db() -> (rusqlite::Connection, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tidings-test-{}-{}", std::process::id(), db::now()));
+    // One folder per call: tests run in parallel and each removes its own folder.
+    let dir = std::env::temp_dir().join(format!("tidings-test-{}-{}", std::process::id(), rand_suffix()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{}.db", rand_suffix()));
+    let path = dir.join("test.db");
     (db::open(&path).unwrap(), dir)
 }
 

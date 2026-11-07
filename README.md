@@ -50,6 +50,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | Strict Content Security Policy | The web view may only run the app's own scripts. It cannot load remote scripts, styles, fonts, frames or media. |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (private addresses and redirects to them are blocked). Images can be turned off; then they load only when you click "Load images". |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
+| Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
 | No navigation | The window can only show the app itself. All other navigation and pop-ups are blocked; links open in a reader tab or your browser. |
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |

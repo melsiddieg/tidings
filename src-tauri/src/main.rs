@@ -7,6 +7,7 @@ mod discover;
 mod error;
 mod feeds;
 mod media;
+mod media_server;
 mod menu;
 mod net;
 mod opml;
@@ -69,6 +70,23 @@ fn linux_webkit_workarounds() {
     }
 }
 
+/// WebKitGTK cannot play media from the tidings:// scheme, so Linux gets audio
+/// from a token-protected server on 127.0.0.1 (see media_server.rs).
+#[cfg(target_os = "linux")]
+fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
+    let handle = app.clone();
+    let handler: media_server::Handler = Arc::new(move |encoded, range| {
+        let app = handle.clone();
+        Box::pin(async move { protocol::media_response(&app, &encoded, range.as_deref()).await })
+    });
+    match tauri::async_runtime::block_on(media_server::start(handler)) {
+        Ok(base) => {
+            let _ = state.media_base.set(base);
+        }
+        Err(err) => eprintln!("tidings: podcast audio server could not start: {err}"),
+    }
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     linux_webkit_workarounds();
@@ -92,6 +110,8 @@ fn main() {
             app.manage(state.clone());
             #[cfg(target_os = "macos")]
             app.set_menu(menu::build(app.handle())?)?;
+            #[cfg(target_os = "linux")]
+            start_media_server(app.handle(), &state);
             build_main_window(app)?;
             scheduler::start(app.handle().clone(), state);
             Ok(())

@@ -113,6 +113,8 @@ export interface AppInfo {
   version: string;
   dataDir: string;
   platform: string;
+  /** Linux only: loopback server for podcast audio (WebKitGTK cannot play tidings:// media). */
+  mediaBase?: string | null;
 }
 
 export interface Settings {

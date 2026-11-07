@@ -35,6 +35,8 @@ pub struct AppState {
     pub pages: Mutex<LruCache<String, Arc<crate::reader::Extracted>>>,
     /// Final audio URLs after redirects, for the podcast player.
     pub media: crate::media::ResolvedUrls,
+    /// Base URL of the loopback media server (Linux only).
+    pub media_base: std::sync::OnceLock<String>,
     pub data_dir: PathBuf,
 }
 
@@ -60,6 +62,7 @@ impl AppState {
             images: Mutex::new(LruCache::new(NonZeroUsize::new(400).unwrap())),
             pages: Mutex::new(LruCache::new(NonZeroUsize::new(40).unwrap())),
             media: Default::default(),
+            media_base: Default::default(),
             data_dir,
         })
     }

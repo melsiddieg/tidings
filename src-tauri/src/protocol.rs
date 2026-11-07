@@ -84,6 +84,16 @@ fn decode_target(state: &AppState, encoded: &str) -> Result<String, StatusCode> 
     Ok(target)
 }
 
+/// Media for the Linux loopback server (see media_server.rs); same rules as `tidings://`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub async fn media_response(app: &AppHandle, encoded: &str, range: Option<&str>) -> Response<Vec<u8>> {
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return empty(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let state = state.inner().clone();
+    proxy_media(&state, encoded, range).await
+}
+
 async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let target = match decode_target(state, encoded) {
         Ok(t) => t,
