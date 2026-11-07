@@ -1,0 +1,94 @@
+# Builds and tests Tidings on FreeBSD and OpenBSD (x86_64).
+#
+# GitHub has no BSD runners, so each job boots a FreeBSD or OpenBSD virtual machine
+# on a Linux runner (vmactions) and runs scripts/build-bsd.sh inside it, then
+# `cargo test`. Tarballs are kept as workflow artifacts (tidings-FreeBSD,
+# tidings-OpenBSD). They are not attached to releases: OpenBSD binaries only run on
+# the OpenBSD release they were built on, and FreeBSD ones need the same major version.
+#
+# Runs for release tags, by hand from the Actions tab, and on branch pushes that
+# change the BSD build itself. A run takes one to two hours (release LTO link).
+name: BSD
+
+on:
+  push:
+    tags: ['v*']
+    branches: ['**']
+    # Path filters only apply to branch pushes; tag pushes always run.
+    paths:
+      - .github/workflows/bsd.yml
+      - scripts/build-bsd.sh
+      - scripts/linux/install.sh
+      - src-tauri/build.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bsd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  freebsd:
+    name: FreeBSD 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1.5.9
+        with:
+          # The newest 15.x. FreeBSD builds 15.x packages on the oldest supported 15.x,
+          # and a binary built there runs on every later 15.x.
+          release: '15'
+          mem: 12288
+          prepare: |
+            pkg install -y rust node24 npm-node24 pkgconf webkit2-gtk_41 gtk3 xdotool
+          run: |
+            set -e
+            freebsd-version
+            scripts/build-bsd.sh
+            cargo test --manifest-path src-tauri/Cargo.toml
+            # Keep the copy back to the runner small.
+            rm -rf src-tauri/target node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tidings-FreeBSD
+          path: |
+            release/freebsd/*.tar.gz
+            release/freebsd/*.sha256
+          if-no-files-found: error
+
+  openbsd:
+    name: OpenBSD 8
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in an OpenBSD VM
+        uses: vmactions/openbsd-vm@v1.4.9
+        with:
+          release: '8.0'
+          mem: 12288
+          prepare: |
+            pkg_add -I rust node webkitgtk41 gtk+3 xdotool
+          run: |
+            set -e
+            uname -a
+            scripts/build-bsd.sh
+            # build-bsd.sh raises the data size limit for itself; the tests need it too.
+            ulimit -d "$(ulimit -Hd)"
+            cargo test --manifest-path src-tauri/Cargo.toml
+            rm -rf src-tauri/target node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tidings-OpenBSD
+          path: |
+            release/openbsd/*.tar.gz
+            release/openbsd/*.sha256
+          if-no-files-found: error

@@ -102,5 +102,8 @@ WebKitGTK workarounds instead of listing operating systems.
   `@rolldown/binding-wasm32-wasi` with `--force`, since Rolldown has no OpenBSD binary.
 - GhostBSD splits the base system into packages; linking needs `GhostBSD-libexecinfo-dev`
   and `GhostBSD-kerberos-dev` (for `libsoup-3.0.pc`).
+- CI: `.github/workflows/bsd.yml` (separate from `build.yml`, so its tarballs never reach
+  a release) runs `build-bsd.sh` and `cargo test` in vmactions FreeBSD/OpenBSD VMs. Keep the
+  `pkg install` / `pkg_add` lists there in step with README.md and `install.sh`.
 - Keep `scripts/linux/install.sh` plain POSIX sh: no `install -D`, `sed -i` or brace expansion.
 - Run `cargo test` and the `live_network` test on each target.

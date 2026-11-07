@@ -5,6 +5,10 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- A GitHub Actions workflow (`BSD`) that builds and tests Tidings in FreeBSD 15 and
+  OpenBSD 8.0 virtual machines and keeps the tarballs as workflow artifacts.
+
 ## [0.7.1] - 2026-11-08
 
 ### Fixed

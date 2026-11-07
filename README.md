@@ -131,8 +131,10 @@ chmod +x Tidings_0.1.0_amd64.AppImage
 
 ## Installing on FreeBSD and OpenBSD
 
-There are no prebuilt BSD packages yet. Build the portable tarball on the machine
-itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
+There are no BSD packages on the releases page. Build the portable tarball on the
+machine itself (see "Building on FreeBSD and OpenBSD" below), or take it from the
+GitHub Actions `BSD` workflow (artifacts `tidings-FreeBSD` and `tidings-OpenBSD`), then
+install it into `~/.local`:
 
 ```sh
 tar xzf release/freebsd/tidings-0.7.1-freebsd-x86_64.tar.gz
@@ -220,6 +222,13 @@ It also installs Rolldown's WebAssembly build, since Vite's bundler has no nativ
 OpenBSD binary, and the stylesheet is left unminified because lightningcss has no
 OpenBSD binary either. A release build takes about an hour on 2 CPUs; `LTO=false`
 makes it much faster.
+
+**CI:** `.github/workflows/bsd.yml` runs the same script plus `cargo test` inside
+FreeBSD 15 and OpenBSD 8.0 virtual machines on GitHub's Linux runners
+([vmactions](https://github.com/vmactions)). It runs for release tags, from the Actions
+tab, and for branch pushes that change the BSD build. The tarballs stay workflow
+artifacts; they are not attached to releases, because OpenBSD binaries only run on the
+release they were built on.
 
 The output is in `src-tauri/target/release/bundle/`:
 - macOS: `macos/Tidings.app` and `dmg/Tidings_0.1.0_*.dmg`
