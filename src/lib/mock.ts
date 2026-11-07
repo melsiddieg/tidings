@@ -29,7 +29,8 @@ function feed(id: number, folderId: number | null, title: string, url: string, e
     id, folderId, title, feedTitle: title, customTitle: null, url, siteUrl: url.replace(/\/feed.*|\/rss.*/, ''),
     description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
-    lastError: null, unread: 0, total: 0, pinned: 0, ...extra,
+    lastError: null, unread: 0, total: 0, pinned: 0, feedType: 'article', typeOverride: null,
+    detectedType: extra.feedType ?? 'article', ...extra,
   };
 }
 
@@ -44,6 +45,9 @@ const feeds: Feed[] = [
   feed(8, 3, 'NASA Image of the Day', 'https://www.nasa.gov/rss/image_of_the_day.rss'),
   feed(9, null, 'Daring Fireball', 'https://daringfireball.net/feeds/main'),
   feed(10, null, 'Julia Evans', 'https://jvns.ca/atom.xml', { lastError: 'The server took too long to respond' }),
+  feed(11, null, 'LINUX Unplugged', 'https://feeds.fireside.fm/linuxunplugged/rss', { feedType: 'podcast' }),
+  feed(12, 4, 'Tauri releases', 'https://github.com/tauri-apps/tauri/releases.atom', { feedType: 'code' }),
+  feed(13, 4, 'Lobsters: rust', 'https://lobste.rs/t/rust.rss', { feedType: 'discussion' }),
 ];
 
 const TITLES = [
@@ -110,11 +114,12 @@ for (let i = 0; i < 64; i++) {
     url: `https://example.com/${f.id}/article-${i}`,
     author: AUTHORS[i % AUTHORS.length],
     excerpt: `${title}. It is a story that started small and grew into something much larger than anyone expected. Over the past year, a handful of people have been working on it in the open.`,
-    published: now - i * 5400 - (i % 3) * 1200,
+    // The first half spread over two days, the rest over about two months.
+    published: i < 32 ? now - i * 5400 - (i % 3) * 1200 : now - (i - 30) * 2 * 86400,
     isRead: i > 9 && i % 3 !== 0,
     isStarred: i % 11 === 2,
     isNew: i < 4,
-    hasEnclosure: i % 13 === 5,
+    hasEnclosure: f.feedType === 'podcast' || i % 13 === 5,
     thumb: i % 4 === 1 ? null : svgImage((i * 47) % 360, 160, 160),
     html: body(title, i),
   });
@@ -139,6 +144,7 @@ function inScope(a: ArticleItem, scope: Scope): boolean {
   if (scope.kind === 'all') return true;
   if (scope.kind === 'starred') return a.isStarred;
   if (scope.kind === 'feed') return a.feedId === scope.id;
+  if (scope.kind === 'type') return feeds.find((f) => f.id === a.feedId)?.feedType === scope.type;
   const ids = new Set<number>([scope.id]);
   let grew = true;
   while (grew) {
@@ -149,12 +155,17 @@ function inScope(a: ArticleItem, scope: Scope): boolean {
   return folderId != null && ids.has(folderId);
 }
 
+function inRange(a: ArticleItem, since?: number | null, until?: number | null): boolean {
+  return (since == null || a.published >= since) && (until == null || a.published < until);
+}
+
 function query(q: ListQuery) {
   const words = q.query.toLowerCase().split(/\s+/).filter(Boolean);
   return articles
     .filter((a) => inScope(a, q.scope))
     .filter((a) => (q.filter === 'unread' ? !a.isRead : q.filter === 'new' ? a.isNew : q.filter === 'starred' ? a.isStarred : true))
     .filter((a) => words.every((w) => `${a.title} ${a.excerpt}`.toLowerCase().includes(w)))
+    .filter((a) => inRange(a, q.since, q.until))
     .sort((a, b) => (q.oldestFirst ? a.published - b.published : b.published - a.published))
     .slice(q.offset, q.offset + q.limit);
 }
@@ -219,7 +230,7 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     }
     case 'mark_all_read': {
       let n = 0;
-      for (const a of articles) if (inScope(a, args.scope) && !a.isRead) { a.isRead = true; n++; }
+      for (const a of articles) if (inScope(a, args.scope) && inRange(a, args.since, args.until) && !a.isRead) { a.isRead = true; n++; }
       return n;
     }
     case 'delete_articles':
@@ -237,7 +248,10 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     }
     case 'update_feed': {
       const f = feeds.find((x) => x.id === args.id)!;
-      Object.assign(f, args.patch, { title: args.patch.customTitle || f.feedTitle });
+      Object.assign(f, args.patch, {
+        title: args.patch.customTitle || f.feedTitle,
+        feedType: args.patch.typeOverride ?? f.detectedType,
+      });
       return null;
     }
     case 'delete_feed':

@@ -6,6 +6,8 @@
   import { api, errorText } from '../lib/api';
   import { store } from '../lib/store.svelte';
   import { folderOptions, hostOf, relativeAgo } from '../lib/util';
+  import { FEED_TYPES, typeInfo } from '../lib/filters';
+  import type { FeedType } from '../lib/types';
 
   let { feedId }: { feedId: number } = $props();
 
@@ -22,6 +24,7 @@
   );
   let fullText = $state(feed?.fullText ?? false);
   let paused = $state(feed?.paused ?? false);
+  let feedType = $state<FeedType | 'auto'>(feed?.typeOverride ?? 'auto');
   let saving = $state(false);
   let error = $state<string | null>(null);
 
@@ -54,6 +57,7 @@
         retentionValue: retention === 'count' || retention === 'days' ? Math.max(1, Number(retentionValue) || 1) : null,
         fullText,
         paused,
+        typeOverride: feedType === 'auto' ? null : feedType,
       });
       await store.reloadTree();
       store.dialog = null;
@@ -105,6 +109,16 @@
       <div class="field">
         <label for="fp-url">Feed address</label>
         <input id="fp-url" class="input mono" bind:value={url} spellcheck="false" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label for="fp-type">Type</label>
+        <select id="fp-type" class="input" bind:value={feedType}>
+          <option value="auto">Automatic ({typeInfo(feed.detectedType).one})</option>
+          {#each FEED_TYPES as t (t.value)}
+            <option value={t.value}>{t.one}</option>
+          {/each}
+        </select>
       </div>
 
       <div class="grid2">

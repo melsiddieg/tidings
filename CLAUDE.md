@@ -26,10 +26,14 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `net.rs` (HTTP clients, private-address
-  checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu).
+  checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
+  `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh).
 - `src-tauri/src/tests.rs` runs every SQL query against a real database. Add a case there when
   you add or change a query.
 - `src/lib/store.svelte.ts` holds UI state and actions; components in `src/components/`.
+  `src/lib/filters.ts` has the feed type list and the date range presets (`rangeBounds`).
+- Article filters all go through `db::where_clause` (scope, read state, search, `DateRange`),
+  so the list, "mark all as read" and ID lists always agree. Extend it there, not per query.
 
 ## Rules that keep the app private and safe
 

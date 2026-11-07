@@ -2,7 +2,16 @@ export type Scope =
   | { kind: 'all' }
   | { kind: 'starred' }
   | { kind: 'feed'; id: number }
-  | { kind: 'folder'; id: number };
+  | { kind: 'folder'; id: number }
+  | { kind: 'type'; type: FeedType };
+
+/** Detected from the feed's address and enclosures, or chosen by the user. */
+export type FeedType = 'podcast' | 'video' | 'code' | 'discussion' | 'newsletter' | 'article';
+
+/** Which publication dates to show. Custom dates are local `YYYY-MM-DD`; `to` is inclusive. */
+export type DateRange =
+  | { preset: 'any' | 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'older' }
+  | { preset: 'custom'; from: string | null; to: string | null };
 
 export type Filter = 'all' | 'unread' | 'new' | 'starred';
 
@@ -39,6 +48,11 @@ export interface Feed {
   total: number;
   /** Unix time it was added to Favorites, 0 if not a favorite. */
   pinned: number;
+  /** The type in use: the user's choice, else the detected one. */
+  feedType: FeedType;
+  /** The user's choice, null for automatic. */
+  typeOverride: FeedType | null;
+  detectedType: FeedType;
 }
 
 export interface Tree {
@@ -148,6 +162,8 @@ export interface FeedPatch {
   retentionValue: number | null;
   fullText: boolean;
   paused: boolean;
+  /** null for automatic. */
+  typeOverride: FeedType | null;
 }
 
 export interface ListQuery {
@@ -157,6 +173,10 @@ export interface ListQuery {
   oldestFirst: boolean;
   limit: number;
   offset: number;
+  /** Published at or after, Unix seconds. */
+  since?: number | null;
+  /** Published before, Unix seconds. */
+  until?: number | null;
 }
 
 export interface FeedUpdated {
@@ -206,6 +226,7 @@ export type Dialog =
   | { kind: 'folder'; folderId: number | null; parentId: number | null }
   | { kind: 'settings'; section?: string }
   | { kind: 'shortcuts' }
+  | { kind: 'date-range' }
   | {
       kind: 'confirm';
       title: string;

@@ -178,6 +178,7 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
             },
         )?;
         db::apply_retention(&tx, id, &mode, value)?;
+        db::detect_feed_type(&tx, id)?;
         tx.commit()?;
         added
     };

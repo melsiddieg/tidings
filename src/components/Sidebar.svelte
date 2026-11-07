@@ -4,7 +4,7 @@
   import { store } from '../lib/store.svelte';
   import { childKey, countLabel, relativeAgo } from '../lib/util';
   import FeedIcon from './FeedIcon.svelte';
-  import type { ItemRef } from '../lib/types';
+  import type { FeedType, ItemRef } from '../lib/types';
   import TreeFolder from './TreeFolder.svelte';
   import FeedRow from './FeedRow.svelte';
 
@@ -33,6 +33,13 @@
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead(ref.kind === 'feed' ? { kind: 'feed', id: ref.id } : { kind: 'folder', id: ref.id }) },
       { separator: true },
       { label: 'Remove from Favorites', icon: 'star', action: () => store.setPinned(ref, false) },
+    ]);
+  }
+
+  function typeMenu(e: MouseEvent, type: FeedType) {
+    store.openMenu(e, [
+      { label: 'Refresh', icon: 'refresh', action: () => store.refresh({ feedIds: store.feedsOfType(type).map((f) => f.id) }) },
+      { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'type', type }) },
     ]);
   }
 
@@ -106,6 +113,25 @@
             {/if}
             <span class="label">{fav.title}</span>
             {#if unread > 0}<span class="count">{countLabel(unread)}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    {#if store.typeSummary.length > 1}
+      <div class="section-title"><span>Types</span></div>
+      <div class="group">
+        {#each store.typeSummary as row (row.info.value)}
+          <button
+            class="item"
+            class:selected={store.scope.kind === 'type' && store.scope.type === row.info.value}
+            title={`${row.feeds} ${row.feeds === 1 ? 'feed' : 'feeds'}`}
+            onclick={() => store.selectScope({ kind: 'type', type: row.info.value })}
+            oncontextmenu={(e) => typeMenu(e, row.info.value)}
+          >
+            <Icon name={row.info.icon} size={16} />
+            <span class="label">{row.info.label}</span>
+            {#if row.unread > 0}<span class="count">{countLabel(row.unread)}</span>{/if}
           </button>
         {/each}
       </div>

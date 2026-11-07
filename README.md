@@ -19,6 +19,13 @@ Source: <https://github.com/melsiddieg/tidings>
   ⌘/Ctrl-click opens a background tab, Shift-click opens your browser.
 - **Full text** for feeds that only send a summary (per article, or always for a feed).
 - Status filters: All, Unread, New (this session), Starred.
+- **Feed types**: Podcasts, Videos, Code & releases, Discussions, Newsletters and Articles
+  each get a view in the sidebar. The type is worked out on your computer from the feed's
+  address (GitHub, YouTube, Reddit, Substack and others) and from what its recent items
+  carry (audio means podcast); you can set it yourself in the feed's properties.
+- **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
+  a custom range. It combines with everything else, and "Mark all as read" follows it,
+  so *Older than 30 days* then *Mark all as read* clears a backlog.
 - Search over titles, text and authors.
 - Next/previous unread across feeds, and Akregator-style keyboard navigation (`?` lists all keys).
 - **Podcast player** with resume, seeking, 0.8×–2× speed and volume. Audio streams
@@ -33,7 +40,7 @@ Source: <https://github.com/melsiddieg/tidings>
 - Favorites: pin feeds and folders to the top of the sidebar.
 - Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
-- Per-feed properties: custom name, update interval, archive rule, always load full text, pause updates.
+- Per-feed properties: custom name, type, update interval, archive rule, always load full text, pause updates.
 - Feed icons, unread counts on folders and on the dock/launcher icon.
 
 **Archive**

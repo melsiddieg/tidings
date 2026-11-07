@@ -17,6 +17,7 @@
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ShortcutsDialog from './components/ShortcutsDialog.svelte';
+  import DateRangeDialog from './components/DateRangeDialog.svelte';
 
   onMount(() => {
     store.init();
@@ -221,6 +222,8 @@
     <SettingsDialog section={store.dialog.section} />
   {:else if store.dialog?.kind === 'shortcuts'}
     <ShortcutsDialog />
+  {:else if store.dialog?.kind === 'date-range'}
+    <DateRangeDialog />
   {/if}
 
   {#if store.menu}

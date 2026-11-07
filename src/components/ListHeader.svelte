@@ -3,6 +3,7 @@
   import FeedIcon from './FeedIcon.svelte';
   import { store } from '../lib/store.svelte';
   import type { Filter, Settings } from '../lib/types';
+  import { DATE_PRESETS, rangeLabel, typeInfo } from '../lib/filters';
 
   let searchInput: HTMLInputElement | undefined = $state();
   let draft = $state(store.query);
@@ -17,9 +18,14 @@
 
   const filterLabel = $derived(FILTERS.find((f) => f.value === store.filter)?.label ?? 'All');
   const feed = $derived(store.scope.kind === 'feed' ? store.feedById.get(store.scope.id) : undefined);
-  const scopeIcon = $derived(
-    store.scope.kind === 'all' ? 'newspaper' : store.scope.kind === 'starred' ? 'star' : 'folder',
-  );
+  const scopeIcon = $derived.by(() => {
+    const s = store.scope;
+    if (s.kind === 'all') return 'newspaper';
+    if (s.kind === 'starred') return 'star';
+    if (s.kind === 'type') return typeInfo(s.type).icon;
+    return 'folder';
+  });
+  const dateLabel = $derived(rangeLabel(store.dateRange));
 
   // Ctrl/Cmd+F and "/" focus the search box.
   $effect(() => {
@@ -50,6 +56,19 @@
         action: () => store.setFilter(f.value),
       })),
     );
+  }
+
+  function dateMenu(e: MouseEvent) {
+    const preset = store.dateRange.preset;
+    store.openMenuAt(e.currentTarget as HTMLElement, [
+      ...DATE_PRESETS.map((p) => ({
+        label: p.label,
+        checked: preset === p.value,
+        action: () => store.setDateRange({ preset: p.value }),
+      })),
+      { separator: true },
+      { label: 'Custom range…', icon: 'calendar', checked: preset === 'custom', action: () => (store.dialog = { kind: 'date-range' }) },
+    ]);
   }
 
   function viewMenu(e: MouseEvent) {
@@ -124,6 +143,11 @@
     <button class="chip" class:active={store.filter !== 'all'} onclick={filterMenu}>
       <Icon name="filter" size={12} />
       {filterLabel}
+      <Icon name="chevron-down" size={12} stroke={2.2} />
+    </button>
+    <button class="chip" class:active={store.dateFiltered} onclick={dateMenu} title="Publication date">
+      <Icon name="calendar" size={12} />
+      <span class="chip-text">{dateLabel}</span>
       <Icon name="chevron-down" size={12} stroke={2.2} />
     </button>
   </div>
@@ -202,6 +226,9 @@
   }
   .search input {
     flex: 1;
+    /* Without width: 0 the input's natural width (about 150px) counts toward the
+       column's minimum, and the chips then push the list wider than its pane. */
+    width: 0;
     min-width: 0;
     border: none;
     background: transparent;
@@ -248,5 +275,11 @@
     color: var(--accent);
     background: var(--accent-softer);
     border-color: rgb(var(--accent-rgb) / 0.25);
+  }
+  .chip-text {
+    max-width: 112px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

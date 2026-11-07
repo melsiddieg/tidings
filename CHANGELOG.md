@@ -5,6 +5,14 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Feed types. Podcasts, Videos, Code & releases, Discussions, Newsletters and Articles get
+  their own views in the sidebar. Tidings works the type out from the feed's address and
+  from the media in its recent items, and you can choose it yourself in the feed's
+  properties. Existing feeds are sorted when you upgrade.
+- A date filter next to the read-state filter: Today, Yesterday, Last 7 days, Last 30 days,
+  This year, Older than 30 days or a custom range. "Mark all as read" follows it.
+
 ## [0.3.2] - 2026-11-06
 
 ### Added

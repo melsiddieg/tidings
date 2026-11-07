@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rangeLabel } from '../lib/filters';
   import Icon from '../lib/Icon.svelte';
   import ListHeader from './ListHeader.svelte';
   import ArticleRow from './ArticleRow.svelte';
@@ -39,6 +40,8 @@
 
   const emptyText = $derived.by(() => {
     if (store.query) return { title: 'No matches', body: `Nothing matches “${store.query}”.` };
+    if (store.dateFiltered)
+      return { title: 'Nothing in this period', body: `No articles here for “${rangeLabel(store.dateRange)}”. Pick another date range above.` };
     if (store.filter === 'unread') return { title: 'All caught up', body: 'There are no unread articles here.' };
     if (store.filter === 'starred' || store.scope.kind === 'starred')
       return { title: 'No starred articles', body: 'Press S on an article to keep it here. Starred articles are never archived.' };

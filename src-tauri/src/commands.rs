@@ -197,8 +197,13 @@ pub fn set_starred(state: AppStateRef<'_>, id: i64, starred: bool) -> Result<()>
 }
 
 #[tauri::command]
-pub fn mark_all_read(state: AppStateRef<'_>, scope: Scope) -> Result<usize> {
-    db::mark_scope_read(&state.db(), &scope)
+pub fn mark_all_read(
+    state: AppStateRef<'_>,
+    scope: Scope,
+    since: Option<i64>,
+    until: Option<i64>,
+) -> Result<usize> {
+    db::mark_scope_read(&state.db(), &scope, &db::DateRange { since, until })
 }
 
 #[tauri::command]

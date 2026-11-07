@@ -3,8 +3,10 @@ import { api, errorText, on, setMediaBase } from './api';
 import type {
   AppInfo,
   ArticleItem,
+  DateRange,
   Dialog,
   Feed,
+  FeedType,
   FeedUpdated,
   Filter,
   FolderNode,
@@ -19,6 +21,7 @@ import type {
   Tree,
 } from './types';
 import { buildTree, childRef, flattenFeeds, sameItem } from './util';
+import { FEED_TYPES, isAnyTime, rangeBounds, typeInfo, validRange, type TypeInfo } from './filters';
 
 const PAGE = 150;
 const MAIN_TAB: Tab = { id: 'main', kind: 'main' };
@@ -92,6 +95,7 @@ class Store {
   filter = $state<Filter>(local.get<Filter>('filter', 'all'));
   query = $state('');
   oldestFirst = $state<boolean>(local.get('oldestFirst', false));
+  dateRange = $state<DateRange>(validRange(local.get<unknown>('dateRange', null)));
 
   articles = $state<ArticleItem[]>([]);
   hasMore = $state(false);
@@ -144,6 +148,15 @@ class Store {
   });
   folderById = $derived(new Map(this.tree.folders.map((f) => [f.id, f])));
   unreadTotal = $derived(this.tree.feeds.reduce((sum, f) => sum + f.unread, 0));
+  /** Feed types that have at least one feed, with their unread counts, in sidebar order. */
+  typeSummary = $derived.by(() => {
+    const rows: { info: TypeInfo; feeds: number; unread: number }[] = [];
+    for (const info of FEED_TYPES) {
+      const feeds = this.tree.feeds.filter((f) => f.feedType === info.value);
+      if (feeds.length) rows.push({ info, feeds: feeds.length, unread: feeds.reduce((sum, f) => sum + f.unread, 0) });
+    }
+    return rows;
+  });
   folderUnread = $derived.by(() => {
     const totals = new Map<number, number>();
     for (const feed of this.tree.feeds) {
@@ -172,6 +185,7 @@ class Store {
     if (s.kind === 'all') return 'All articles';
     if (s.kind === 'starred') return 'Starred';
     if (s.kind === 'feed') return this.feedById.get(s.id)?.title ?? 'Feed';
+    if (s.kind === 'type') return typeInfo(s.type).label;
     return this.folderById.get(s.id)?.title ?? 'Folder';
   });
   scopeUnread = $derived.by(() => {
@@ -179,6 +193,7 @@ class Store {
     if (s.kind === 'all') return this.unreadTotal;
     if (s.kind === 'starred') return 0;
     if (s.kind === 'feed') return this.feedById.get(s.id)?.unread ?? 0;
+    if (s.kind === 'type') return this.typeSummary.find((r) => r.info.value === s.type)?.unread ?? 0;
     return this.folderUnread.get(s.id) ?? 0;
   });
 
@@ -240,6 +255,7 @@ class Store {
   private scopeExists(scope: Scope): boolean {
     if (scope.kind === 'feed') return this.feedById.has(scope.id);
     if (scope.kind === 'folder') return this.folderById.has(scope.id);
+    if (scope.kind === 'type') return FEED_TYPES.some((t) => t.value === scope.type);
     return true;
   }
 
@@ -323,6 +339,7 @@ class Store {
       oldestFirst: this.oldestFirst,
       limit,
       offset,
+      ...rangeBounds(this.dateRange),
     };
   }
 
@@ -396,6 +413,17 @@ class Store {
     this.loadArticles();
   }
 
+  setDateRange(range: DateRange) {
+    this.dateRange = range;
+    local.set('dateRange', range);
+    this.loadArticles();
+  }
+
+  /** True when the list is narrowed to some dates. */
+  get dateFiltered(): boolean {
+    return !isAnyTime(this.dateRange);
+  }
+
   setOldestFirst(value: boolean) {
     this.oldestFirst = value;
     local.set('oldestFirst', value);
@@ -460,10 +488,17 @@ class Store {
     this.refreshCounts();
   }
 
-  async markAllRead(scope: Scope = this.scope) {
+  /**
+   * Without a scope: everything in the list as shown, including its date range
+   * ("Older than 30 days", then mark all as read). With a scope (sidebar menus): all of it.
+   */
+  async markAllRead(scope?: Scope) {
+    const current = scope === undefined;
+    const target = scope ?? this.scope;
+    const { since, until } = current ? rangeBounds(this.dateRange) : { since: null, until: null };
     try {
-      const n = await api.markAllRead($state.snapshot(scope));
-      if (JSON.stringify(scope) === JSON.stringify(this.scope)) {
+      const n = await api.markAllRead($state.snapshot(target), since, until);
+      if (JSON.stringify(target) === JSON.stringify(this.scope)) {
         for (const a of this.articles) {
           a.isRead = true;
           a.isNew = false;
@@ -652,7 +687,12 @@ class Store {
     const s = this.scope;
     if (s.kind === 'feed') return this.refresh({ feedIds: [s.id] });
     if (s.kind === 'folder') return this.refresh({ folderId: s.id });
+    if (s.kind === 'type') return this.refresh({ feedIds: this.feedsOfType(s.type).map((f) => f.id) });
     return this.refresh();
+  }
+
+  feedsOfType(type: FeedType): Feed[] {
+    return this.tree.feeds.filter((f) => f.feedType === type);
   }
 
   watchFeed(id: number) {
@@ -664,6 +704,7 @@ class Store {
     if (s.kind === 'all') return true;
     if (s.kind === 'starred') return false;
     if (s.kind === 'feed') return s.id === feedId;
+    if (s.kind === 'type') return this.feedById.get(feedId)?.feedType === s.type;
     let folder = this.feedById.get(feedId)?.folderId ?? null;
     for (let guard = 0; folder != null && guard < 64; guard++) {
       if (folder === s.id) return true;

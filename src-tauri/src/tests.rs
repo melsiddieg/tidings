@@ -75,6 +75,7 @@ fn query(scope: Scope, filter: &str, q: &str) -> ListQuery {
         oldest_first: false,
         limit: Some(100),
         offset: Some(0),
+        range: db::DateRange::default(),
     }
 }
 
@@ -173,7 +174,7 @@ fn full_database_workflow() {
     assert_eq!(unread.len(), 2);
     let starred = db::list_articles(&conn, &query(Scope::Starred, "all", ""), thumb).unwrap();
     assert_eq!(starred.len(), 1);
-    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }).unwrap();
+    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }, &db::DateRange::default()).unwrap();
     assert_eq!(marked, 2);
 
     // Tree has display titles and counts.
@@ -225,6 +226,7 @@ fn full_database_workflow() {
             retention_value: Some(7),
             full_text: true,
             paused: false,
+            type_override: None,
         },
     )
     .unwrap();
@@ -346,7 +348,153 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn item(guid: &str, published: i64, enclosure: Option<(&str, &str)>) -> db::NewArticle {
+    db::NewArticle {
+        guid: guid.into(),
+        url: Some(format!("https://example.com/{guid}")),
+        title: guid.into(),
+        author: None,
+        excerpt: String::new(),
+        content: String::new(),
+        image_url: None,
+        enclosure_url: enclosure.map(|(_, url)| url.into()),
+        enclosure_type: enclosure.map(|(mime, _)| mime.into()),
+        published: Some(published),
+        hash: published,
+    }
+}
+
+fn store(conn: &mut rusqlite::Connection, feed: i64, items: &[db::NewArticle]) {
+    let tx = conn.transaction().unwrap();
+    db::store_articles(&tx, feed, items, None).unwrap();
+    db::detect_feed_type(&tx, feed).unwrap();
+    tx.commit().unwrap();
+}
+
+fn titles(conn: &rusqlite::Connection, q: &ListQuery) -> Vec<String> {
+    let mut t: Vec<String> = db::list_articles(conn, q, |u| u.to_string()).unwrap().into_iter().map(|a| a.title).collect();
+    t.sort();
+    t
+}
+
+#[test]
+fn feed_types_and_date_ranges() {
+    let (mut conn, dir) = temp_db();
+    let day = 86_400;
+    let t0 = db::now() - 30 * day;
+
+    // Types from the address are known as soon as the feed is added.
+    let code = db::insert_feed(&conn, "https://github.com/tauri-apps/tauri/releases.atom", None, None, None).unwrap();
+    let video = db::insert_feed(&conn, "https://www.youtube.com/feeds/videos.xml?channel_id=UC1", None, None, None).unwrap();
+    let show = db::insert_feed(&conn, "https://shows.example/all", None, Some("Show"), None).unwrap();
+    let blog = db::insert_feed(&conn, "https://blog.example/feed", None, Some("Blog"), None).unwrap();
+    let type_of = |conn: &rusqlite::Connection, id: i64| db::feed(conn, id).unwrap().feed_type;
+    assert_eq!(type_of(&conn, code), "code");
+    assert_eq!(type_of(&conn, video), "video");
+    assert_eq!(type_of(&conn, show), "article");
+
+    // A feed whose items carry audio becomes a podcast after its refresh.
+    fn mp3(url: &str) -> (&str, &str) {
+        ("audio/mpeg", url)
+    }
+    store(&mut conn, show, &[item("ep1", t0, Some(mp3("https://cdn.example/1.mp3"))), item("ep2", t0 + 10 * day, Some(mp3("https://cdn.example/2.mp3")))]);
+    store(&mut conn, blog, &[item("post1", t0 + day, None), item("post2", t0 + 20 * day, Some(mp3("https://cdn.example/x.mp3"))), item("post3", t0 + 25 * day, None)]);
+    store(&mut conn, code, &[item("v1.0", t0 + 2 * day, None)]);
+    assert_eq!(type_of(&conn, show), "podcast");
+    assert_eq!(type_of(&conn, blog), "article", "one episode among posts is still a blog");
+
+    let in_type = |t: &str| query(Scope::Type { feed_type: t.into() }, "all", "");
+    assert_eq!(titles(&conn, &in_type("podcast")), ["ep1", "ep2"]);
+    assert_eq!(titles(&conn, &in_type("code")), ["v1.0"]);
+    assert!(titles(&conn, &in_type("video")).is_empty());
+    assert!(titles(&conn, &in_type("nonsense")).is_empty(), "unknown types match nothing");
+
+    // The user's choice wins over detection, and survives the next detection.
+    let mut patch = db::FeedPatch {
+        custom_title: None,
+        url: "https://blog.example/feed".into(),
+        folder_id: None,
+        update_interval: None,
+        retention_mode: None,
+        retention_value: None,
+        full_text: false,
+        paused: false,
+        type_override: Some("newsletter".into()),
+    };
+    db::update_feed(&conn, blog, &patch).unwrap();
+    db::detect_feed_type(&conn, blog).unwrap();
+    let b = db::feed(&conn, blog).unwrap();
+    assert_eq!((b.feed_type.as_str(), b.type_override.as_deref(), b.detected_type.as_str()), ("newsletter", Some("newsletter"), "article"));
+    assert_eq!(titles(&conn, &in_type("newsletter")), ["post1", "post2", "post3"]);
+    // An invalid choice is ignored; None goes back to automatic.
+    patch.type_override = Some("bogus".into());
+    db::update_feed(&conn, blog, &patch).unwrap();
+    assert_eq!(type_of(&conn, blog), "article");
+
+    // Date ranges: since is inclusive, until is exclusive, both combine with scope and filter.
+    let ranged = |scope: Scope, since: Option<i64>, until: Option<i64>| {
+        let mut q = query(scope, "all", "");
+        q.range = db::DateRange { since, until };
+        q
+    };
+    assert_eq!(titles(&conn, &ranged(Scope::All, Some(t0 + 10 * day), None)), ["ep2", "post2", "post3"]);
+    assert_eq!(titles(&conn, &ranged(Scope::All, None, Some(t0 + day))), ["ep1"]);
+    assert_eq!(titles(&conn, &ranged(Scope::All, Some(t0 + day), Some(t0 + 10 * day))), ["post1", "v1.0"]);
+    assert_eq!(titles(&conn, &ranged(Scope::Type { feed_type: "podcast".into() }, Some(t0 + day), None)), ["ep2"]);
+    let ids = db::list_article_ids(&conn, &ranged(Scope::All, None, Some(t0 + day))).unwrap();
+    assert_eq!(ids.len(), 1);
+
+    // "Mark all as read" honors the range: clear everything older than 20 days ago.
+    let older = db::DateRange { since: None, until: Some(t0 + 20 * day) };
+    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &older).unwrap(), 4);
+    assert_eq!(titles(&conn, &query(Scope::All, "unread", "")), ["post2", "post3"]);
+    // Both podcast episodes were in that range, so the podcast scope has nothing left.
+    assert_eq!(db::mark_scope_read(&conn, &Scope::Type { feed_type: "podcast".into() }, &db::DateRange::default()).unwrap(), 0);
+
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn migration_detects_types_of_existing_feeds() {
+    // A v2 database: no type columns yet, feeds and their articles already stored.
+    let (conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let pod = db::insert_feed(&conn, "https://shows.example/all", None, Some("Show"), None).unwrap();
+    db::insert_feed(&conn, "https://codeberg.org/forgejo/forgejo/releases.rss", None, None, None).unwrap();
+    db::insert_feed(&conn, "https://blog.example/feed", None, None, None).unwrap();
+    conn.execute(
+        "INSERT INTO articles (feed_id, guid, title, enclosure_url, enclosure_type, published, fetched_at, last_seen)
+         VALUES (?1, 'e1', 'Episode', 'https://cdn.example/e1.mp3', 'audio/mpeg', 1, 1, 1)",
+        [pod],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "ALTER TABLE feeds DROP COLUMN type_override;
+         ALTER TABLE feeds DROP COLUMN detected_type;
+         PRAGMA user_version = 2;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let conn = db::open(&path).unwrap();
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 3);
+    let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
+    types.sort();
+    assert_eq!(
+        types,
+        [
+            ("https://blog.example/feed".to_string(), "article".to_string()),
+            ("https://codeberg.org/forgejo/forgejo/releases.rss".to_string(), "code".to_string()),
+            ("https://shows.example/all".to_string(), "podcast".to_string()),
+        ]
+    );
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -463,31 +611,60 @@ async fn live_network() {
 #[ignore]
 fn real_db_migration() {
     let path = std::env::var("TIDINGS_DB_COPY").expect("set TIDINGS_DB_COPY");
-    let before: Vec<(i64, Option<i64>, String)> = {
-        let c = rusqlite::Connection::open(&path).unwrap();
-        let mut s = c.prepare("SELECT id, parent_id, title FROM folders ORDER BY parent_id, position, lower(title)").unwrap();
+    // (kind, id, parent) in display order, per parent, before the upgrade.
+    let order_sql = |version: i64| {
+        if version >= 2 {
+            // One shared order for feeds and folders since v2.
+            "SELECT 'folder', id, parent_id, position FROM folders
+             UNION ALL SELECT 'feed', id, folder_id, position FROM feeds
+             ORDER BY 3, 4, 1"
+        } else {
+            "SELECT 'folder', id, parent_id, position FROM folders
+             UNION ALL SELECT 'feed', id, folder_id, position + 1000000 FROM feeds
+             ORDER BY 3, 4, 1"
+        }
+    };
+    let read_order = |c: &rusqlite::Connection, version: i64| -> Vec<(String, i64, Option<i64>)> {
+        let mut s = c.prepare(order_sql(version)).unwrap();
         s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(|x| x.unwrap()).collect()
     };
+    let (old_version, before) = {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        (v, read_order(&c, v))
+    };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
-    let tree = db::tree(&conn).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    // Folder order inside each parent is unchanged.
-    let mut after = tree.folders.clone();
-    after.sort_by_key(|f| (f.parent_id, f.position));
-    let after: Vec<(i64, Option<i64>, String)> = after.into_iter().map(|f| (f.id, f.parent_id, f.title)).collect();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
+    let tree = db::tree(&conn).unwrap();
+
+    // Nothing moved. (From v1, folders come first in each parent: the old look.)
+    let after = read_order(&conn, v);
     assert_eq!(before.len(), after.len());
-    let by_parent = |list: &[(i64, Option<i64>, String)], p: Option<i64>| list.iter().filter(|x| x.1 == p).map(|x| x.0).collect::<Vec<_>>();
-    for f in &before {
-        assert_eq!(by_parent(&before, f.1), by_parent(&after, f.1), "folder order changed under {:?}", f.1);
+    let in_parent = |list: &[(String, i64, Option<i64>)], p: Option<i64>| {
+        list.iter().filter(|x| x.2 == p).map(|x| (x.0.clone(), x.1)).collect::<Vec<_>>()
+    };
+    for item in &before {
+        assert_eq!(in_parent(&before, item.2), in_parent(&after, item.2), "order changed under {:?}", item.2);
     }
-    // Within every parent, all folders come before all feeds (the old look).
-    for parent in tree.folders.iter().map(|f| Some(f.id)).chain([None]) {
-        let max_folder = tree.folders.iter().filter(|f| f.parent_id == parent).map(|f| f.position).max();
-        let min_feed = tree.feeds.iter().filter(|f| f.folder_id == parent).map(|f| f.position).min();
-        if let (Some(a), Some(b)) = (max_folder, min_feed) {
-            assert!(a < b, "feeds above folders under {parent:?}");
+    if old_version < 2 {
+        for parent in tree.folders.iter().map(|f| Some(f.id)).chain([None]) {
+            let max_folder = tree.folders.iter().filter(|f| f.parent_id == parent).map(|f| f.position).max();
+            let min_feed = tree.feeds.iter().filter(|f| f.folder_id == parent).map(|f| f.position).min();
+            if let (Some(a), Some(b)) = (max_folder, min_feed) {
+                assert!(a < b, "feeds above folders under {parent:?}");
+            }
         }
     }
-    println!("migrated: {} folders, {} feeds", tree.folders.len(), tree.feeds.len());
+
+    // Every feed has a known type, and nobody has an override yet.
+    let mut types = std::collections::BTreeMap::<String, usize>::new();
+    for feed in &tree.feeds {
+        assert!(crate::feed_types::is_type(&feed.feed_type), "{}: {}", feed.url, feed.feed_type);
+        if old_version < 3 {
+            assert_eq!(feed.type_override, None);
+        }
+        *types.entry(feed.feed_type.clone()).or_default() += 1;
+    }
+    println!("migrated from v{old_version}: {} folders, {} feeds, types {types:?}", tree.folders.len(), tree.feeds.len());
 }

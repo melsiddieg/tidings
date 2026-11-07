@@ -8,6 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::feed_types;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -118,6 +119,53 @@ fn migrate(conn: &Connection) -> Result<()> {
         normalize_positions(conn)?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
     }
+    if version < 3 {
+        // v3: feed types (podcast, video, ...). `type_override` is the user's choice,
+        // NULL for automatic; `detected_type` is filled in from what is already stored.
+        // One transaction, so an interrupted upgrade leaves the database at v2.
+        conn.execute_batch(
+            "BEGIN;
+            ALTER TABLE feeds ADD COLUMN type_override TEXT;
+            ALTER TABLE feeds ADD COLUMN detected_type TEXT NOT NULL DEFAULT 'article';",
+        )?;
+        let backfill = (|| -> Result<()> {
+            let ids: Vec<i64> = conn
+                .prepare("SELECT id FROM feeds")?
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for id in ids {
+                detect_feed_type(conn, id)?;
+            }
+            Ok(())
+        })();
+        match backfill {
+            Ok(()) => conn.execute_batch("PRAGMA user_version = 3; COMMIT;")?,
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Works out a feed's type from its address and the enclosures of its recent
+/// items, and stores it. Run after each refresh and when the address changes.
+pub fn detect_feed_type(conn: &Connection, feed_id: i64) -> Result<()> {
+    let (url, site_url): (String, Option<String>) = conn.query_row(
+        "SELECT url, site_url FROM feeds WHERE id = ?1",
+        [feed_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let enclosures: Vec<(Option<String>, Option<String>)> = conn
+        .prepare(
+            "SELECT enclosure_type, enclosure_url FROM articles
+             WHERE feed_id = ?1 AND is_deleted = 0 ORDER BY published DESC LIMIT ?2",
+        )?
+        .query_map(params![feed_id, feed_types::RECENT_ITEMS], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let detected = feed_types::detect(&url, site_url.as_deref(), &enclosures);
+    conn.execute("UPDATE feeds SET detected_type = ?2 WHERE id = ?1", params![feed_id, detected])?;
     Ok(())
 }
 
@@ -186,6 +234,11 @@ pub struct Feed {
     pub total: i64,
     /// When it was added to Favorites (Unix time), 0 if it is not a favorite.
     pub pinned: i64,
+    /// The type in use: the user's choice, else the detected one.
+    pub feed_type: String,
+    /// The user's choice, `None` for automatic.
+    pub type_override: Option<String>,
+    pub detected_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +299,11 @@ pub enum Scope {
     Starred,
     Feed { id: i64 },
     Folder { id: i64 },
+    /// Every feed of one type (podcast, video, ...).
+    Type {
+        #[serde(rename = "type")]
+        feed_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -260,6 +318,18 @@ pub struct ListQuery {
     pub oldest_first: bool,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    #[serde(flatten)]
+    pub range: DateRange,
+}
+
+/// Published between `since` (inclusive) and `until` (exclusive), Unix seconds.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DateRange {
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default)]
+    pub until: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +362,7 @@ const FEED_COLUMNS: &str = "
     f.full_text, f.paused, f.last_fetched, f.last_success, f.last_error,
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0 AND a.is_deleted = 0),
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0),
-    f.pinned";
+    f.pinned, COALESCE(f.type_override, f.detected_type), f.type_override, f.detected_type";
 
 fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
@@ -317,6 +387,9 @@ fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         unread: r.get(18)?,
         total: r.get(19)?,
         pinned: r.get(20)?,
+        feed_type: r.get(21)?,
+        type_override: r.get(22)?,
+        detected_type: r.get(23)?,
     })
 }
 
@@ -378,7 +451,25 @@ fn scope_sql(scope: &Scope, args: &mut Vec<Value>) -> String {
             args.push(Value::Integer(*id));
             format!("a.feed_id IN ({FOLDER_FEEDS_SQL})")
         }
+        Scope::Type { feed_type } if feed_types::is_type(feed_type) => {
+            args.push(Value::Text(feed_type.clone()));
+            "a.feed_id IN (SELECT fe.id FROM feeds fe WHERE COALESCE(fe.type_override, fe.detected_type) = ?)".into()
+        }
+        Scope::Type { .. } => "1 = 0".into(),
     }
+}
+
+fn range_sql(range: &DateRange, args: &mut Vec<Value>) -> String {
+    let mut parts = vec!["1 = 1"];
+    if let Some(since) = range.since {
+        args.push(Value::Integer(since));
+        parts.push("a.published >= ?");
+    }
+    if let Some(until) = range.until {
+        args.push(Value::Integer(until));
+        parts.push("a.published < ?");
+    }
+    parts.join(" AND ")
 }
 
 fn filter_sql(filter: &str) -> &'static str {
@@ -406,10 +497,11 @@ fn search_sql(query: &str, args: &mut Vec<Value>) -> String {
 }
 
 /// Builds the WHERE clause shared by list and "mark all read" queries.
-fn where_clause(scope: &Scope, filter: &str, query: &str, args: &mut Vec<Value>) -> String {
+fn where_clause(scope: &Scope, filter: &str, query: &str, range: &DateRange, args: &mut Vec<Value>) -> String {
     let scope = scope_sql(scope, args);
     let search = search_sql(query, args);
-    format!("a.is_deleted = 0 AND {scope} AND {} AND {search}", filter_sql(filter))
+    let range = range_sql(range, args);
+    format!("a.is_deleted = 0 AND {scope} AND {} AND {search} AND {range}", filter_sql(filter))
 }
 
 pub fn list_articles(
@@ -418,7 +510,7 @@ pub fn list_articles(
     thumb: impl Fn(&str) -> String,
 ) -> Result<Vec<ArticleItem>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &mut args);
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(200).min(1000) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -457,7 +549,7 @@ pub fn list_articles(
 
 pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &mut args);
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(20).min(100) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -526,9 +618,9 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn mark_scope_read(conn: &Connection, scope: &Scope) -> Result<usize> {
+pub fn mark_scope_read(conn: &Connection, scope: &Scope, range: &DateRange) -> Result<usize> {
     let mut args = Vec::new();
-    let clause = where_clause(scope, "unread", "", &mut args);
+    let clause = where_clause(scope, "unread", "", range, &mut args);
     let sql = format!(
         "UPDATE articles SET is_read = 1, is_new = 0
          WHERE id IN (SELECT a.id FROM articles a WHERE {clause})"
@@ -825,7 +917,10 @@ pub fn insert_feed(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![url, folder_id, title.unwrap_or(""), site_url, position, now()],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    // From the address alone for now; the first refresh looks at the items too.
+    detect_feed_type(conn, id)?;
+    Ok(id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -839,6 +934,9 @@ pub struct FeedPatch {
     pub retention_value: Option<i64>,
     pub full_text: bool,
     pub paused: bool,
+    /// `None` for automatic.
+    #[serde(default)]
+    pub type_override: Option<String>,
 }
 
 pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> {
@@ -849,11 +947,12 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
         .as_deref()
         .filter(|m| matches!(*m, "all" | "count" | "days"));
     let interval = patch.update_interval.map(|m| m.clamp(0, 7 * 24 * 60));
+    let type_override = patch.type_override.as_deref().filter(|t| feed_types::is_type(t));
     let old_folder: Option<i64> =
         conn.query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))?;
     conn.execute(
         "UPDATE feeds SET custom_title = ?2, url = ?3, update_interval = ?4, retention_mode = ?5,
-            retention_value = ?6, full_text = ?7, paused = ?8
+            retention_value = ?6, full_text = ?7, paused = ?8, type_override = ?9
          WHERE id = ?1",
         params![
             id,
@@ -863,7 +962,8 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
             retention_mode,
             patch.retention_value.map(|v| v.max(1)),
             patch.full_text,
-            patch.paused
+            patch.paused,
+            type_override
         ],
     )?;
     if old_url != patch.url {
@@ -871,6 +971,7 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
             "UPDATE feeds SET etag = NULL, last_modified = NULL, last_error = NULL WHERE id = ?1",
             [id],
         )?;
+        detect_feed_type(conn, id)?;
     }
     if old_folder != patch.folder_id {
         move_feed(conn, id, patch.folder_id, None)?;

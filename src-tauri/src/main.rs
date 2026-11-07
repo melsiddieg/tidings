@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod discover;
 mod error;
+mod feed_types;
 mod feeds;
 mod media;
 mod media_server;
