@@ -12,10 +12,13 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {
-    // WKWebView on macOS 11+ and WebKitGTK on Linux.
+    // WKWebView on macOS 11+ and WebKitGTK on Linux and the BSDs.
     target: 'safari15',
     sourcemap: false,
     outDir: 'dist',
     emptyOutDir: true,
+    // Vite minifies CSS with lightningcss, which has no OpenBSD build.
+    // There the stylesheet is left unminified (a few kilobytes larger).
+    cssMinify: process.platform !== 'openbsd',
   },
 });

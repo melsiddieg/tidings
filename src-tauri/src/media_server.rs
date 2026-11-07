@@ -1,13 +1,17 @@
-//! Loopback HTTP server for podcast audio, used on Linux.
+//! Loopback HTTP server for podcast audio, used on Linux and the BSDs.
 //!
 //! WebKitGTK plays media through GStreamer, and GStreamer cannot read the app's
 //! `tidings://` scheme (it only has sources for http, file, blob and similar).
-//! So on Linux the player loads audio from this tiny server instead. It:
+//! So there the player loads audio from this tiny server instead. It:
 //! - listens only on 127.0.0.1, on a random port;
 //! - answers only URLs that start with a random secret token, so other programs
 //!   and web pages on this machine cannot use it;
 //! - hands every request to the same media proxy as `tidings://localhost/media/`,
 //!   so tracker stripping, the proxy setting and private-address checks still apply.
+//!
+//! Used wherever Tauri renders with WebKitGTK (`cfg(webkitgtk)`, set in build.rs):
+//! Linux, FreeBSD and OpenBSD. macOS plays `tidings://` directly.
+#![cfg_attr(not(webkitgtk), allow(dead_code))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -91,22 +95,63 @@ async fn serve(mut stream: TcpStream, prefix: &str, handler: Handler) -> std::io
         return write(&mut stream, empty(StatusCode::METHOD_NOT_ALLOWED), false).await;
     }
     let path = target.split('?').next().unwrap_or("");
-    let response = match path.strip_prefix(prefix) {
-        Some(encoded) if !encoded.is_empty() => handler(encoded.to_string(), range).await,
+    let Some(encoded) = path.strip_prefix(prefix).filter(|e| !e.is_empty()) else {
         // Wrong or missing token: reveal nothing.
-        _ => empty(StatusCode::NOT_FOUND),
+        return write(&mut stream, empty(StatusCode::NOT_FOUND), false).await;
     };
-    write(&mut stream, response, is_head).await
+    let encoded = encoded.to_string();
+    let first = handler(encoded.clone(), range.clone()).await;
+    match stream_plan(&first, range.as_deref()) {
+        Some(plan) => write_stream(&mut stream, first, plan, &encoded, &handler, is_head).await,
+        None => write(&mut stream, first, is_head).await,
+    }
 }
 
-async fn write(stream: &mut TcpStream, response: Response<Vec<u8>>, head_only: bool) -> std::io::Result<()> {
-    let status = response.status();
-    let mut out = format!(
-        "HTTP/1.1 {} {}\r\n",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("")
-    );
-    for (name, value) in response.headers() {
+/// `(start, end, total)` from a `Content-Range: bytes start-end/total` header.
+fn content_range(response: &Response<Vec<u8>>) -> Option<(u64, u64, u64)> {
+    let value = response.headers().get(header::CONTENT_RANGE)?.to_str().ok()?;
+    let (span, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = span.split_once('-')?;
+    Some((start.trim().parse().ok()?, end.trim().parse().ok()?, total.trim().parse().ok()?))
+}
+
+/// One response covering more than the media proxy's first slice.
+struct StreamPlan {
+    /// Answer `200` with the whole file (the request had no `Range`) instead of `206`.
+    whole: bool,
+    start: u64,
+    /// Last byte already in the first slice.
+    first_end: u64,
+    /// Last byte to send.
+    last: u64,
+    total: u64,
+}
+
+/// The media proxy answers in slices of a few megabytes, which is fine for a
+/// player that asks for the next range itself (WKWebView on macOS does). WebKitGTK's
+/// GStreamer source does not: it takes the slice's length as the length of the
+/// whole file, so episodes stopped after the first slice. When the request is
+/// open-ended (no `Range`, or `bytes=N-`), answer it like a normal web server:
+/// one response up to the end of the file, filled slice by slice.
+fn stream_plan(first: &Response<Vec<u8>>, range: Option<&str>) -> Option<StreamPlan> {
+    if first.status() != StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    let (start, first_end, total) = content_range(first)?;
+    let (_, wanted_end) = crate::media::parse_range(range);
+    let last = wanted_end.unwrap_or(u64::MAX).min(total.checked_sub(1)?);
+    let consistent = first_end >= start && first_end - start + 1 == first.body().len() as u64;
+    let whole = range.is_none();
+    (consistent && first_end < last && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
+}
+
+fn head_text<'a>(
+    status: StatusCode,
+    headers: impl Iterator<Item = (&'a header::HeaderName, &'a header::HeaderValue)>,
+    content_length: u64,
+) -> String {
+    let mut out = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or(""));
+    for (name, value) in headers {
         if name == header::CONNECTION || name == header::CONTENT_LENGTH {
             continue;
         }
@@ -114,11 +159,60 @@ async fn write(stream: &mut TcpStream, response: Response<Vec<u8>>, head_only: b
             out.push_str(&format!("{}: {}\r\n", name.as_str(), v));
         }
     }
-    let body = response.into_body();
-    out.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
-    stream.write_all(out.as_bytes()).await?;
+    out.push_str(&format!("Content-Length: {content_length}\r\nConnection: close\r\n\r\n"));
+    out
+}
+
+async fn write(stream: &mut TcpStream, response: Response<Vec<u8>>, head_only: bool) -> std::io::Result<()> {
+    let head = head_text(response.status(), response.headers().iter(), response.body().len() as u64);
+    stream.write_all(head.as_bytes()).await?;
     if !head_only {
-        stream.write_all(&body).await?;
+        stream.write_all(response.body()).await?;
+    }
+    stream.shutdown().await
+}
+
+/// Sends `plan.start..=plan.last` as one response. If the audio host fails part
+/// way, the connection closes early; the player then asks again from where it stopped.
+async fn write_stream(
+    stream: &mut TcpStream,
+    first: Response<Vec<u8>>,
+    plan: StreamPlan,
+    encoded: &str,
+    handler: &Handler,
+    head_only: bool,
+) -> std::io::Result<()> {
+    let StreamPlan { whole, start, first_end, last, total } = plan;
+    let range_name = header::CONTENT_RANGE;
+    let range_value = header::HeaderValue::from_str(&format!("bytes {start}-{last}/{total}"))
+        .map_err(std::io::Error::other)?;
+    let mut headers: Vec<_> = first.headers().iter().filter(|(n, _)| **n != range_name).collect();
+    let status = if whole {
+        StatusCode::OK
+    } else {
+        headers.push((&range_name, &range_value));
+        StatusCode::PARTIAL_CONTENT
+    };
+    let head = head_text(status, headers.into_iter(), last - start + 1);
+    stream.write_all(head.as_bytes()).await?;
+    if head_only {
+        return stream.shutdown().await;
+    }
+    stream.write_all(first.body()).await?;
+
+    let mut next = first_end + 1;
+    while next <= last {
+        let slice = handler(encoded.to_string(), Some(format!("bytes={next}-{last}"))).await;
+        let in_order = slice.status() == StatusCode::PARTIAL_CONTENT
+            && content_range(&slice).is_some_and(|(s, _, _)| s == next)
+            && !slice.body().is_empty();
+        if !in_order {
+            return Err(std::io::Error::other("the audio host stopped sending"));
+        }
+        let body = slice.body();
+        let take = body.len().min((last - next + 1) as usize);
+        stream.write_all(&body[..take]).await?;
+        next += take as u64;
     }
     stream.shutdown().await
 }
@@ -127,35 +221,79 @@ async fn write(stream: &mut TcpStream, response: Response<Vec<u8>>, head_only: b
 mod tests {
     use super::*;
 
-    fn fake_handler() -> Handler {
+    /// A 100-byte "file" served like the media proxy does: at most 10 bytes per answer.
+    const FILE_LEN: usize = 100;
+    const SLICE: u64 = 10;
+
+    fn file() -> Vec<u8> {
+        (0..FILE_LEN).map(|i| i as u8).collect()
+    }
+
+    fn sliced_handler() -> Handler {
         Arc::new(|encoded: String, range: Option<String>| {
             Box::pin(async move {
-                let body = format!("{encoded}|{}", range.unwrap_or_default()).into_bytes();
+                assert_eq!(encoded, "abc");
+                let (start, end) = crate::media::parse_range(range.as_deref());
+                let end = end.unwrap_or(u64::MAX).min(start + SLICE - 1).min(FILE_LEN as u64 - 1);
                 Response::builder()
                     .status(206)
                     .header(header::CONTENT_TYPE, "audio/mpeg")
-                    .header(header::CONTENT_RANGE, "bytes 0-9/100")
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{FILE_LEN}"))
                     .header(header::ACCEPT_RANGES, "bytes")
-                    .body(body)
+                    .body(file()[start as usize..=end as usize].to_vec())
                     .unwrap()
             })
         })
     }
 
     #[tokio::test]
+    async fn streams_whole_ranges_from_slices() {
+        let base = start(sliced_handler()).await.unwrap();
+        let url = format!("{base}/media/abc");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // No Range: the whole file as 200, like a normal web server.
+        let r = client.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-length"], "100");
+        assert!(r.headers().get("content-range").is_none());
+        assert_eq!(r.bytes().await.unwrap().to_vec(), file());
+
+        // Open-ended range: everything from there to the end.
+        let r = client.get(&url).header("Range", "bytes=35-").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["content-type"], "audio/mpeg");
+        assert_eq!(r.headers()["content-range"], "bytes 35-99/100");
+        assert_eq!(r.headers()["content-length"], "65");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), file()[35..]);
+
+        // A closed range across several slices.
+        let r = client.get(&url).header("Range", "bytes=5-57").send().await.unwrap();
+        assert_eq!(r.headers()["content-range"], "bytes 5-57/100");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), file()[5..=57]);
+
+        // A range inside one slice is passed through as is.
+        let r = client.get(&url).header("Range", "bytes=20-24").send().await.unwrap();
+        assert_eq!(r.headers()["content-range"], "bytes 20-24/100");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), file()[20..=24]);
+
+        // HEAD reports the full length without a body.
+        let r = client.head(&url).header("Range", "bytes=90-").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["content-length"], "10");
+        let r = client.head(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-length"], "100");
+    }
+
+    #[tokio::test]
     async fn serves_only_with_the_token() {
-        let base = start(fake_handler()).await.unwrap();
+        let base = start(sliced_handler()).await.unwrap();
         assert!(base.starts_with("http://127.0.0.1:"));
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let ok = client.get(format!("{base}/media/abc")).header("Range", "bytes=5-").send().await.unwrap();
         assert_eq!(ok.status().as_u16(), 206);
-        assert_eq!(ok.headers()["content-type"], "audio/mpeg");
-        assert_eq!(ok.headers()["content-range"], "bytes 0-9/100");
-        assert_eq!(ok.text().await.unwrap(), "abc|bytes=5-");
-
-        let head = client.head(format!("{base}/media/abc")).send().await.unwrap();
-        assert_eq!(head.status().as_u16(), 206);
 
         // Wrong token, missing token, other paths and other methods are refused.
         let port_root = base.rsplit_once('/').unwrap().0;

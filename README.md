@@ -1,8 +1,8 @@
 # Tidings
 
-A private, secure RSS and Atom feed reader for macOS and Linux. It follows the
-feature set of KDE's Akregator: folders, tabs, OPML, archive rules and keyboard
-navigation. It has no telemetry and no accounts.
+A private, secure RSS and Atom feed reader for macOS, Linux, FreeBSD and OpenBSD.
+It follows the feature set of KDE's Akregator: folders, tabs, OPML, archive rules and
+keyboard navigation. It has no telemetry and no accounts.
 
 Built with [Tauri 2](https://tauri.app) (Rust backend, system web view) and Svelte 5.
 Source: <https://github.com/melsiddieg/tidings>
@@ -50,7 +50,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | Strict Content Security Policy | The web view may only run the app's own scripts. It cannot load remote scripts, styles, fonts, frames or media. |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (private addresses and redirects to them are blocked). Images can be turned off; then they load only when you click "Load images". |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
-| Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
+| Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
 | No navigation | The window can only show the app itself. All other navigation and pop-ups are blocked; links open in a reader tab or your browser. |
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |
@@ -59,7 +59,7 @@ Source: <https://github.com/melsiddieg/tidings>
 
 Data folder:
 - macOS: `~/Library/Application Support/org.tidings.reader/`
-- Linux: `~/.local/share/org.tidings.reader/`
+- Linux, FreeBSD and OpenBSD: `~/.local/share/org.tidings.reader/`
 
 ## Installing on Linux
 
@@ -97,6 +97,19 @@ sudo dnf install ./Tidings-0.1.0-1.x86_64.rpm
 chmod +x Tidings_0.1.0_amd64.AppImage
 ./Tidings_0.1.0_amd64.AppImage
 ```
+
+## Installing on FreeBSD and OpenBSD
+
+There are no prebuilt BSD packages yet. Build the portable tarball on the machine
+itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
+
+```sh
+tar xzf release/freebsd/tidings-0.3.2-freebsd-x86_64.tar.gz
+./tidings-0.3.2-freebsd-x86_64/install.sh
+```
+
+For podcasts, install the GStreamer plugins listed in the next section; without them
+episodes fail with "This episode could not be played".
 
 ## Building
 
@@ -138,6 +151,43 @@ npm run tauri dev
 ```bash
 npm run tauri build
 ```
+
+### Building on FreeBSD and OpenBSD
+
+Tested on FreeBSD 15.0 (GhostBSD 26.1) and OpenBSD 8.0, amd64. The Tauri CLI has no BSD
+binaries, so use `scripts/build-bsd.sh`. It builds the UI, runs `cargo build --release`
+with the feature `tauri build` would use, and writes
+`release/<os>/tidings-<version>-<os>-x86_64.tar.gz`.
+
+**FreeBSD:**
+
+```sh
+sudo pkg install webkit2-gtk_41 gtk3 xdotool pkgconf git node24 npm-node24 \
+    gstreamer1-plugins-good gstreamer1-plugins-ugly gstreamer1-libav
+curl -sSf https://sh.rustup.rs | sh     # or: sudo pkg install rust
+scripts/build-bsd.sh
+```
+
+On GhostBSD the base system is split into packages, and the `-dev` parts needed for
+linking may be missing. If the build stops with `unable to find library -lexecinfo` or
+`Package 'krb5-gssapi' ... not found`, install `GhostBSD-libexecinfo-dev` and
+`GhostBSD-kerberos-dev`. If the `rust` package fails with `version FBSD_1.9 required`,
+the package repository is newer than your base system; update the system or use rustup.
+
+**OpenBSD:**
+
+```sh
+doas pkg_add webkitgtk41 gtk+3 xdotool node rust git \
+    gst-plugins-good gst-plugins-ugly gst-libav
+scripts/build-bsd.sh
+```
+
+On OpenBSD the script raises the per-process memory limit (`ulimit -d`) to the hard
+limit, because linking needs more than the 1.5 GB default of the `staff` login class.
+It also installs Rolldown's WebAssembly build, since Vite's bundler has no native
+OpenBSD binary, and the stylesheet is left unminified because lightningcss has no
+OpenBSD binary either. A release build takes about an hour on 2 CPUs; `LTO=false`
+makes it much faster.
 
 The output is in `src-tauri/target/release/bundle/`:
 - macOS: `macos/Tidings.app` and `dmg/Tidings_0.1.0_*.dmg`

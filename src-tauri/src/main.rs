@@ -61,18 +61,22 @@ fn build_main_window(app: &tauri::App) -> tauri::Result<()> {
 
 /// WebKitGTK's DMA-BUF renderer shows a blank window with NVIDIA's proprietary
 /// driver. Turn it off in that case, unless the user already chose a value.
-#[cfg(target_os = "linux")]
-fn linux_webkit_workarounds() {
-    let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+/// `/proc/driver/nvidia` exists on Linux; `/dev/nvidiactl` on Linux and FreeBSD.
+/// (OpenBSD has no NVIDIA driver.)
+#[cfg(webkitgtk)]
+fn webkitgtk_workarounds() {
+    let nvidia = ["/proc/driver/nvidia/version", "/dev/nvidiactl"]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists());
     if nvidia && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         // Safe: called first thing in main, before any other thread exists.
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 }
 
-/// WebKitGTK cannot play media from the tidings:// scheme, so Linux gets audio
-/// from a token-protected server on 127.0.0.1 (see media_server.rs).
-#[cfg(target_os = "linux")]
+/// WebKitGTK cannot play media from the tidings:// scheme, so Linux and the BSDs
+/// get audio from a token-protected server on 127.0.0.1 (see media_server.rs).
+#[cfg(webkitgtk)]
 fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
     let handle = app.clone();
     let handler: media_server::Handler = Arc::new(move |encoded, range| {
@@ -88,8 +92,8 @@ fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    linux_webkit_workarounds();
+    #[cfg(webkitgtk)]
+    webkitgtk_workarounds();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -110,7 +114,7 @@ fn main() {
             app.manage(state.clone());
             #[cfg(target_os = "macos")]
             app.set_menu(menu::build(app.handle())?)?;
-            #[cfg(target_os = "linux")]
+            #[cfg(webkitgtk)]
             start_media_server(app.handle(), &state);
             build_main_window(app)?;
             scheduler::start(app.handle().clone(), state);

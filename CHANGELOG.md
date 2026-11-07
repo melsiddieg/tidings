@@ -5,6 +5,23 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-06
+
+### Added
+- FreeBSD and OpenBSD. `scripts/build-bsd.sh` builds Tidings natively on either system
+  and makes a portable tarball; `install.sh` is now plain POSIX sh so it works there too.
+  Podcast audio uses the same 127.0.0.1 server as Linux, since the BSDs also play media
+  through WebKitGTK and GStreamer.
+
+### Fixed
+- Podcast episodes on Linux stopped after the first minute or two. The audio server
+  answered each request with one 2 MB slice, and WebKitGTK took that slice for the whole
+  file. It now answers like a normal web server, with one response up to the end of the
+  file, filled slice by slice from the audio host. Seeking had the same problem and is
+  fixed too.
+- After seeking in an episode on Linux, the play button kept showing a spinner while the
+  audio was already playing.
+
 ## [0.3.1] - 2026-11-06
 
 ### Fixed
@@ -75,7 +92,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/melsiddieg/tidings/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/melsiddieg/tidings/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/melsiddieg/tidings/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/melsiddieg/tidings/compare/v0.1.0...v0.2.0

@@ -129,6 +129,11 @@ class Player {
 
   onTime() {
     if (!this.audio) return;
+    // WebKitGTK fires `waiting` during a seek but not always `playing` afterwards,
+    // which left the spinner up while audio played. Small steps forward (not the
+    // jump of a seek) mean it is playing again.
+    const step = this.audio.currentTime - this.time;
+    if (this.loading && !this.audio.paused && step > 0 && step < 2) this.loading = false;
     this.time = this.audio.currentTime;
     if (Date.now() - this.lastSaved > 5000) this.savePosition();
   }
