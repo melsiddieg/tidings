@@ -145,6 +145,17 @@ For podcasts and videos inside Tidings, install the GStreamer plugins listed in 
 section; without them episodes fail with "This episode could not be played", and videos
 offer to open in your video player instead.
 
+For "Watch video" (YouTube and other sites in mpv), install mpv and yt-dlp:
+
+```sh
+sudo pkg install mpv yt-dlp     # FreeBSD
+doas pkg_add mpv yt-dlp         # OpenBSD
+```
+
+The yt-dlp package lags behind YouTube's changes. If videos stop opening, install a newer
+yt-dlp into `~/.local/bin` (for example with `pipx install yt-dlp`); Tidings gives mpv
+the newest copy it finds.
+
 ## Building
 
 ### Requirements
