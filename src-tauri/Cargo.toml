@@ -1,6 +1,6 @@
 [package]
 name = "tidings"
-version = "0.4.1"
+version = "0.4.2"
 description = "A private, secure RSS and Atom feed reader"
 repository = "https://github.com/melsiddieg/tidings"
 homepage = "https://github.com/melsiddieg/tidings"
@@ -39,5 +39,8 @@ encoding_rs = "0.8"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
 strip = true
+# Do not set `panic = "abort"`. On macOS, WebKit throws an Objective-C exception when
+# wry answers a tidings:// request that the web view has just cancelled. wry catches it
+# with objc2::exception::catch, which only works when Rust code can unwind. With
+# panic = "abort" the exception aborts the whole app (the 0.4.0/0.4.1 crash).

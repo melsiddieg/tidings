@@ -5,6 +5,17 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-07
+
+### Fixed
+- The macOS app could crash after running for a while. When the web view cancelled a
+  `tidings://` request (an image while you switch articles, or podcast audio while it
+  seeks or buffers) just as the answer arrived, WebKit threw an error that the web view
+  library normally ignores. Release builds were set to stop on any Rust panic
+  (`panic = "abort"`), which kept that error from being handled and ended the app. Release
+  builds no longer use that setting. A panic in a background task also no longer closes
+  the app on any system.
+
 ## [0.4.1] - 2026-11-07
 
 ### Security

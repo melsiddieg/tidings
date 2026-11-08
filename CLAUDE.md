@@ -56,6 +56,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file
   access happen in Rust commands, not in the UI.
 - No telemetry, analytics, crash reporting or update checks.
+- Never set `panic = "abort"` in `Cargo.toml`. wry relies on unwinding to catch the
+  Objective-C exception WebKit throws when a cancelled `tidings://` request is answered;
+  without it the macOS app aborts (see the comment in `[profile.release]`).
 
 ## Platform-specific code
 
