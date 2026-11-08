@@ -31,6 +31,7 @@
   // Text fields are saved when they lose focus or on Enter.
   let proxy = $state(store.settings.proxy);
   let userAgent = $state(store.settings.userAgent);
+  let videoPlayer = $state(store.settings.videoPlayer);
   let retentionCount = $state(store.settings.retentionCount);
   let retentionDays = $state(store.settings.retentionDays);
 
@@ -42,6 +43,14 @@
     if (proxy.trim() === s.proxy) return;
     if (await store.updateSettings({ proxy: proxy.trim() })) store.toast(proxy.trim() ? 'Proxy enabled' : 'Proxy removed', 'success');
     else proxy = s.proxy;
+  }
+
+  // The user may have installed a player since startup.
+  store.findVideoPlayer();
+
+  async function saveVideoPlayer() {
+    if (videoPlayer.trim() === s.videoPlayer) return;
+    if (!(await store.updateSettings({ videoPlayer: videoPlayer.trim() }))) videoPlayer = s.videoPlayer;
   }
 
   async function saveUserAgent() {
@@ -140,6 +149,18 @@
               <button class:on={s.linkTarget === 'tab'} onclick={() => set('linkTarget', 'tab')}>Reader tab</button>
               <button class:on={s.linkTarget === 'browser'} onclick={() => set('linkTarget', 'browser')}>Browser</button>
             </div>
+          </div>
+          <div class="row stack">
+            <div class="row-text">
+              <span class="row-title">Video player</span>
+              <span class="hint">YouTube, Vimeo, PeerTube and similar videos play in mpv or IINA, without the site's own player, cookies or account. mpv needs yt-dlp. Leave empty to find a player automatically, or enter a program name or path.</span>
+            </div>
+            <input class="input mono" bind:value={videoPlayer} onblur={saveVideoPlayer} onkeydown={onEnter(saveVideoPlayer)} placeholder="Automatic" spellcheck="false" autocomplete="off" />
+            <span class="hint">
+              {#if store.videoPlayer}Using {store.videoPlayer.name}: <code class="selectable">{store.videoPlayer.path}</code>
+              {:else if s.videoPlayer}This program was not found.
+              {:else}No player found. Install mpv or IINA.{/if}
+            </span>
           </div>
           <div class="row">
             <div class="row-text">

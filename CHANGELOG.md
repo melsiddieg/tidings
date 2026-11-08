@@ -5,6 +5,26 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Watch videos in mpv or IINA. Articles that link to a YouTube, Vimeo, Dailymotion, Odysee
+  or PeerTube video, or carry a video file, show a "Watch video" card and a toolbar button
+  (shortcut `W`). Clicking a video link inside an article also opens the player. The
+  site's own player never loads, so no site JavaScript, cookies or account are involved.
+  Tidings finds mpv or IINA by itself, or uses the program set in Settings → Reading. mpv
+  needs yt-dlp for these sites. With a proxy set, only mpv and IINA with an `http://` proxy
+  can play videos; Tidings refuses otherwise, so videos never bypass a SOCKS proxy such as
+  Tor.
+- PeerTube videos play inside Tidings. For a PeerTube link, Tidings asks the instance for
+  the video's files, picks one up to 720p, and streams it through its media proxy like
+  podcast audio. Attached video files play the same way.
+- "Find on PeerTube" for YouTube and other videos: searches Sepia Search for the title and
+  lists PeerTube videos to play here or in mpv/IINA. It runs only when you click it.
+
+### Changed
+- Videos and podcasts buffer less. The media proxy keeps the last 48 MB it fetched in
+  memory, in 2 MB blocks, and fetches the next 6 MB in the background while you play.
+  Before, every request from the player waited for a new round trip to the host.
+
 ## [0.4.2] - 2026-11-07
 
 ### Fixed

@@ -101,7 +101,17 @@ async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Re
         Err(code) => return empty(code),
     };
     let source = if state.settings().strip_tracking { media::strip_trackers(&target) } else { target };
-    match media::fetch(&state.net(), &state.media, &source, range).await {
+    #[cfg(debug_assertions)]
+    let started = std::time::Instant::now();
+    let result = media::fetch(&state.net(), &state.media, &source, range).await;
+    // Development builds log each media request (no URL), to see how the player reads.
+    #[cfg(debug_assertions)]
+    match &result {
+        Ok(c) => eprintln!("media {:?} -> {} {} bytes in {} ms", range, c.status, c.bytes.len(), started.elapsed().as_millis()),
+        // Not the error text: reqwest errors contain the URL.
+        Err(_) => eprintln!("media {:?} -> error after {} ms", range, started.elapsed().as_millis()),
+    }
+    match result {
         Ok(chunk) => {
             let mut builder = Response::builder()
                 .status(chunk.status)

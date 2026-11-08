@@ -12,10 +12,12 @@ use crate::error::{Error, Result};
 use crate::feeds;
 use crate::net;
 use crate::opml::{self, ImportStats};
+use crate::peertube;
 use crate::reader;
 use crate::sanitize;
 use crate::settings::Settings;
 use crate::state::AppState;
+use crate::video;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
@@ -172,14 +174,7 @@ pub async fn read_url(
         None => {
             // Reader tabs open links from articles, which feeds control. A link may
             // reach a private network only if it is on the host of a subscribed feed.
-            let target = url::Url::parse(&key).ok();
-            let trusted = target.as_ref().and_then(|t| {
-                db::feed_urls(&state.db())
-                    .ok()?
-                    .iter()
-                    .filter_map(|u| url::Url::parse(u).ok())
-                    .find(|f| net::same_host(f, t))
-            });
+            let trusted = url::Url::parse(&key).ok().and_then(|t| subscribed_feed_on(&state, &t));
             let page = Arc::new(
                 reader::extract_url(&state.net(), &key, trusted.as_ref(), settings.strip_tracking).await?,
             );
@@ -199,6 +194,15 @@ pub async fn read_url(
         html: rendered.html,
         blocked_images: rendered.blocked_images,
     })
+}
+
+/// A subscribed feed on the same host as `url`, if there is one.
+fn subscribed_feed_on(state: &AppState, url: &url::Url) -> Option<url::Url> {
+    db::feed_urls(&state.db())
+        .ok()?
+        .iter()
+        .filter_map(|u| url::Url::parse(u).ok())
+        .find(|f| net::same_host(f, url))
 }
 
 #[tauri::command]
@@ -432,6 +436,43 @@ pub fn open_external(url: String) -> Result<()> {
     }
     open::that_detached(parsed.as_str())?;
     Ok(())
+}
+
+/// The external video player Tidings would use now, if one is found.
+#[tauri::command]
+pub fn video_player(state: AppStateRef<'_>) -> Option<video::Player> {
+    video::find(&state.settings().video_player)
+}
+
+/// Plays a video link in the external player (mpv or IINA). See video.rs.
+#[tauri::command]
+pub async fn play_video(state: AppStateRef<'_>, url: String) -> Result<()> {
+    let settings = state.settings();
+    let url = net::parse_web_url(&url)?;
+    if settings.https_only && url.scheme() == "http" {
+        return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
+    }
+    // Feeds control these links. Like reader tabs, a link may reach a private
+    // network only if it is on the host of a subscribed feed.
+    let trusted = subscribed_feed_on(&state, &url).is_some();
+    if !trusted && state.net().is_private_host(&url).await {
+        return Err(Error::blocked());
+    }
+    let player = video::find(&settings.video_player).ok_or_else(video::not_found)?;
+    video::play(&player, &url, &settings.proxy, video::STARTUP_WAIT).await
+}
+
+/// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.
+#[tauri::command]
+pub async fn peertube_video(state: AppStateRef<'_>, url: String) -> Result<peertube::VideoFile> {
+    let url = net::parse_web_url(&url)?;
+    peertube::video(&state.net(), &url).await
+}
+
+/// Searches PeerTube (through Sepia Search) for a video title.
+#[tauri::command]
+pub async fn search_peertube(state: AppStateRef<'_>, query: String) -> Result<Vec<peertube::SearchHit>> {
+    peertube::search(&state.net(), &query, state.settings().load_images).await
 }
 
 #[tauri::command]

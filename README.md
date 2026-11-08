@@ -31,6 +31,18 @@ Source: <https://github.com/melsiddieg/tidings>
 - **Podcast player** with resume, seeking, 0.8×–2× speed and volume. Audio streams
   through Tidings' own proxy in byte ranges, and download-tracking redirects
   (Podtrac, Chartable, Podsights, OP3 and others) are skipped.
+- **Videos in your own player.** YouTube, Vimeo, Dailymotion, Odysee and PeerTube videos
+  play in [mpv](https://mpv.io) or [IINA](https://iina.io) (macOS) with one click or `W`.
+  The site's own player never loads, so no site JavaScript, cookies or account are used.
+  mpv needs [yt-dlp](https://github.com/yt-dlp/yt-dlp) for these sites. Tidings finds mpv
+  or IINA by itself; you can choose another program in Settings → Reading.
+- **PeerTube videos play inside Tidings.** For PeerTube links and attached video files,
+  Tidings picks a plain video file (up to 720p) and streams it through its own media proxy,
+  like podcast audio. No PeerTube JavaScript or peer-to-peer traffic.
+- **Find on PeerTube**: for a YouTube or other video, one click searches
+  [Sepia Search](https://sepiasearch.org) for the title and lists PeerTube videos you can
+  play instead. It only runs when you click, since it sends the title to Sepia Search
+  (run by Framasoft). Matches are by title, so check the channel and length.
 - Right-to-left text (Arabic, Hebrew, Persian) is detected per article.
 - Light, dark, sepia and system themes, six accent colors, serif/sans/mono reading font, adjustable text size.
 
@@ -59,6 +71,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
+| Videos | PeerTube videos and video files play in a `<video>` element fed by the same Rust media proxy as podcasts: the video host never talks to the web view. Other videos are played by mpv or IINA, never by an embedded site player. The player makes its own connections. With a proxy set, Tidings passes it to mpv or IINA, and refuses to start a player when the video would bypass the proxy (mpv cannot use SOCKS proxies such as Tor). Video links follow the same local network rule as reader tabs. |
 | No navigation | The window can only show the app itself. All other navigation and pop-ups are blocked; links open in a reader tab or your browser. |
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |
 | Local network protection | A feed cannot make the app send requests into your local network. Feeds, pages, favicons, images and audio may only reach public addresses; private and local ones are refused in the first URL, in every redirect and in DNS answers. The one exception is a feed you add yourself on a private host (a NAS or a self-hosted reader): Tidings may reach that host for the feed and for links to the same host. With a proxy, the proxy does DNS lookups, so only literal private addresses and local names are refused. |
@@ -116,8 +129,9 @@ tar xzf release/freebsd/tidings-0.4.2-freebsd-x86_64.tar.gz
 ./tidings-0.4.2-freebsd-x86_64/install.sh
 ```
 
-For podcasts, install the GStreamer plugins listed in the next section; without them
-episodes fail with "This episode could not be played".
+For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
+section; without them episodes fail with "This episode could not be played", and videos
+offer to open in your video player instead.
 
 ## Building
 
@@ -254,6 +268,13 @@ npm run check
 The Rust tests cover feed parsing, HTML sanitizing, tracker removal, the image
 proxy rules, reader-mode extraction, every database query and an OPML round trip.
 
+To check video playback on your machine (it opens mpv or IINA and plays a 19-second
+YouTube clip):
+
+```bash
+TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored
+```
+
 ### Working on the UI only
 
 `npm run dev` serves the UI at http://localhost:1420 with a fake in-memory backend
@@ -269,6 +290,7 @@ backend is only loaded in development and is not part of release builds.
 | `Space` | Scroll the article, then go to the next unread |
 | `O` / `Enter` | Open the article in a tab |
 | `V` | Open in browser |
+| `W` | Watch the video in mpv or IINA |
 | `F` | Load the full article |
 | `I` | Show or hide images |
 | `S` | Star |
@@ -302,6 +324,9 @@ src-tauri/src/
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar
+  video.rs               External video player (mpv, IINA)
+  peertube.rs            PeerTube video files and Sepia Search
+  media.rs               Audio and video streaming in byte ranges, with read-ahead
 ```
 
 ## Troubleshooting

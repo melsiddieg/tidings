@@ -36,6 +36,8 @@ pub struct Settings {
     pub view_mode: String,
     pub dock_badge: bool,
     pub concurrency: u32,
+    /// External video player: empty finds mpv or IINA, else a program name or path.
+    pub video_player: String,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             view_mode: "widescreen".into(),
             dock_badge: true,
             concurrency: 6,
+            video_player: String::new(),
         }
     }
 }
@@ -96,6 +99,11 @@ impl Settings {
                     "Proxy must start with http://, https://, socks5:// or socks5h://",
                 ));
             }
+        }
+
+        self.video_player = self.video_player.trim().to_string();
+        if self.video_player.chars().any(|c| c.is_control()) || self.video_player.len() > 1024 {
+            return Err(Error::msg("The video player path contains invalid characters"));
         }
 
         self.user_agent = self.user_agent.trim().to_string();

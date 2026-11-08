@@ -125,6 +125,9 @@
       case 'b':
         store.send('browser');
         break;
+      case 'w':
+        store.send('watch');
+        break;
       case 's':
         store.send('star');
         break;

@@ -8,7 +8,7 @@
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
   import type { ArticleDetail } from '../lib/types';
-  import { longTime } from '../lib/util';
+  import { longTime, videoSource } from '../lib/util';
 
   const PAGE = 15;
   let items = $state<ArticleDetail[]>([]);
@@ -102,6 +102,12 @@
             {@const current = player.isCurrent(item.enclosureUrl)}
             <button class="btn small" onclick={() => item.enclosureUrl && player.play({ articleId: item.id, feedId: item.feedId, title: item.title, url: item.enclosureUrl, type: item.enclosureType })}>
               <Icon name={current && player.playing ? 'pause-fill' : 'play'} size={12} stroke={0} />{current && player.playing ? 'Pause' : 'Play episode'}
+            </button>
+          {/if}
+          {#if videoSource(item.url, item.enclosureUrl, item.enclosureType)}
+            {@const v = videoSource(item.url, item.enclosureUrl, item.enclosureType)?.url}
+            <button class="btn small" onclick={() => store.watchVideo(v)}>
+              <Icon name="play" size={12} stroke={0} />Watch
             </button>
           {/if}
           <span class="grow"></span>

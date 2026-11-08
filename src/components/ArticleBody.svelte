@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from '../lib/store.svelte';
-  import { copyText } from '../lib/util';
+  import { copyText, isVideoLink } from '../lib/util';
 
   // `html` is already sanitized by the Rust backend; the CSP blocks scripts as a second layer.
   let { html, dir = 'auto' }: { html: string; dir?: 'ltr' | 'rtl' | 'auto' } = $props();
@@ -33,7 +33,11 @@
   function oncontextmenu(e: MouseEvent) {
     const href = linkFrom(e);
     if (!href) return;
+    const watch = isVideoLink(href)
+      ? [{ label: `Watch in ${store.videoPlayer?.name ?? 'video player'}`, icon: 'video', action: () => store.watchVideo(href) }]
+      : [];
     store.openMenu(e, [
+      ...watch,
       { label: 'Open in reader tab', icon: 'book', action: () => store.openWebTab(href) },
       { label: 'Open in background tab', icon: 'plus', action: () => store.openWebTab(href, true) },
       { label: 'Open in browser', icon: 'globe', action: () => store.openLink(href, 'browser') },

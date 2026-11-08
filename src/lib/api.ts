@@ -11,10 +11,13 @@ import type {
   ItemRef,
   ImportStats,
   ListQuery,
+  PeerTubeHit,
+  PeerTubeVideo,
   ReaderPage,
   Scope,
   Settings,
   Tree,
+  VideoPlayer,
 } from './types';
 
 export const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -78,6 +81,10 @@ export const api = {
   settings: () => call<Settings>('get_settings'),
   saveSettings: (settings: Settings) => call<Settings>('save_settings', { settings }),
   openExternal: (url: string) => call<void>('open_external', { url }),
+  videoPlayer: () => call<VideoPlayer | null>('video_player'),
+  playVideo: (url: string) => call<void>('play_video', { url }),
+  peertubeVideo: (url: string) => call<PeerTubeVideo>('peertube_video', { url }),
+  searchPeertube: (query: string) => call<PeerTubeHit[]>('search_peertube', { query }),
   setBadge: (count: number) => call<void>('set_badge', { count }),
   info: () => call<AppInfo>('app_info'),
 };

@@ -62,9 +62,14 @@ fn temp_db() -> (rusqlite::Connection, std::path::PathBuf) {
     (db::open(&path).unwrap(), dir)
 }
 
-fn rand_suffix() -> u64 {
+/// Unique within this test run. The clock alone is not enough: on macOS it moves in
+/// microseconds, so two tests that start together got the same folder.
+fn rand_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    format!("{nanos}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 fn query(scope: Scope, filter: &str, q: &str) -> ListQuery {
@@ -510,9 +515,13 @@ fn settings_validation() {
     s.proxy = "socks5h://127.0.0.1:9050".into();
     s.reader_size = 99;
     s.theme = "neon".into();
-    let v = s.validated().unwrap();
+    s.video_player = "  /opt/homebrew/bin/mpv \n".into();
+    let v = s.clone().validated().unwrap();
     assert_eq!(v.reader_size, 28);
     assert_eq!(v.theme, "system");
+    assert_eq!(v.video_player, "/opt/homebrew/bin/mpv");
+    s.video_player = "mpv\u{0}--script=x".into();
+    assert!(s.validated().is_err());
 }
 
 #[test]
@@ -570,6 +579,93 @@ async fn test_server() -> u16 {
         }
     });
     port
+}
+
+/// Serves a `size`-byte file (byte `i` is `i % 251`) with byte ranges, sending at most
+/// `cap` bytes per request, like some real hosts. Returns the port and a request count.
+async fn range_server(size: usize, cap: usize) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let range = head.lines().find_map(|l| l.strip_prefix("range: bytes=")).unwrap_or("0-").trim().to_string();
+                let (a, b) = range.split_once('-').unwrap_or(("0", ""));
+                let start: usize = a.parse().unwrap_or(0);
+                let end = b.parse().unwrap_or(usize::MAX).min(size - 1).min(start + cap - 1);
+                let reply = if start >= size {
+                    format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{size}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+                } else {
+                    let mut r = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        end - start + 1
+                    )
+                    .into_bytes();
+                    r.extend((start..=end).map(|i| (i % 251) as u8));
+                    r
+                };
+                let _ = stream.write_all(&reply).await;
+            });
+        }
+    });
+    (port, hits)
+}
+
+#[tokio::test]
+async fn media_blocks() {
+    use crate::media::{fetch, Media, CHUNK};
+    use std::sync::atomic::Ordering;
+    let mut net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    net.image = net.local.clone(); // the test server is on 127.0.0.1
+    let size = (CHUNK * 5 + 1234) as usize;
+    let (port, hits) = range_server(size, CHUNK as usize / 3).await;
+    let url = format!("http://127.0.0.1:{port}/v.mp4");
+    let media = std::sync::Arc::new(Media::default());
+    let expect = |start: usize, len: usize| (start..start + len).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+    let settle = || async {
+        // Wait until background read-ahead stops sending requests.
+        let mut last = usize::MAX;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let now = hits.load(Ordering::SeqCst);
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+    };
+
+    // A tiny probe, then a request late in block 0 that continues into block 1. The
+    // host sends a third of a block per request; blocks are still filled completely.
+    let c = fetch(&net, &media, &url, Some("bytes=0-1")).await.unwrap();
+    assert_eq!((c.status, c.bytes.clone()), (206, expect(0, 2)));
+    assert_eq!(c.content_range, Some(format!("bytes 0-1/{size}")));
+    let c = fetch(&net, &media, &url, Some("bytes=1000-")).await.unwrap();
+    assert_eq!(c.bytes, expect(1000, CHUNK as usize));
+    assert_eq!(c.mime, "video/mp4");
+
+    // Read-ahead fetched the next blocks, so reading on needs no new requests.
+    settle().await;
+    let before = hits.load(Ordering::SeqCst);
+    let start = 2 * CHUNK as usize;
+    let c = fetch(&net, &media, &url, Some(&format!("bytes={start}-"))).await.unwrap();
+    assert_eq!(c.bytes, expect(start, CHUNK as usize));
+    assert_eq!(hits.load(Ordering::SeqCst), before, "block 2 should come from memory");
+
+    // The end of the file: a short answer, then 416 past it.
+    let c = fetch(&net, &media, &url, Some(&format!("bytes={}-", size - 10))).await.unwrap();
+    assert_eq!(c.bytes, expect(size - 10, 10));
+    assert_eq!(c.content_range, Some(format!("bytes {}-{}/{size}", size - 10, size - 1)));
+    let c = fetch(&net, &media, &url, Some(&format!("bytes={size}-"))).await.unwrap();
+    assert_eq!(c.status, 416);
 }
 
 #[tokio::test]
@@ -674,7 +770,7 @@ async fn live_network() {
     println!("reader: {} ({} bytes)", page.title, page.html.len());
 
     // Podcast audio: tracker stripping and a ranged slice through the media proxy.
-    let cache = crate::media::ResolvedUrls::default();
+    let cache = std::sync::Arc::new(crate::media::Media::default());
     let lup = crate::media::strip_trackers(
         "https://dts.podtrac.com/redirect.mp3/mgln.ai/e/211/rss.art19.com/episodes/b6a6899c-93e0-412a-9222-6ad13baca403.mp3",
     );
@@ -762,4 +858,36 @@ fn real_db_migration() {
         *types.entry(feed.feed_type.clone()).or_default() += 1;
     }
     println!("migrated from v{old_version}: {} folders, {} feeds, types {types:?}", tree.folders.len(), tree.feeds.len());
+}
+
+/// PeerTube against real servers: search Sepia Search, ask the instance for a file,
+/// and read the first slice through the media proxy.
+/// Run with: cargo test -- --ignored live_peertube
+#[tokio::test]
+#[ignore]
+async fn live_peertube() {
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let found = crate::peertube::search(&net, "peertube", true).await.unwrap();
+    assert!(!found.is_empty(), "no search results");
+    println!("search: {} results, first: {} ({})", found.len(), found[0].title, found[0].host);
+
+    // Not every instance in the index is online; use the first that answers.
+    let mut file = None;
+    for hit in found.iter().take(5) {
+        match crate::peertube::video(&net, &Url::parse(&hit.url).unwrap()).await {
+            Ok(f) => {
+                file = Some(f);
+                break;
+            }
+            Err(e) => println!("skipped {}: {e}", hit.host),
+        }
+    }
+    let file = file.expect("no instance answered");
+    println!("file: {} {} ({} s)", file.label, file.url, file.duration);
+
+    let cache = std::sync::Arc::new(crate::media::Media::default());
+    let chunk = crate::media::fetch(&net, &cache, &file.url, Some("bytes=0-")).await.unwrap();
+    assert_eq!(chunk.status, 206);
+    assert!(chunk.mime.starts_with("video/"), "{}", chunk.mime);
+    println!("media: {} bytes, {}, {:?}", chunk.bytes.len(), chunk.mime, chunk.content_range);
 }

@@ -48,6 +48,8 @@ const feeds: Feed[] = [
   feed(11, null, 'LINUX Unplugged', 'https://feeds.fireside.fm/linuxunplugged/rss', { feedType: 'podcast' }),
   feed(12, 4, 'Tauri releases', 'https://github.com/tauri-apps/tauri/releases.atom', { feedType: 'code' }),
   feed(13, 4, 'Lobsters: rust', 'https://lobste.rs/t/rust.rss', { feedType: 'discussion' }),
+  feed(14, null, 'Computerphile', 'https://www.youtube.com/feeds/videos.xml?channel_id=UC9-y-6csu5WGm29I7JiwpnA', { feedType: 'video' }),
+  feed(15, null, 'Framasoft', 'https://framatube.org/feeds/videos.xml?videoChannelId=1', { feedType: 'video' }),
 ];
 
 const TITLES = [
@@ -111,7 +113,7 @@ for (let i = 0; i < 64; i++) {
     id: i + 1,
     feedId: f.id,
     title,
-    url: `https://example.com/${f.id}/article-${i}`,
+    url: f.id === 15 ? `https://framatube.org/w/mockPeerTubeVideo${String(i).padStart(5, '0')}` : f.feedType === 'video' ? `https://www.youtube.com/watch?v=mockvideo${i}` : `https://example.com/${f.id}/article-${i}`,
     author: AUTHORS[i % AUTHORS.length],
     excerpt: `${title}. It is a story that started small and grew into something much larger than anyone expected. Over the past year, a handful of people have been working on it in the open.`,
     // The first half spread over two days, the rest over about two months.
@@ -130,7 +132,7 @@ let settings: Settings = {
   loadImages: true, stripTracking: true, httpsOnly: false, proxy: '',
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
-  concurrency: 6,
+  concurrency: 6, videoPlayer: '',
 };
 
 function counts() {
@@ -318,6 +320,17 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'open_external':
       window.open(args.url, '_blank', 'noopener');
       return null;
+    case 'video_player':
+      return { name: 'mpv', path: '/usr/bin/mpv' };
+    case 'play_video':
+      return null;
+    case 'peertube_video':
+      return { title: 'What is PeerTube?', url: 'https://example.com/what-is-peertube-720.mp4', label: '720p', duration: 114 };
+    case 'search_peertube':
+      return [
+        { title: `${args.query} (mirror)`, url: 'https://tube.example/videos/watch/9c9de5e8-0a1e-484a-b099-e80766180a6d', channel: 'Mirrors', host: 'tube.example', duration: 754, thumbnail: svgImage(200, 160, 90), published: null },
+        { title: 'A different video with a similar title', url: 'https://video.example/w/kkGMgK9ZtnKfYAgnEtQxbv', channel: 'Someone else', host: 'video.example', duration: 61, thumbnail: null, published: null },
+      ];
     case 'set_badge':
       return null;
     case 'app_info':

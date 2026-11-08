@@ -33,8 +33,8 @@ pub struct AppState {
     pub images: Mutex<LruCache<String, Arc<CachedImage>>>,
     /// Recently extracted web pages (reader tabs), keyed by URL.
     pub pages: Mutex<LruCache<String, Arc<crate::reader::Extracted>>>,
-    /// Final audio URLs after redirects, for the podcast player.
-    pub media: crate::media::ResolvedUrls,
+    /// Media proxy state: final URLs after redirects and recent blocks of audio and video.
+    pub media: Arc<crate::media::Media>,
     /// Base URL of the loopback media server (Linux only).
     pub media_base: std::sync::OnceLock<String>,
     pub data_dir: PathBuf,

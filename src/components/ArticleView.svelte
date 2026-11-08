@@ -3,11 +3,12 @@
   import Icon from '../lib/Icon.svelte';
   import FeedIcon from './FeedIcon.svelte';
   import ArticleBody from './ArticleBody.svelte';
+  import VideoCard from './VideoCard.svelte';
   import { api, errorText } from '../lib/api';
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
   import type { ArticleDetail } from '../lib/types';
-  import { copyText, enclosureLabel, hostOf, longTime } from '../lib/util';
+  import { copyText, enclosureLabel, hostOf, isVideoFile, longTime, videoSource } from '../lib/util';
 
   let {
     articleId,
@@ -28,6 +29,12 @@
   const loadImages = $derived(imagesOverride ?? store.settings.loadImages);
   const read = $derived(detail ? store.isRead(detail) : false);
   const starred = $derived(detail ? store.isStarred(detail) : false);
+  // The article's video: a PeerTube page, an attached video file, or a video site link.
+  const video = $derived(detail ? videoSource(detail.url, detail.enclosureUrl, detail.enclosureType) : null);
+  // What mpv or IINA gets (W, toolbar).
+  const videoUrl = $derived(video?.url ?? null);
+  const thumb = $derived(detail ? store.articles.find((a) => a.id === detail?.id)?.thumb || null : null);
+  const playerName = $derived(store.videoPlayer?.name ?? 'video player');
 
   async function load(id: number) {
     const t = ++token;
@@ -139,6 +146,10 @@
       case 'browser':
         store.openExternal(detail.url);
         break;
+      case 'watch':
+        if (videoUrl) store.watchVideo(videoUrl);
+        else store.toast('This article has no video');
+        break;
       case 'copy-link':
         if (detail.url) copyText(detail.url).then(() => store.toast('Link copied'));
         break;
@@ -174,6 +185,11 @@
             <Icon name="external" size={15} />
           </button>
         {/if}
+        {#if videoUrl}
+          <button class="icon-btn" title={`Watch in ${playerName} (W)`} onclick={() => store.watchVideo(videoUrl)}>
+            <Icon name="video" size={16} />
+          </button>
+        {/if}
         <button class="icon-btn" title="Open in browser (V)" onclick={() => store.openExternal(detail?.url)} disabled={!detail.url}>
           <Icon name="globe" size={16} />
         </button>
@@ -200,6 +216,12 @@
           {#if detail.author}<div class="byline" dir="auto">By {detail.author}</div>{/if}
         </header>
 
+        {#if video}
+          {#key detail.id}
+            <VideoCard source={video} title={detail.title} poster={thumb} />
+          {/key}
+        {/if}
+
         {#if detail.enclosureUrl && isAudio(detail.enclosureType, detail.enclosureUrl)}
           {@const d = detail}
           {@const current = player.isCurrent(d.enclosureUrl)}
@@ -219,7 +241,7 @@
               <Icon name="external" size={14} />
             </button>
           </div>
-        {:else if detail.enclosureUrl}
+        {:else if detail.enclosureUrl && !(video && isVideoFile(detail.enclosureType, detail.enclosureUrl))}
           <button class="enclosure" onclick={() => store.openExternal(detail?.enclosureUrl)}>
             <span class="enclosure-icon"><Icon name="paperclip" size={18} /></span>
             <span class="enclosure-text">

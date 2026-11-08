@@ -12,12 +12,14 @@ mod media_server;
 mod menu;
 mod net;
 mod opml;
+mod peertube;
 mod protocol;
 mod reader;
 mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod video;
 #[cfg(test)]
 mod tests;
 
@@ -150,6 +152,10 @@ fn main() {
             commands::get_settings,
             commands::save_settings,
             commands::open_external,
+            commands::video_player,
+            commands::play_video,
+            commands::peertube_video,
+            commands::search_peertube,
             commands::set_badge,
             commands::app_info,
         ])

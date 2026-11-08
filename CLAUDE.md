@@ -11,6 +11,7 @@ npm ci                                   # JS dependencies
 npm run check                            # Svelte/TypeScript type check (must be 0 errors, 0 warnings)
 cargo test --manifest-path src-tauri/Cargo.toml                 # offline tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored    # + live network test
+TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored  # plays a clip in mpv/IINA
 npm run tauri dev                        # run the app (Vite on port 1420)
 npm run tauri build                      # release packages for the host OS
 npm run dev                              # UI only in a browser, with the fake backend in src/lib/mock.ts
@@ -27,7 +28,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
-  `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh).
+  `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
+  `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
+  files through the instance API, and Sepia Search).
 - `src-tauri/src/tests.rs` runs every SQL query against a real database. Add a case there when
   you add or change a query.
 - `src/lib/store.svelte.ts` holds UI state and actions; components in `src/components/`.
@@ -53,6 +56,15 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   proxy is set (Tor), every lookup must go through it, and `Net::is_private_host` skips DNS then.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
+- Videos play in an external player (`video.rs`), never in the web view: no iframes, no site
+  players. The player is a separate program with its own connections, like "Open in
+  browser". Keep `video::args` refusing to start when the player cannot use the proxy
+  setting (mpv ignores anything but `http://` proxies), so videos never bypass Tor. Start
+  the player with an argument list, never through a shell.
+- Videos inside Tidings (PeerTube, attached video files) use a `<video>` element whose
+  source is `mediaUrl(...)`, the same media proxy as podcasts. Never point it at a remote URL.
+- Sepia Search (`peertube::search`) sends the article title to sepiasearch.org. Call it only
+  when the user clicks "Find on PeerTube", never automatically.
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file
   access happen in Rust commands, not in the UI.
 - No telemetry, analytics, crash reporting or update checks.

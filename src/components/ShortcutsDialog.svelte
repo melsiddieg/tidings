@@ -15,6 +15,7 @@
         [['Space'], 'Scroll, then next unread'],
         [['O', 'Enter'], 'Open article in a tab'],
         [['V'], 'Open in browser'],
+        [['W'], 'Watch video in player'],
         [['F'], 'Load full article'],
         [['I'], 'Show or hide images'],
       ],

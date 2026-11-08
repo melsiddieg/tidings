@@ -70,6 +70,10 @@ class Player {
     }
   }
 
+  pause() {
+    this.audio?.pause();
+  }
+
   toggle() {
     const el = this.audio;
     if (!el || !this.episode) return;

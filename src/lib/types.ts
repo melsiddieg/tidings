@@ -151,6 +151,33 @@ export interface Settings {
   viewMode: 'widescreen' | 'normal' | 'combined';
   dockBadge: boolean;
   concurrency: number;
+  /** External video player: empty = find mpv or IINA, else a program name or path. */
+  videoPlayer: string;
+}
+
+/** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
+export interface PeerTubeVideo {
+  title: string;
+  url: string;
+  label: string;
+  duration: number;
+}
+
+/** A Sepia Search result. `url` is the watch page; `thumbnail` goes through the image proxy. */
+export interface PeerTubeHit {
+  title: string;
+  url: string;
+  channel: string;
+  host: string;
+  duration: number;
+  thumbnail: string | null;
+  published: string | null;
+}
+
+/** The external player that plays video links (see src-tauri/src/video.rs). */
+export interface VideoPlayer {
+  name: string;
+  path: string;
 }
 
 export interface FeedPatch {

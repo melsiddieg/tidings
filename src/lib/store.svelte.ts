@@ -19,8 +19,9 @@ import type {
   Settings,
   Tab,
   Tree,
+  VideoPlayer,
 } from './types';
-import { buildTree, childRef, flattenFeeds, sameItem } from './util';
+import { buildTree, childRef, flattenFeeds, isVideoLink, sameItem } from './util';
 import { FEED_TYPES, isAnyTime, rangeBounds, typeInfo, validRange, type TypeInfo } from './filters';
 
 const PAGE = 150;
@@ -46,6 +47,7 @@ export const DEFAULT_SETTINGS: Settings = {
   viewMode: 'widescreen',
   dockBadge: true,
   concurrency: 6,
+  videoPlayer: '',
 };
 
 // UI preferences that are not worth a database round trip live in localStorage.
@@ -90,6 +92,8 @@ class Store {
   tree = $state<Tree>({ folders: [], feeds: [], starred: 0 });
   settings = $state<Settings>({ ...DEFAULT_SETTINGS });
   info = $state<AppInfo | null>(null);
+  /** The external video player, or null when none is found. */
+  videoPlayer = $state<VideoPlayer | null>(null);
 
   scope = $state<Scope>(local.get<Scope>('scope', { kind: 'all' }));
   filter = $state<Filter>(local.get<Filter>('filter', 'all'));
@@ -220,6 +224,7 @@ class Store {
     } catch (err) {
       this.error(err);
     }
+    this.findVideoPlayer();
     document.documentElement.dataset.platform = this.info?.platform ?? 'web';
     this.applyAppearance();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyAppearance());
@@ -619,11 +624,37 @@ class Store {
 
   /** Handles a click on a link inside article content. */
   openLink(url: string, mode: 'default' | 'background' | 'browser' = 'default') {
+    if (mode === 'default' && this.videoPlayer && isVideoLink(url)) {
+      this.watchVideo(url);
+      return;
+    }
     if (url.startsWith('mailto:') || mode === 'browser' || (mode === 'default' && this.settings.linkTarget === 'browser')) {
       this.openExternal(url);
       return;
     }
     this.openWebTab(url, mode === 'background');
+  }
+
+  /** Looks for the external video player again (the user may have installed one). */
+  async findVideoPlayer() {
+    try {
+      this.videoPlayer = await api.videoPlayer();
+    } catch {
+      this.videoPlayer = null;
+    }
+  }
+
+  /** Plays a video link in mpv or IINA, without the site's own web player. */
+  async watchVideo(url: string | null | undefined) {
+    if (!url) return;
+    if (this.videoPlayer) this.toast(`Opening in ${this.videoPlayer.name}…`);
+    try {
+      await api.playVideo(url);
+    } catch (err) {
+      this.error(err);
+    } finally {
+      this.findVideoPlayer();
+    }
   }
 
   async openExternal(url: string | null | undefined) {
@@ -868,6 +899,7 @@ class Store {
       this.settings = await api.saveSettings(next);
       this.applyAppearance();
       if ('loadImages' in patch) this.loadArticles();
+      if ('videoPlayer' in patch) this.findVideoPlayer();
       return true;
     } catch (err) {
       this.settings = previous;

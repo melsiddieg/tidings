@@ -58,6 +58,72 @@ export function countLabel(n: number): string {
   return n > 999 ? '999+' : String(n);
 }
 
+const VIDEO_SITES = ['youtube.com', 'youtube-nocookie.com', 'youtu.be', 'vimeo.com', 'dailymotion.com', 'odysee.com'];
+
+/** A link to one video that mpv or IINA (through yt-dlp) can stream: YouTube,
+ *  Vimeo, Dailymotion, Odysee and PeerTube watch pages. Channel pages do not count. */
+export function isVideoLink(url: string | null | undefined): boolean {
+  if (!url) return false;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  const host = u.hostname.toLowerCase();
+  const site = VIDEO_SITES.find((d) => host === d || host.endsWith(`.${d}`));
+  const path = u.pathname;
+  switch (site) {
+    case 'youtube.com':
+    case 'youtube-nocookie.com':
+      return (path === '/watch' && u.searchParams.has('v')) || /^\/(shorts|live|embed)\/[\w-]{6,}/.test(path);
+    case 'youtu.be':
+      return /^\/[\w-]{6,}/.test(path);
+    case 'vimeo.com':
+      return /^\/\d+/.test(path);
+    case 'dailymotion.com':
+      return path.startsWith('/video/');
+    case 'odysee.com':
+      return /^\/@[^/]+\/[^/]+/.test(path);
+  }
+  return isPeerTubeLink(url);
+}
+
+/** A PeerTube watch page: /w/<short id> or /videos/watch/<uuid> (same rule as peertube::video_id). */
+export function isPeerTubeLink(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+    const path = u.pathname.replace(/\/+$/, '');
+    return /^\/(w|videos\/watch)\/[A-Za-z0-9-]{20,40}$/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+/** The video of an article and how it plays:
+ *  `peertube` and `file` play inside Tidings; `site` (YouTube...) plays in mpv or IINA. */
+export type VideoSource = { kind: 'peertube' | 'file' | 'site'; url: string };
+
+export function videoSource(
+  link: string | null | undefined,
+  enclosureUrl: string | null | undefined,
+  enclosureType: string | null | undefined,
+): VideoSource | null {
+  if (link && isPeerTubeLink(link)) return { kind: 'peertube', url: link };
+  if (enclosureUrl && isVideoFile(enclosureType, enclosureUrl)) return { kind: 'file', url: enclosureUrl };
+  if (link && isVideoLink(link)) return { kind: 'site', url: link };
+  return null;
+}
+
+/** A video file, such as the enclosure of a PeerTube feed item. */
+export function isVideoFile(type: string | null | undefined, url: string | null | undefined): boolean {
+  if (type?.startsWith('video/')) return true;
+  return !!url && /\.(mp4|m4v|webm|mkv|mov)(\?|$)/i.test(url);
+}
+
 export function hostOf(url: string | null | undefined): string {
   if (!url) return '';
   try {
