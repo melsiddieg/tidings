@@ -8,7 +8,9 @@ use std::time::Duration;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use reqwest::redirect::Policy;
-use reqwest::{Client, ClientBuilder, Proxy, Response};
+use reqwest::{Client, ClientBuilder, Proxy, RequestBuilder, Response};
+
+use url::{Host, Url};
 
 use crate::error::{Error, Result};
 use crate::settings::Settings;
@@ -21,35 +23,114 @@ pub const MAX_ICON_BYTES: usize = 512 * 1024;
 
 #[derive(Clone)]
 pub struct Net {
-    /// Used for feeds, web pages and favicons.
-    pub feed: Client,
-    /// Used for images inside articles. When no proxy is set, it refuses to
-    /// connect to private or local addresses, so a feed cannot make the app
-    /// probe your local network through an <img> tag.
+    /// Used for feeds, web pages and favicons on public hosts. It refuses private
+    /// and local addresses in every redirect and, when no proxy is set, in DNS
+    /// answers, so a feed cannot make the app send requests into your local network.
+    pub web: Client,
+    /// Used only for a host the user chose (a feed they subscribed to or an address
+    /// they typed) when that host is itself on a private network. See `Net::get`.
+    pub local: Client,
+    /// Used for images and podcast audio. Same rules as `web`, with a shorter timeout.
     pub image: Client,
+    /// A proxy is set. The app then makes no DNS lookups of its own, so that with
+    /// Tor every lookup goes through Tor.
+    proxied: bool,
 }
 
 impl Net {
     pub fn new(settings: &Settings) -> Result<Self> {
-        let feed = base_builder(settings)?.build()?;
-        let mut image = base_builder(settings)?.timeout(Duration::from_secs(25));
-        if settings.proxy.is_empty() {
-            // Check every hop: a public host could redirect to a literal private IP,
-            // which would skip the DNS check below.
-            image = image
-                .dns_resolver(Arc::new(PublicOnlyResolver))
-                .redirect(Policy::custom(|attempt| {
-                    if attempt.previous().len() >= 5 {
-                        attempt.error("too many redirects")
-                    } else if host_is_allowed_for_images(attempt.url()) {
-                        attempt.follow()
-                    } else {
-                        attempt.error("blocked: redirect to a private address")
-                    }
-                }));
-        }
-        Ok(Net { feed, image: image.build()? })
+        let proxied = !settings.proxy.is_empty();
+        let web = public_only(base_builder(settings)?, proxied, 8).build()?;
+        let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 5).build()?;
+        // A private host may redirect within itself (http to https, a moved path)
+        // or out to a public host, but never to another private host.
+        let local = base_builder(settings)?
+            .redirect(Policy::custom(|attempt| {
+                let first = attempt.previous().first().cloned();
+                if attempt.previous().len() >= 8 {
+                    attempt.error("too many redirects")
+                } else if first.is_some_and(|f| same_host(&f, attempt.url()))
+                    || host_looks_public(attempt.url())
+                {
+                    attempt.follow()
+                } else {
+                    attempt.error(BLOCKED)
+                }
+            }))
+            .build()?;
+        Ok(Net { web, local, image, proxied })
     }
+
+    /// Starts a GET request for a feed, page or favicon. `trusted` is the address
+    /// the user chose: the feed this request belongs to, or the address they typed.
+    /// Private and local addresses are allowed only when `url` is on the same host
+    /// as `trusted` and that host is on a private network. Everything else, such as
+    /// links inside articles or a site link a feed points to, must be public.
+    pub async fn get(&self, url: &Url, trusted: Option<&Url>) -> Result<RequestBuilder> {
+        if trusted.is_some_and(|t| same_host(t, url)) && self.is_private_host(url).await {
+            return Ok(self.local.get(url.as_str()));
+        }
+        // Literal IP addresses never reach the DNS resolver, so check them here.
+        if !host_looks_public(url) {
+            return Err(Error::blocked());
+        }
+        Ok(self.web.get(url.as_str()))
+    }
+
+    /// True when `url` points to this computer or a private network: a private or
+    /// loopback IP, a local name such as `nas` or `printer.local`, or (without a
+    /// proxy) a name whose DNS answers are all private.
+    pub async fn is_private_host(&self, url: &Url) -> bool {
+        match url.host() {
+            Some(Host::Ipv4(ip)) => !is_public_ip(IpAddr::V4(ip)),
+            Some(Host::Ipv6(ip)) => !is_public_ip(IpAddr::V6(ip)),
+            Some(Host::Domain(name)) => {
+                if is_local_name(name) {
+                    return true;
+                }
+                if self.proxied {
+                    return false;
+                }
+                match tokio::net::lookup_host((name, 0)).await {
+                    Ok(addrs) => {
+                        let addrs: Vec<SocketAddr> = addrs.collect();
+                        !addrs.is_empty() && addrs.iter().all(|a| !is_public_ip(a.ip()))
+                    }
+                    Err(_) => false,
+                }
+            }
+            None => false,
+        }
+    }
+}
+
+/// Text of the error when a request is refused. `error.rs` looks for it.
+pub const BLOCKED: &str = "blocked: the address is on a private or local network";
+
+/// Makes a client refuse private and local addresses. Every redirect is checked,
+/// because a public host could redirect to a literal private IP, which skips DNS.
+/// Without a proxy, DNS answers are checked too. With a proxy, the proxy does the
+/// lookups, so only the literal check applies.
+fn public_only(builder: ClientBuilder, proxied: bool, max_redirects: usize) -> ClientBuilder {
+    let builder = builder.redirect(Policy::custom(move |attempt| {
+        if attempt.previous().len() >= max_redirects {
+            attempt.error("too many redirects")
+        } else if host_looks_public(attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.error(BLOCKED)
+        }
+    }));
+    if proxied {
+        builder
+    } else {
+        builder.dns_resolver(Arc::new(PublicOnlyResolver))
+    }
+}
+
+/// Same host, ignoring scheme and port (http to https on one machine is common).
+pub fn same_host(a: &Url, b: &Url) -> bool {
+    a.host().is_some() && a.host() == b.host()
 }
 
 fn base_builder(settings: &Settings) -> Result<ClientBuilder> {
@@ -144,18 +225,24 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Returns false for URLs whose host is a literal private or local IP address.
-/// (Literal IPs skip DNS, so the resolver below never sees them.)
-pub fn host_is_allowed_for_images(url: &url::Url) -> bool {
+/// Returns false for URLs whose host is a literal private or local IP address
+/// or a local name. (Literal IPs skip DNS, so the resolver below never sees them.)
+pub fn host_looks_public(url: &Url) -> bool {
     match url.host() {
-        Some(url::Host::Ipv4(ip)) => is_public_ip(IpAddr::V4(ip)),
-        Some(url::Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
-        Some(url::Host::Domain(d)) => {
-            let d = d.to_ascii_lowercase();
-            !(d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local"))
-        }
+        Some(Host::Ipv4(ip)) => is_public_ip(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => is_public_ip(IpAddr::V6(ip)),
+        Some(Host::Domain(name)) => !is_local_name(name),
         None => false,
     }
+}
+
+/// Names that only make sense on this computer or a local network:
+/// `localhost`, single-label names such as `nas`, and local-only suffixes.
+pub fn is_local_name(name: &str) -> bool {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    const SUFFIXES: &[&str] =
+        &[".localhost", ".local", ".lan", ".home", ".internal", ".intranet", ".home.arpa"];
+    name == "localhost" || !name.contains('.') || SUFFIXES.iter().any(|s| name.ends_with(s))
 }
 
 /// Resolves a host name and keeps only public addresses.
@@ -167,7 +254,7 @@ pub async fn resolve_public(host: &str) -> std::io::Result<Vec<SocketAddr>> {
     if addrs.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "blocked: image host resolves to a private address",
+            BLOCKED,
         ));
     }
     Ok(addrs)
@@ -188,7 +275,7 @@ impl Resolve for PublicOnlyResolver {
 }
 
 /// Accepts only absolute http(s) URLs. `feed://` is treated as https.
-pub fn parse_web_url(input: &str) -> Result<url::Url> {
+pub fn parse_web_url(input: &str) -> Result<Url> {
     let trimmed = input.trim();
     let fixed = if let Some(rest) = trimmed.strip_prefix("feed://") {
         format!("https://{rest}")
@@ -199,7 +286,7 @@ pub fn parse_web_url(input: &str) -> Result<url::Url> {
     } else {
         trimmed.to_string()
     };
-    let url = url::Url::parse(&fixed).map_err(|_| Error::msg("This is not a valid web address"))?;
+    let url = Url::parse(&fixed).map_err(|_| Error::msg("This is not a valid web address"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(Error::msg("Only http:// and https:// addresses are supported"));
     }

@@ -126,6 +126,9 @@ fn full_database_workflow() {
     let rust = db::create_folder(&conn, "Rust", Some(tech)).unwrap();
     let feed_a = db::insert_feed(&conn, url.as_str(), Some(rust), None, None).unwrap();
     let feed_b = db::insert_feed(&conn, "https://other.example/rss", None, Some("Other"), None).unwrap();
+    let mut urls = db::feed_urls(&conn).unwrap();
+    urls.sort();
+    assert_eq!(urls, ["https://example.com/feed.xml", "https://other.example/rss"]);
 
     // Store articles; storing twice must not duplicate.
     for _ in 0..2 {
@@ -514,8 +517,8 @@ fn settings_validation() {
 
 #[test]
 fn image_host_checks() {
-    use crate::net::host_is_allowed_for_images;
-    let ok = |u: &str| host_is_allowed_for_images(&Url::parse(u).unwrap());
+    use crate::net::host_looks_public;
+    let ok = |u: &str| host_looks_public(&Url::parse(u).unwrap());
     assert!(ok("https://images.example.com/a.png"));
     assert!(!ok("http://127.0.0.1/a.png"));
     assert!(!ok("http://192.168.1.1/a.png"));
@@ -523,6 +526,98 @@ fn image_host_checks() {
     assert!(!ok("http://localhost:8080/a.png"));
     assert!(!ok("http://printer.local/a.png"));
     assert!(!ok("http://169.254.169.254/latest/meta-data"));
+}
+
+#[test]
+fn local_names() {
+    use crate::net::{host_looks_public, is_local_name, same_host};
+    for name in ["localhost", "nas", "router.lan", "printer.local", "box.home.arpa", "db.internal", "LOCALHOST."] {
+        assert!(is_local_name(name), "{name}");
+    }
+    for name in ["example.com", "blog.rust-lang.org", "localhost.example.com"] {
+        assert!(!is_local_name(name), "{name}");
+    }
+    let u = |s: &str| Url::parse(s).unwrap();
+    assert!(!host_looks_public(&u("http://nas:8080/feed")));
+    assert!(!host_looks_public(&u("http://10.0.0.5/feed")));
+    assert!(!host_looks_public(&u("http://[fd00::1]/feed")));
+    assert!(!host_looks_public(&u("http://100.64.0.1/feed"))); // carrier-grade NAT, Tailscale
+    assert!(host_looks_public(&u("https://example.com/feed")));
+    assert!(same_host(&u("http://10.0.0.5/feed"), &u("https://10.0.0.5:8443/story")));
+    assert!(!same_host(&u("http://10.0.0.5/feed"), &u("http://10.0.0.6/feed")));
+}
+
+/// A tiny HTTP server on 127.0.0.1 for the private-network tests.
+/// `/ok` answers 200; `/redirect?<url>` answers 302 to `<url>`.
+async fn test_server() -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let reply = if let Some(to) = path.strip_prefix("/redirect?") {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn private_addresses_need_a_trusted_host() {
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let port = test_server().await;
+    let lan_feed = Url::parse(&format!("http://127.0.0.1:{port}/ok")).unwrap();
+    let public_feed = Url::parse("https://example.com/feed.xml").unwrap();
+    let fetch = |url: Url, trusted: Option<Url>| {
+        let net = net.clone();
+        async move {
+            let response = net.get(&url, trusted.as_ref()).await?.send().await?;
+            Ok::<String, crate::error::Error>(response.text().await?)
+        }
+    };
+    let blocked = |r: crate::error::Result<String>| {
+        let err = r.expect_err("request should be blocked").to_string();
+        assert!(err.starts_with("Blocked"), "{err}");
+    };
+
+    // A feed the user added on a private host works.
+    assert_eq!(fetch(lan_feed.clone(), Some(lan_feed.clone())).await.unwrap(), "ok");
+
+    // A link to that host from a public feed, or from nowhere, does not.
+    blocked(fetch(lan_feed.clone(), Some(public_feed)).await);
+    blocked(fetch(lan_feed.clone(), None).await);
+
+    // The public client also refuses it when a redirect leads there.
+    blocked(net.web.get(format!("http://127.0.0.1:{port}/redirect?http://10.0.0.1/")).send().await.map_err(Into::into).map(|_| String::new()));
+
+    // A private feed may redirect within its own host, but not to another private host.
+    let same = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://127.0.0.1:{port}/ok")).unwrap();
+    assert_eq!(fetch(same, Some(lan_feed.clone())).await.unwrap(), "ok");
+    let other = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://localhost:{port}/ok")).unwrap();
+    blocked(fetch(other, Some(lan_feed)).await);
+}
+
+#[tokio::test]
+async fn proxy_makes_no_dns_lookups() {
+    let mut settings = crate::settings::Settings::default();
+    settings.proxy = "socks5h://127.0.0.1:9".into();
+    let net = crate::net::Net::new(&settings).unwrap();
+    let u = |s: &str| Url::parse(s).unwrap();
+    // Literal addresses and local names are still recognized without DNS.
+    assert!(net.is_private_host(&u("http://192.168.1.1/")).await);
+    assert!(net.is_private_host(&u("http://nas/")).await);
+    // Other names are not looked up, so they count as public and go through the proxy.
+    assert!(!net.is_private_host(&u("http://only-resolvable-on-the-lan.example/")).await);
 }
 
 #[test]
@@ -561,7 +656,7 @@ async fn live_network() {
     let found = crate::discover::discover(&net, "blog.rust-lang.org").await.unwrap();
     assert!(!found.is_empty(), "no feed discovered");
     let feed_url = Url::parse(&found[0].url).unwrap();
-    let resp = net.feed.get(feed_url.as_str()).send().await.unwrap();
+    let resp = net.web.get(feed_url.as_str()).send().await.unwrap();
     assert!(resp.status().is_success());
     let bytes = crate::net::read_limited(resp, crate::net::MAX_FEED_BYTES).await.unwrap();
     let parsed = feeds::parse_feed(&bytes, &feed_url, true).unwrap();
@@ -574,7 +669,7 @@ async fn live_network() {
 
     // Reader mode on the newest article.
     let link = parsed.articles.iter().find_map(|a| a.url.clone()).unwrap();
-    let page = crate::reader::extract_url(&net, &link, true).await.unwrap();
+    let page = crate::reader::extract_url(&net, &link, None, true).await.unwrap();
     assert!(page.html.len() > 500);
     println!("reader: {} ({} bytes)", page.title, page.html.len());
 
@@ -591,7 +686,7 @@ async fn live_network() {
 
     // A large podcast feed (about 19 MB) parses and keeps its audio enclosures.
     let bsd = Url::parse("https://feeds.fireside.fm/bsdnow/rss").unwrap();
-    let resp = net.feed.get(bsd.as_str()).send().await.unwrap();
+    let resp = net.web.get(bsd.as_str()).send().await.unwrap();
     let bytes = crate::net::read_limited(resp, crate::net::MAX_FEED_BYTES).await.unwrap();
     let started = std::time::Instant::now();
     let podcast = feeds::parse_feed(&bytes, &bsd, true).unwrap();

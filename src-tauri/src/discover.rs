@@ -28,8 +28,10 @@ const FEED_TYPES: &[(&str, &str)] = &[
 ];
 
 /// Fetches `url` and returns it as a candidate if it parses as a feed.
-async fn try_feed(net: &Net, url: &Url) -> Option<Candidate> {
-    let response = net.feed.get(url.as_str()).header(ACCEPT, feeds::FEED_ACCEPT).send().await.ok()?;
+/// `typed` is the address the user typed; see `Net::get`.
+async fn try_feed(net: &Net, url: &Url, typed: &Url) -> Option<Candidate> {
+    let request = net.get(url, Some(typed)).await.ok()?;
+    let response = request.header(ACCEPT, feeds::FEED_ACCEPT).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -81,8 +83,8 @@ fn feed_links(html: &str, page: &Url) -> Vec<Candidate> {
 pub async fn discover(net: &Net, input: &str) -> Result<Vec<Candidate>> {
     let url = net::parse_web_url(input)?;
     let response = net
-        .feed
-        .get(url.as_str())
+        .get(&url, Some(&url))
+        .await?
         .header(ACCEPT, "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, application/feed+json, application/xml;q=0.9, */*;q=0.5")
         .send()
         .await?;
@@ -109,7 +111,7 @@ pub async fn discover(net: &Net, input: &str) -> Result<Vec<Candidate>> {
     if found.is_empty() {
         for path in ["/feed", "/rss", "/feed.xml", "/rss.xml", "/atom.xml", "/index.xml"] {
             let Ok(guess) = final_url.join(path) else { continue };
-            if let Some(candidate) = try_feed(net, &guess).await {
+            if let Some(candidate) = try_feed(net, &guess, &url).await {
                 found.push(candidate);
                 break;
             }

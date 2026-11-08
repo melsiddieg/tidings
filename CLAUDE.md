@@ -45,6 +45,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   `media_server.rs`: a server bound to 127.0.0.1 on a random port that only answers URLs with
   a random secret token, and that serves through the same `protocol::proxy_media` code.
   macOS keeps using `tidings://`. Do not extend this to other directives or hosts.
+- Start feed, page and favicon requests with `Net::get(url, trusted)`, never with a client
+  directly. `trusted` is the address the user chose (the feed the request belongs to, or the
+  address they typed); pass `None` for anything else. Private addresses are allowed only on
+  the trusted host, and only when that host is itself private. Images and audio use
+  `net.image`, behind `protocol::decode_target`. Do not add DNS lookups of your own: when a
+  proxy is set (Tor), every lookup must go through it, and `Net::is_private_host` skips DNS then.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file

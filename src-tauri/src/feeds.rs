@@ -131,7 +131,8 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let settings = state.settings();
     let net = state.net();
 
-    let mut request = net.feed.get(&info.url).header(ACCEPT, FEED_ACCEPT);
+    let feed_url = Url::parse(&info.url).map_err(|_| Error::msg("The feed address is not valid"))?;
+    let mut request = net.get(&feed_url, Some(&feed_url)).await?.header(ACCEPT, FEED_ACCEPT);
     if let Some(etag) = &info.etag {
         request = request.header(IF_NONE_MATCH, etag);
     }
@@ -423,8 +424,8 @@ fn icon_links(html: &str, page: &Url) -> Vec<Url> {
     scored.into_iter().map(|(_, u)| u).collect()
 }
 
-async fn download_icon(net: &Net, url: &Url) -> Option<(Vec<u8>, String)> {
-    let response = net.feed.get(url.as_str()).header(ACCEPT, "image/*").send().await.ok()?;
+async fn download_icon(net: &Net, url: &Url, feed_url: &Url) -> Option<(Vec<u8>, String)> {
+    let response = net.get(url, Some(feed_url)).await.ok()?.header(ACCEPT, "image/*").send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -441,15 +442,17 @@ pub async fn fetch_icon(
     feed_url: &Url,
 ) -> Option<(Vec<u8>, String)> {
     // A feed controls its site link and icon URLs. Only follow them to public hosts,
-    // or to the feed's own host (for feeds on a private network).
-    let allowed = |u: &Url| net::host_is_allowed_for_images(u) || u.host_str() == feed_url.host_str();
+    // or to the feed's own host (for feeds on a private network). `Net::get`
+    // also checks DNS answers.
+    let allowed = |u: &Url| net::host_looks_public(u) || net::same_host(u, feed_url);
     let site = site_url
         .and_then(|s| Url::parse(s).ok())
         .filter(|u| allowed(u))
         .unwrap_or_else(|| feed_url.clone());
     let mut candidates: Vec<Url> = Vec::new();
 
-    if let Ok(response) = net.feed.get(site.as_str()).header(ACCEPT, "text/html").send().await {
+    let request = net.get(&site, Some(feed_url)).await;
+    if let Ok(response) = async { request?.header(ACCEPT, "text/html").send().await.map_err(Error::from) }.await {
         if response.status().is_success() {
             let page = response.url().clone();
             let content_type = net::content_type(response.headers());
@@ -478,7 +481,7 @@ pub async fn fetch_icon(
         if seen.len() > 6 {
             break;
         }
-        if let Some(icon) = download_icon(net, &candidate).await {
+        if let Some(icon) = download_icon(net, &candidate, feed_url).await {
             return Some(icon);
         }
     }

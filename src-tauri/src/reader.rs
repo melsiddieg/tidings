@@ -22,11 +22,18 @@ pub struct Extracted {
     pub html: String,
 }
 
-pub async fn extract_url(net: &Net, raw_url: &str, strip_tracking: bool) -> Result<Extracted> {
+/// Downloads a page and extracts the article. `trusted` is the feed the link came
+/// from, if it may reach a private network; see `Net::get`.
+pub async fn extract_url(
+    net: &Net,
+    raw_url: &str,
+    trusted: Option<&url::Url>,
+    strip_tracking: bool,
+) -> Result<Extracted> {
     let url = net::parse_web_url(raw_url)?;
     let response = net
-        .feed
-        .get(url.as_str())
+        .get(&url, trusted)
+        .await?
         .header(ACCEPT, "text/html, application/xhtml+xml;q=0.9, */*;q=0.5")
         .send()
         .await?;

@@ -5,6 +5,19 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+- Feeds could make Tidings send requests into your local network. Feed refreshes, full
+  text, reader tabs and favicons used a network client with no private-address check, so a
+  feed could redirect its refresh to an address such as `192.168.1.1`, or link to one from
+  an article set to "always load full text". These requests now follow the same rule as
+  images: private and local addresses are refused, in the first URL, in every redirect and
+  in DNS answers. A feed you add yourself on a private host (a NAS or a self-hosted reader)
+  still works, and so do links to that same host.
+- With a proxy set, redirects to private addresses and local names are now refused too,
+  for images and audio as well as pages. Before, a proxy turned these checks off.
+- A refused request now says "Blocked: this address is on a private or local network"
+  instead of a generic connection error.
+
 ## [0.4.0] - 2026-11-06
 
 ### Added

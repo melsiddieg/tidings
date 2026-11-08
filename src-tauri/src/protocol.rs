@@ -65,9 +65,11 @@ fn feed_icon(state: &AppState, rest: &str) -> Response<Vec<u8>> {
     }
 }
 
-/// Decodes and checks a proxied URL: http(s) only, and no private addresses
-/// unless the user routes traffic through their own proxy.
-fn decode_target(state: &AppState, encoded: &str) -> Result<String, StatusCode> {
+/// Decodes and checks a proxied URL: http(s) only, and no literal private
+/// addresses or local names. This holds with a proxy too: a local proxy would
+/// otherwise forward the request into your network. (Without a proxy, the image
+/// client also checks DNS answers.)
+fn decode_target(encoded: &str) -> Result<String, StatusCode> {
     let target = URL_SAFE_NO_PAD
         .decode(encoded.trim_end_matches('/'))
         .ok()
@@ -77,8 +79,7 @@ fn decode_target(state: &AppState, encoded: &str) -> Result<String, StatusCode> 
     if !matches!(url.scheme(), "http" | "https") {
         return Err(StatusCode::FORBIDDEN);
     }
-    let proxied = !state.settings().proxy.is_empty();
-    if !proxied && !net::host_is_allowed_for_images(&url) {
+    if !net::host_looks_public(&url) {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(target)
@@ -95,7 +96,7 @@ pub async fn media_response(app: &AppHandle, encoded: &str, range: Option<&str>)
 }
 
 async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Response<Vec<u8>> {
-    let target = match decode_target(state, encoded) {
+    let target = match decode_target(encoded) {
         Ok(t) => t,
         Err(code) => return empty(code),
     };
@@ -119,7 +120,7 @@ async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Re
 }
 
 async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
-    let target = match decode_target(state, encoded) {
+    let target = match decode_target(encoded) {
         Ok(t) => t,
         Err(code) => return empty(code),
     };

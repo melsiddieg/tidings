@@ -19,9 +19,26 @@ impl Error {
     pub fn msg(text: impl Into<String>) -> Self {
         Error::Msg(text.into())
     }
+
+    /// A request refused by the private-network rule in net.rs.
+    pub fn blocked() -> Self {
+        Error::Msg(BLOCKED_TEXT.into())
+    }
 }
 
+const BLOCKED_TEXT: &str = "Blocked: this address is on a private or local network. \
+    Tidings only connects to such addresses for feeds you add yourself.";
+
 fn describe_http(err: &reqwest::Error) -> String {
+    // A request refused by the private-network rule in net.rs. Check this first:
+    // reqwest reports it as a connect or redirect error.
+    let mut source: Option<&dyn std::error::Error> = Some(err);
+    while let Some(inner) = source {
+        if inner.to_string().contains(crate::net::BLOCKED) {
+            return BLOCKED_TEXT.into();
+        }
+        source = inner.source();
+    }
     if err.is_timeout() {
         return "The server took too long to respond".into();
     }

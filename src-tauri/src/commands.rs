@@ -128,7 +128,10 @@ pub async fn fetch_full_text(
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
-        let extracted = reader::extract_url(&state.net(), &url, settings.strip_tracking).await?;
+        // The link may reach a private network only if it is on the feed's own host.
+        let feed_url = url::Url::parse(&db::fetch_info(&state.db(), row.feed_id)?.url).ok();
+        let extracted =
+            reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
         db::save_full_content(&state.db(), id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
@@ -167,7 +170,19 @@ pub async fn read_url(
     let page = match cached {
         Some(page) => page,
         None => {
-            let page = Arc::new(reader::extract_url(&state.net(), &key, settings.strip_tracking).await?);
+            // Reader tabs open links from articles, which feeds control. A link may
+            // reach a private network only if it is on the host of a subscribed feed.
+            let target = url::Url::parse(&key).ok();
+            let trusted = target.as_ref().and_then(|t| {
+                db::feed_urls(&state.db())
+                    .ok()?
+                    .iter()
+                    .filter_map(|u| url::Url::parse(u).ok())
+                    .find(|f| net::same_host(f, t))
+            });
+            let page = Arc::new(
+                reader::extract_url(&state.net(), &key, trusted.as_ref(), settings.strip_tracking).await?,
+            );
             state.pages.lock().unwrap_or_else(|e| e.into_inner()).put(key, page.clone());
             page
         }

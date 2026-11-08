@@ -657,6 +657,13 @@ pub struct FetchInfo {
     pub retention_value: Option<i64>,
 }
 
+/// The address of every subscribed feed.
+pub fn feed_urls(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT url FROM feeds")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn fetch_info(conn: &Connection, id: i64) -> Result<FetchInfo> {
     conn.query_row(
         "SELECT url, etag, last_modified, site_url, icon IS NOT NULL, icon_checked,
