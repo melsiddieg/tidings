@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-07
+
 ### Security
 - Feeds could make Tidings send requests into your local network. Feed refreshes, full
   text, reader tabs and favicons used a network client with no private-address check, so a
