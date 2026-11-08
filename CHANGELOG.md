@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-08
+
 ### Added
 - Filter a folder by feed type. When a folder (or All articles, or Starred) holds more
   than one kind of feed, icons above the list show each type with its unread count:
@@ -173,7 +175,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/melsiddieg/tidings/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/melsiddieg/tidings/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/melsiddieg/tidings/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/melsiddieg/tidings/compare/v0.4.1...v0.4.2
