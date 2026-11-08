@@ -48,6 +48,7 @@
     if (key === 'Escape') {
       if (store.menu) store.menu = null;
       else if (store.dialog) store.dialog = null;
+      else if (store.marked.length > 0) store.clearMarks();
       else if (isTyping(e.target)) (e.target as HTMLElement).blur();
       return;
     }
@@ -145,7 +146,11 @@
         store.send('copy-link');
         break;
       case 'Delete':
-        store.send('delete');
+      case 'Backspace':
+        // With feeds or folders marked in the sidebar, delete those (after a confirmation).
+        if (store.marked.length > 0) store.deleteMarked();
+        else if (key === 'Delete') store.send('delete');
+        else return;
         break;
       case 'r':
         store.refreshScope();

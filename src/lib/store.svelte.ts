@@ -92,6 +92,9 @@ class Store {
   tree = $state<Tree>({ folders: [], feeds: [], starred: 0 });
   settings = $state<Settings>({ ...DEFAULT_SETTINGS });
   info = $state<AppInfo | null>(null);
+  /** Feeds and folders marked in the sidebar with ⌘/Ctrl- or Shift-click ("feed:1", "folder:2"). */
+  marked = $state<string[]>([]);
+  private markAnchor: string | null = null;
   /** The external video player, or null when none is found. */
   videoPlayer = $state<VideoPlayer | null>(null);
 
@@ -775,6 +778,159 @@ class Store {
   // -------------------------------------------------------------------------
   // Subscriptions
   // -------------------------------------------------------------------------
+
+  /** Whether any folder is open: the sidebar offers "Collapse all" then, else "Expand all". */
+  get anyFolderOpen(): boolean {
+    return this.tree.folders.some((f) => f.expanded);
+  }
+
+  /** Opens or closes the folders `ids`, or every folder when `ids` is omitted. */
+  async setExpanded(expanded: boolean, ids?: number[]) {
+    const targets = ids ? ids.map((id) => this.folderById.get(id)) : this.tree.folders;
+    for (const f of targets) if (f) f.expanded = expanded;
+    try {
+      await api.setFoldersExpanded(ids ?? null, expanded);
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** A folder and every folder inside it. */
+  folderSubtree(id: number): number[] {
+    const out = [id];
+    for (let i = 0; i < out.length; i++) {
+      for (const f of this.tree.folders) if (f.parentId === out[i]) out.push(f.id);
+    }
+    return out;
+  }
+
+  /** Feeds and folders in the order the sidebar shows them (inside open folders only). */
+  private visibleItems(): string[] {
+    const out: string[] = [];
+    const walk = (children: TreeChild[]) => {
+      for (const c of children) {
+        if (c.kind === 'feed') {
+          out.push(`feed:${c.feed.id}`);
+        } else {
+          out.push(`folder:${c.node.folder.id}`);
+          if (c.node.folder.expanded) walk(c.node.children);
+        }
+      }
+    };
+    walk(this.root.children);
+    return out;
+  }
+
+  /** The feed or folder shown in the article list, if that is what is selected. */
+  private scopeKey(): string | null {
+    const s = this.scope;
+    return s.kind === 'feed' || s.kind === 'folder' ? `${s.kind}:${s.id}` : null;
+  }
+
+  /** A click on a feed or folder in the sidebar. ⌘/Ctrl adds it to the marked items or
+   *  removes it, Shift marks everything between it and the last click, and a plain
+   *  click selects it and clears the marks. */
+  clickItem(ref: ItemRef, e: MouseEvent) {
+    const key = `${ref.kind}:${ref.id}`;
+    if (e.metaKey || e.ctrlKey) {
+      // Like Finder: the item already selected joins the first ⌘-click.
+      const current = this.scopeKey();
+      if (this.marked.length === 0 && current && current !== key) this.marked = [current];
+      this.marked = this.marked.includes(key) ? this.marked.filter((k) => k !== key) : [...this.marked, key];
+      this.markAnchor = key;
+      return;
+    }
+    if (e.shiftKey) {
+      const keys = this.visibleItems();
+      const to = keys.indexOf(key);
+      const from = keys.indexOf(this.markAnchor ?? this.scopeKey() ?? key);
+      const [a, b] = from < 0 ? [to, to] : from <= to ? [from, to] : [to, from];
+      // Like Finder, the range adds to what is already marked.
+      this.marked = [...new Set([...this.marked, ...keys.slice(a, b + 1)])];
+      return;
+    }
+    this.marked = [];
+    this.markAnchor = key;
+    this.selectScope(ref.kind === 'feed' ? { kind: 'feed', id: ref.id } : { kind: 'folder', id: ref.id });
+  }
+
+  clearMarks() {
+    this.marked = [];
+    this.markAnchor = null;
+  }
+
+  /** The marked items that still exist. */
+  private markedItems(): ItemRef[] {
+    return this.marked
+      .map((k) => {
+        const [kind, id] = k.split(':');
+        return { kind, id: Number(id) } as ItemRef;
+      })
+      .filter((r) => (r.kind === 'feed' ? this.feedById.has(r.id) : this.folderById.has(r.id)));
+  }
+
+  /** Deletes the marked feeds and folders after one confirmation. */
+  deleteMarked() {
+    const items = this.markedItems();
+    if (items.length === 0) return;
+    const folders = items.filter((r) => r.kind === 'folder').length;
+    const feeds = items.length - folders;
+    const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const what = [folders && count(folders, 'folder'), feeds && count(feeds, 'feed')].filter(Boolean).join(' and ');
+    this.confirm(
+      `Delete ${what}?`,
+      (folders ? 'Folders go with every subfolder and feed inside them. ' : '') +
+        'All their articles, including starred ones, will be deleted from this computer.',
+      'Delete',
+      async () => {
+        try {
+          const n = await api.deleteItems(items);
+          this.clearMarks();
+          await this.reloadTree();
+          if (!this.scopeExists(this.scope)) this.selectScope({ kind: 'all' });
+          else await this.loadArticles();
+          this.toast(n === 1 ? 'Deleted 1 feed' : `Deleted ${n} feeds`, 'success');
+        } catch (err) {
+          this.error(err);
+        }
+      },
+    );
+  }
+
+  /** Removes every feed and folder, to start over. Settings stay. */
+  deleteAllSubscriptions() {
+    const feeds = this.tree.feeds.length;
+    const folders = this.tree.folders.length;
+    if (feeds + folders === 0) return this.toast('There are no subscriptions to remove');
+    const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    this.confirm(
+      'Remove all subscriptions?',
+      `All ${count(feeds, 'feed')} and ${count(folders, 'folder')} will be deleted, with every article, including starred ones. ` +
+        'Settings stay. Export OPML first if you may want them back.',
+      'Remove all',
+      async () => {
+        try {
+          await api.deleteAllSubscriptions();
+          this.clearMarks();
+          await this.reloadTree();
+          this.selectScope({ kind: 'all' });
+          this.toast('All subscriptions removed', 'success');
+        } catch (err) {
+          this.error(err);
+        }
+      },
+    );
+  }
+
+  /** The context menu for a right-click on one of several marked items. */
+  markedMenu(e: MouseEvent) {
+    const n = this.marked.length;
+    this.openMenu(e, [
+      { label: `Delete ${n} items…`, icon: 'trash', danger: true, action: () => this.deleteMarked() },
+      { separator: true },
+      { label: 'Clear selection', icon: 'x', action: () => this.clearMarks() },
+    ]);
+  }
 
   async toggleFolder(id: number) {
     const folder = this.folderById.get(id);

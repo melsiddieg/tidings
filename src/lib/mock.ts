@@ -297,6 +297,26 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'set_folder_expanded':
       folders.find((f) => f.id === args.id)!.expanded = args.expanded;
       return null;
+    case 'set_folders_expanded':
+      for (const f of folders) if (!args.ids || args.ids.includes(f.id)) f.expanded = args.expanded;
+      return null;
+    case 'delete_items':
+    case 'delete_all_subscriptions': {
+      const before = feeds.length;
+      const items: { kind: string; id: number }[] =
+        cmd === 'delete_items' ? args.items : [...feeds.map((f) => ({ kind: 'feed', id: f.id })), ...folders.map((f) => ({ kind: 'folder', id: f.id }))];
+      const gone = new Set(items.filter((i) => i.kind === 'folder').map((i) => i.id));
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const f of folders) if (f.parentId != null && gone.has(f.parentId) && !gone.has(f.id)) { gone.add(f.id); grew = true; }
+      }
+      const feedIds = new Set(items.filter((i) => i.kind === 'feed').map((i) => i.id));
+      for (const f of feeds) if (f.folderId != null && gone.has(f.folderId)) feedIds.add(f.id);
+      for (let i = feeds.length - 1; i >= 0; i--) if (feedIds.has(feeds[i].id)) feeds.splice(i, 1);
+      for (let i = folders.length - 1; i >= 0; i--) if (gone.has(folders[i].id)) folders.splice(i, 1);
+      articles = articles.filter((a) => !feedIds.has(a.feedId));
+      return before - feeds.length;
+    }
     case 'refresh_feeds': {
       const total = args.feedIds?.length ?? feeds.length;
       let done = 0;

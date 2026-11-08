@@ -138,6 +138,8 @@ fn import_level(
             let (folder, created) = db::find_or_create_folder(conn, title, parent)?;
             if created {
                 stats.folders += 1;
+                // Imported folders start closed; a large import would fill the sidebar.
+                db::set_folder_expanded(conn, folder, false)?;
             }
             import_level(conn, &node.children, Some(folder), stats)?;
         }

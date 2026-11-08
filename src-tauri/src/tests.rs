@@ -252,6 +252,7 @@ fn full_database_workflow() {
     let stats = opml::import(&conn2, &outlines).unwrap();
     assert_eq!(stats.feeds, 2);
     assert_eq!(stats.folders, 2);
+    assert!(db::folders(&conn2).unwrap().iter().all(|f| !f.expanded), "imported folders start closed");
     let again = opml::import(&conn2, &outlines).unwrap();
     assert_eq!(again.feeds, 0);
     assert_eq!(again.skipped, 2);
@@ -503,6 +504,47 @@ fn migration_detects_types_of_existing_feeds() {
             ("https://shows.example/all".to_string(), "podcast".to_string()),
         ]
     );
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bulk_delete_and_expand() {
+    let (conn, dir) = temp_db();
+    let tech = db::create_folder(&conn, "Tech", None).unwrap();
+    let rust = db::create_folder(&conn, "Rust", Some(tech)).unwrap();
+    let news = db::create_folder(&conn, "News", None).unwrap();
+    let a = db::insert_feed(&conn, "https://a.example/feed", Some(rust), None, None).unwrap();
+    let b = db::insert_feed(&conn, "https://b.example/feed", Some(news), None, None).unwrap();
+    let c = db::insert_feed(&conn, "https://c.example/feed", None, None, None).unwrap();
+    let open = |conn: &rusqlite::Connection| {
+        let mut ids: Vec<i64> = db::folders(conn).unwrap().iter().filter(|f| f.expanded).map(|f| f.id).collect();
+        ids.sort();
+        ids
+    };
+
+    // New folders are open; close all, then open two.
+    assert_eq!(open(&conn), vec![tech, rust, news]);
+    db::set_folders_expanded(&conn, None, false).unwrap();
+    assert!(open(&conn).is_empty());
+    db::set_folders_expanded(&conn, Some(&[tech, rust]), true).unwrap();
+    assert_eq!(open(&conn), vec![tech, rust]);
+
+    // One call deletes a folder with its subfolder and feed, plus a loose feed. A feed
+    // already gone with its folder, and one that never existed, are skipped.
+    let deleted = db::delete_items(
+        &conn,
+        &[Item::Folder { id: tech }, Item::Feed { id: c }, Item::Feed { id: a }, Item::Feed { id: 9999 }],
+    )
+    .unwrap();
+    assert_eq!(deleted, 2);
+    assert_eq!(db::feeds(&conn).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(), vec![b]);
+    assert_eq!(db::folders(&conn).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(), vec![news]);
+
+    // Starting over removes everything.
+    db::delete_all_subscriptions(&conn).unwrap();
+    assert!(db::feeds(&conn).unwrap().is_empty());
+    assert!(db::folders(&conn).unwrap().is_empty());
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }

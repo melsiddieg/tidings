@@ -34,6 +34,15 @@
       ],
     },
     {
+      title: 'Sidebar',
+      keys: [
+        [[mod, 'Click'], 'Select several feeds or folders'],
+        [['⇧', 'Click'], 'Select a range'],
+        [['Delete'], 'Delete the selected feeds and folders'],
+        [[store.info?.platform === 'macos' ? '⌥' : 'Alt', 'Click ›'], 'Open or close a folder and all inside'],
+      ],
+    },
+    {
       title: 'Tabs and app',
       keys: [
         [[mod, 'W'], 'Close tab'],

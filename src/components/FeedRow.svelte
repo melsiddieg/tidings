@@ -14,8 +14,10 @@
   const zone = $derived(zoneFor(key));
   const pinned = $derived(feed.pinned > 0);
   const refreshing = $derived(!!store.progress);
+  const marked = $derived(store.marked.includes(key));
 
   function menu(e: MouseEvent) {
+    if (marked && store.marked.length > 1) return store.markedMenu(e);
     store.openMenu(e, [
       { label: 'Refresh', icon: 'refresh', action: () => store.refresh({ feedIds: [feed.id] }) },
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'feed', id: feed.id }) },
@@ -53,6 +55,7 @@
 <div
   class="tree-row feed"
   class:selected
+  class:marked
   class:paused={feed.paused}
   class:drop-before={zone === 'before'}
   class:drop-after={zone === 'after'}
@@ -67,7 +70,7 @@
   {ondragover}
   ondragleave={() => zone && (drag.over = null)}
   {ondrop}
-  onclick={() => store.selectScope({ kind: 'feed', id: feed.id })}
+  onclick={(e) => store.clickItem(ref, e)}
   onkeydown={() => {}}
   oncontextmenu={menu}
 >

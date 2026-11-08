@@ -332,6 +332,24 @@ pub fn move_folder(
     db::move_folder(&state.db(), id, parent_id, before)
 }
 
+/// Deletes several feeds and folders at once. Returns how many feeds were deleted.
+#[tauri::command]
+pub fn delete_items(state: AppStateRef<'_>, items: Vec<Item>) -> Result<usize> {
+    db::delete_items(&state.db(), &items)
+}
+
+/// Removes every subscription and article, to start over.
+#[tauri::command]
+pub fn delete_all_subscriptions(state: AppStateRef<'_>) -> Result<()> {
+    db::delete_all_subscriptions(&state.db())
+}
+
+/// Opens or closes the given folders, or all folders when `ids` is None.
+#[tauri::command]
+pub fn set_folders_expanded(state: AppStateRef<'_>, ids: Option<Vec<i64>>, expanded: bool) -> Result<()> {
+    db::set_folders_expanded(&state.db(), ids.as_deref(), expanded)
+}
+
 #[tauri::command]
 pub fn set_folder_expanded(state: AppStateRef<'_>, id: i64, expanded: bool) -> Result<()> {
     db::set_folder_expanded(&state.db(), id, expanded)

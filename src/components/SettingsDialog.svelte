@@ -282,6 +282,13 @@
               <button class="btn small" onclick={() => store.exportOpml()}><Icon name="upload" size={13} />Export</button>
             </div>
           </div>
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Start over</span>
+              <span class="hint">Removes every feed and folder, with all articles. Settings stay.</span>
+            </div>
+            <button class="btn small danger" onclick={() => store.deleteAllSubscriptions()}><Icon name="trash" size={13} />Remove all…</button>
+          </div>
           <div class="row stack">
             <div class="row-text">
               <span class="row-title">Data folder</span>

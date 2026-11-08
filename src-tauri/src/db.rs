@@ -1111,6 +1111,23 @@ pub fn set_folder_expanded(conn: &Connection, id: i64, expanded: bool) -> Result
     Ok(())
 }
 
+/// Opens or closes many folders at once: the given ones, or all when `ids` is None.
+pub fn set_folders_expanded(conn: &Connection, ids: Option<&[i64]>, expanded: bool) -> Result<()> {
+    match ids {
+        None => {
+            conn.execute("UPDATE folders SET expanded = ?1", [expanded])?;
+        }
+        Some(ids) => {
+            for chunk in ids.chunks(500) {
+                // `?1` is the new state; the bare `?`s that follow are numbered 2, 3, ...
+                let sql = format!("UPDATE folders SET expanded = ?1 WHERE id IN ({})", placeholders(chunk.len()));
+                conn.execute(&sql, params_from_iter(std::iter::once(expanded as i64).chain(chunk.iter().copied())))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn folder_subtree(conn: &Connection, id: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "WITH RECURSIVE sub(id) AS (
@@ -1135,6 +1152,32 @@ pub fn delete_folder(conn: &Connection, id: i64) -> Result<()> {
         conn.execute(&sql, params_from_iter(chunk.iter()))?;
     }
     conn.execute("DELETE FROM folders WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Deletes several feeds and folders (each folder with everything inside it) in one
+/// transaction. Items that no longer exist are skipped. Returns how many feeds went.
+pub fn delete_items(conn: &Connection, items: &[Item]) -> Result<usize> {
+    let count = |c: &Connection| c.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get::<_, i64>(0));
+    let tx = conn.unchecked_transaction()?;
+    let before = count(&tx)?;
+    for item in items {
+        match *item {
+            Item::Feed { id } => delete_feed(&tx, id)?,
+            Item::Folder { id } => delete_folder(&tx, id)?,
+        }
+    }
+    let after = count(&tx)?;
+    tx.commit()?;
+    Ok((before - after) as usize)
+}
+
+/// Removes every feed and folder, and with the feeds every article (to start over).
+pub fn delete_all_subscriptions(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM feeds", [])?;
+    tx.execute("DELETE FROM folders", [])?;
+    tx.commit()?;
     Ok(())
 }
 

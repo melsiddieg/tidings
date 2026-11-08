@@ -5,6 +5,20 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Select several feeds and folders in the sidebar with ⌘/Ctrl-click (one by one) or
+  Shift-click (a range), then delete them in one step: with the "Delete…" button that
+  appears at the bottom of the sidebar, the `Delete` key, or the right-click menu.
+- Settings → Archive & data → "Remove all…" deletes every subscription to start over.
+  Settings stay.
+- Expand or collapse all folders: a button next to "Subscriptions", the sidebar's "…"
+  menu, and "Expand/Collapse all inside" on a folder's right-click menu. Option/Alt-click
+  on a folder's arrow opens or closes the folder and everything inside it.
+
+### Changed
+- Folders created by an OPML import start closed, so a large import does not fill the
+  sidebar.
+
 ## [0.5.0] - 2026-11-07
 
 ### Added

@@ -74,6 +74,10 @@ export const api = {
     call<void>('move_folder', { id, parentId, before }),
   setFolderExpanded: (id: number, expanded: boolean) =>
     call<void>('set_folder_expanded', { id, expanded }),
+  setFoldersExpanded: (ids: number[] | null, expanded: boolean) =>
+    call<void>('set_folders_expanded', { ids, expanded }),
+  deleteItems: (items: ItemRef[]) => call<number>('delete_items', { items }),
+  deleteAllSubscriptions: () => call<void>('delete_all_subscriptions'),
   refresh: (opts: { feedIds?: number[]; folderId?: number } = {}) =>
     call<number>('refresh_feeds', { feedIds: opts.feedIds ?? null, folderId: opts.folderId ?? null }),
   importOpml: () => call<ImportStats | null>('import_opml'),

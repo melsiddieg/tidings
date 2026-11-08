@@ -19,6 +19,9 @@
       { label: 'Import OPML…', icon: 'download', action: () => store.importOpml() },
       { label: 'Export OPML…', icon: 'upload', action: () => store.exportOpml() },
       { separator: true },
+      { label: 'Expand all folders', icon: 'expand', action: () => store.setExpanded(true) },
+      { label: 'Collapse all folders', icon: 'collapse', action: () => store.setExpanded(false) },
+      { separator: true },
       { label: 'Refresh all feeds', icon: 'refresh', action: () => store.refresh() },
       { label: 'Mark everything as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'all' }) },
       { separator: true },
@@ -139,9 +142,17 @@
 
     <div class="section-title">
       <span>Subscriptions</span>
-      <button class="icon-btn mini" title="New folder" onclick={() => (store.dialog = { kind: 'folder', folderId: null, parentId: null })}>
-        <Icon name="folder-plus" size={14} />
-      </button>
+      <span class="section-actions">
+        {#if store.tree.folders.length > 0}
+          {@const open = store.anyFolderOpen}
+          <button class="icon-btn mini always" title={open ? 'Collapse all folders' : 'Expand all folders'} onclick={() => store.setExpanded(!open)}>
+            <Icon name={open ? 'collapse' : 'expand'} size={14} />
+          </button>
+        {/if}
+        <button class="icon-btn mini" title="New folder" onclick={() => (store.dialog = { kind: 'folder', folderId: null, parentId: null })}>
+          <Icon name="folder-plus" size={14} />
+        </button>
+      </span>
     </div>
 
     <div class="tree" role="tree">
@@ -159,6 +170,14 @@
     {/if}
   </nav>
 
+  {#if store.marked.length > 0}
+    <div class="marked-bar">
+      <span class="marked-count">{store.marked.length} selected</span>
+      <button class="btn small danger" onclick={() => store.deleteMarked()}><Icon name="trash" size={13} />Delete…</button>
+      <button class="icon-btn" title="Clear selection (Esc)" onclick={() => store.clearMarks()}><Icon name="x" size={14} /></button>
+    </div>
+  {/if}
+
   <footer class="foot">
     <button class="refresh" onclick={() => store.refresh()} disabled={!!store.progress} title="Refresh all feeds">
       <span class="refresh-icon" class:spinning={!!store.progress}><Icon name="refresh" size={14} /></span>
@@ -173,7 +192,7 @@
 <style>
   .sidebar {
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto 1fr auto auto;
     min-width: 0;
     min-height: 0;
     background: var(--bg-sidebar);
@@ -279,6 +298,23 @@
     text-transform: uppercase;
     color: var(--text-3);
   }
+  .section-actions {
+    display: flex;
+    gap: 2px;
+  }
+  .marked-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 8px 8px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .marked-count {
+    flex: 1;
+    font-weight: 600;
+    color: var(--text-2);
+  }
   .icon-btn.mini {
     width: 22px;
     height: 22px;
@@ -287,6 +323,10 @@
   }
   .section-title:hover .icon-btn.mini {
     opacity: 1;
+  }
+  /* Collapse/expand all stays visible: it is how you get around a long list. */
+  .icon-btn.mini.always {
+    opacity: 0.75;
   }
   .tree {
     display: grid;

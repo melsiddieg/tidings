@@ -50,6 +50,10 @@ Source: <https://github.com/melsiddieg/tidings>
 - Folders with any depth. Drag and drop to put any feed or folder anywhere, including
   feeds above folders.
 - Favorites: pin feeds and folders to the top of the sidebar.
+- Select several feeds and folders with ⌘/Ctrl-click or Shift-click and delete them at
+  once. Settings → Archive & data → **Remove all** starts over.
+- Collapse or expand all folders with one click; Option/Alt-click a folder's arrow to
+  open or close everything inside it. Folders from an OPML import start closed.
 - Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
 - Per-feed properties: custom name, type, update interval, archive rule, always load full text, pause updates.
@@ -300,6 +304,8 @@ backend is only loaded in development and is not part of release builds.
 | `R` / `Shift+R` | Refresh this feed or folder / refresh all |
 | `Delete` | Delete article |
 | `/` | Search |
+| `⌘/Ctrl+Click`, `Shift+Click` in the sidebar | Select several feeds or folders (`Delete` removes them, `Esc` clears) |
+| `Option/Alt+Click` on a folder arrow | Open or close the folder and every folder inside |
 | `⌘/Ctrl+W`, `Ctrl+Tab`, `⌘/Ctrl+1…9` | Close tab, next tab, go to tab |
 | `⌘/Ctrl+N`, `⌘/Ctrl+,` | Add feed, settings |
 | `?` | Show all shortcuts |

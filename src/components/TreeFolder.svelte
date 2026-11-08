@@ -16,8 +16,11 @@
   const key = $derived(`folder:${folder.id}`);
   const zone = $derived(zoneFor(key));
   const pinned = $derived(folder.pinned > 0);
+  const marked = $derived(store.marked.includes(key));
 
   function menu(e: MouseEvent) {
+    if (marked && store.marked.length > 1) return store.markedMenu(e);
+    const inside = store.folderSubtree(folder.id);
     store.openMenu(e, [
       { label: 'Refresh', icon: 'refresh', action: () => store.refresh({ folderId: folder.id }) },
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'folder', id: folder.id }) },
@@ -26,6 +29,9 @@
       { label: 'Add feed here…', icon: 'plus', action: () => (store.dialog = { kind: 'add-feed', folderId: folder.id }) },
       { label: 'New subfolder…', icon: 'folder-plus', action: () => (store.dialog = { kind: 'folder', folderId: null, parentId: folder.id }) },
       { label: 'Rename…', icon: 'pencil', action: () => (store.dialog = { kind: 'folder', folderId: folder.id, parentId: folder.parentId }) },
+      { separator: true },
+      { label: 'Expand all inside', icon: 'expand', disabled: inside.length < 2 && folder.expanded, action: () => store.setExpanded(true, inside) },
+      { label: 'Collapse all inside', icon: 'collapse', action: () => store.setExpanded(false, inside) },
       { separator: true },
       { label: 'Delete folder…', icon: 'trash', danger: true, action: () => store.deleteFolder(folder.id) },
     ]);
@@ -62,6 +68,7 @@
 <div
   class="tree-row"
   class:selected
+  class:marked
   class:drop-into={zone === 'into'}
   class:drop-before={zone === 'before'}
   class:drop-after={zone === 'after'}
@@ -76,7 +83,7 @@
   {ondragover}
   ondragleave={() => zone && (drag.over = null)}
   {ondrop}
-  onclick={() => store.selectScope({ kind: 'folder', id: folder.id })}
+  onclick={(e) => store.clickItem(ref, e)}
   ondblclick={() => store.toggleFolder(folder.id)}
   onkeydown={() => {}}
   oncontextmenu={menu}
@@ -85,9 +92,12 @@
     class="twisty"
     class:open={folder.expanded}
     aria-label={folder.expanded ? 'Collapse' : 'Expand'}
+    title="Option-click: also every folder inside"
     onclick={(e) => {
       e.stopPropagation();
-      store.toggleFolder(folder.id);
+      // Option/Alt-click opens or closes the folder and everything inside it.
+      if (e.altKey) store.setExpanded(!folder.expanded, store.folderSubtree(folder.id));
+      else store.toggleFolder(folder.id);
     }}><Icon name="chevron-right" size={12} stroke={2.4} /></button
   >
   <span class="row-icon"><Icon name={folder.expanded ? 'folder-open' : 'folder'} size={15} /></span>
