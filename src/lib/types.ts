@@ -204,6 +204,8 @@ export interface ListQuery {
   since?: number | null;
   /** Published before, Unix seconds. */
   until?: number | null;
+  /** Only feeds of this type inside the scope (the type icons above the list). */
+  feedType?: FeedType | null;
 }
 
 export interface FeedUpdated {

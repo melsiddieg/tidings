@@ -103,6 +103,9 @@ class Store {
   query = $state('');
   oldestFirst = $state<boolean>(local.get('oldestFirst', false));
   dateRange = $state<DateRange>(validRange(local.get<unknown>('dateRange', null)));
+  /** Only feeds of this type inside the scope (the type icons above the list). Resets
+   *  when another feed or folder is selected. */
+  typeFilter = $state<FeedType | null>(null);
 
   articles = $state<ArticleItem[]>([]);
   hasMore = $state(false);
@@ -195,8 +198,29 @@ class Store {
     if (s.kind === 'type') return typeInfo(s.type).label;
     return this.folderById.get(s.id)?.title ?? 'Folder';
   });
+  /** The feed types inside the selected folder (everywhere for All and Starred), with
+   *  unread counts. The list header shows them as icons when there are two or more. */
+  scopeTypes = $derived.by(() => {
+    const s = this.scope;
+    let feeds: Feed[];
+    if (s.kind === 'all' || s.kind === 'starred') {
+      feeds = this.tree.feeds;
+    } else if (s.kind === 'folder') {
+      const inside = new Set(this.folderSubtree(s.id));
+      feeds = this.tree.feeds.filter((f) => f.folderId != null && inside.has(f.folderId));
+    } else {
+      return [];
+    }
+    const rows = FEED_TYPES.map((info) => {
+      const of = feeds.filter((f) => f.feedType === info.value);
+      return { info, feeds: of.length, unread: of.reduce((sum, f) => sum + f.unread, 0) };
+    }).filter((r) => r.feeds > 0);
+    return rows.length > 1 ? rows : [];
+  });
   scopeUnread = $derived.by(() => {
     const s = this.scope;
+    const typed = this.typeFilter && this.scopeTypes.find((r) => r.info.value === this.typeFilter);
+    if (typed) return s.kind === 'starred' ? 0 : typed.unread;
     if (s.kind === 'all') return this.unreadTotal;
     if (s.kind === 'starred') return 0;
     if (s.kind === 'feed') return this.feedById.get(s.id)?.unread ?? 0;
@@ -348,6 +372,7 @@ class Store {
       limit,
       offset,
       ...rangeBounds(this.dateRange),
+      feedType: this.typeFilter,
     };
   }
 
@@ -404,6 +429,7 @@ class Store {
 
   selectScope(scope: Scope) {
     this.scope = scope;
+    this.typeFilter = null;
     local.set('scope', scope);
     this.selectedId = null;
     this.activeTabId = 'main';
@@ -413,6 +439,12 @@ class Store {
   setFilter(filter: Filter) {
     this.filter = filter;
     local.set('filter', filter);
+    this.loadArticles();
+  }
+
+  /** Shows only one feed type inside the scope, or all types (null). */
+  setTypeFilter(type: FeedType | null) {
+    this.typeFilter = type;
     this.loadArticles();
   }
 
@@ -504,8 +536,9 @@ class Store {
     const current = scope === undefined;
     const target = scope ?? this.scope;
     const { since, until } = current ? rangeBounds(this.dateRange) : { since: null, until: null };
+    const feedType = current ? this.typeFilter : null;
     try {
-      const n = await api.markAllRead($state.snapshot(target), since, until);
+      const n = await api.markAllRead($state.snapshot(target), since, until, feedType);
       if (JSON.stringify(target) === JSON.stringify(this.scope)) {
         for (const a of this.articles) {
           a.isRead = true;

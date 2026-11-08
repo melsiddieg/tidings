@@ -8,6 +8,7 @@ import type {
   Candidate,
   Counts,
   FeedPatch,
+  FeedType,
   ItemRef,
   ImportStats,
   ListQuery,
@@ -55,8 +56,8 @@ export const api = {
     call<ReaderPage>('read_url', { url, loadImages, reload }),
   setRead: (ids: number[], read: boolean) => call<void>('set_read', { ids, read }),
   setStarred: (id: number, starred: boolean) => call<void>('set_starred', { id, starred }),
-  markAllRead: (scope: Scope, since: number | null = null, until: number | null = null) =>
-    call<number>('mark_all_read', { scope, since, until }),
+  markAllRead: (scope: Scope, since: number | null = null, until: number | null = null, feedType: FeedType | null = null) =>
+    call<number>('mark_all_read', { scope, since, until, feedType }),
   deleteArticles: (ids: number[]) => call<void>('delete_articles', { ids }),
   discover: (url: string) => call<Candidate[]>('discover_feeds', { url }),
   addFeed: (url: string, folderId: number | null, title?: string) =>

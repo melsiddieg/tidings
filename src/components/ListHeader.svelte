@@ -4,6 +4,7 @@
   import { store } from '../lib/store.svelte';
   import type { Filter, Settings } from '../lib/types';
   import { DATE_PRESETS, rangeLabel, typeInfo } from '../lib/filters';
+  import { countLabel } from '../lib/util';
 
   let searchInput: HTMLInputElement | undefined = $state();
   let draft = $state(store.query);
@@ -102,7 +103,7 @@
       <div class="scope-text">
         <h2 dir="auto">{store.scopeTitle}</h2>
         <span class="sub">
-          {#if store.scopeUnread > 0}{store.scopeUnread} unread{:else if store.scope.kind === 'starred'}{store.tree.starred} starred{:else}All caught up{/if}
+          {#if store.typeFilter}{typeInfo(store.typeFilter).label} · {/if}{#if store.scopeUnread > 0}{store.scopeUnread} unread{:else if store.scope.kind === 'starred'}{store.tree.starred} starred{:else}All caught up{/if}
         </span>
       </div>
     </div>
@@ -151,6 +152,25 @@
       <Icon name="chevron-down" size={12} stroke={2.2} />
     </button>
   </div>
+  {#if store.scopeTypes.length > 0}
+    <div class="types" role="group" aria-label="Show one kind of feed">
+      <button class="type" class:on={!store.typeFilter} title="All kinds of feeds" onclick={() => store.setTypeFilter(null)}>All</button>
+      {#each store.scopeTypes as row (row.info.value)}
+        {@const on = store.typeFilter === row.info.value}
+        <button
+          class="type"
+          class:on
+          title={`${row.info.label}${row.unread > 0 && store.scope.kind !== 'starred' ? ` · ${row.unread} unread` : ''}`}
+          aria-pressed={on}
+          onclick={() => store.setTypeFilter(on ? null : row.info.value)}
+        >
+          <Icon name={row.info.icon} size={14} />
+          {#if on}<span class="type-label">{row.info.label}</span>{/if}
+          {#if row.unread > 0 && store.scope.kind !== 'starred'}<span class="type-count">{countLabel(row.unread)}</span>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
 </header>
 
 <style>
@@ -275,6 +295,42 @@
     color: var(--accent);
     background: var(--accent-softer);
     border-color: rgb(var(--accent-rgb) / 0.25);
+  }
+  .types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .type {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .type:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .type.on {
+    color: var(--accent);
+    background: var(--accent-softer);
+    border-color: rgb(var(--accent-rgb) / 0.25);
+  }
+  .type-count {
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .type.on .type-count {
+    color: inherit;
+    opacity: 0.8;
   }
   .chip-text {
     max-width: 112px;

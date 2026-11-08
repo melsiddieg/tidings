@@ -5,6 +5,13 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Filter a folder by feed type. When a folder (or All articles, or Starred) holds more
+  than one kind of feed, icons above the list show each type with its unread count:
+  podcasts, videos, code & releases, discussions, newsletters and articles. Click one to
+  see only that type; "Mark all as read" then marks only those articles. Choosing another
+  feed or folder goes back to all types.
+
 ## [0.6.0] - 2026-11-07
 
 ### Added

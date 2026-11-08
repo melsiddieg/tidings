@@ -168,6 +168,7 @@ function query(q: ListQuery) {
     .filter((a) => (q.filter === 'unread' ? !a.isRead : q.filter === 'new' ? a.isNew : q.filter === 'starred' ? a.isStarred : true))
     .filter((a) => words.every((w) => `${a.title} ${a.excerpt}`.toLowerCase().includes(w)))
     .filter((a) => inRange(a, q.since, q.until))
+    .filter((a) => !q.feedType || feeds.find((f) => f.id === a.feedId)?.feedType === q.feedType)
     .sort((a, b) => (q.oldestFirst ? a.published - b.published : b.published - a.published))
     .slice(q.offset, q.offset + q.limit);
 }
@@ -232,7 +233,8 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     }
     case 'mark_all_read': {
       let n = 0;
-      for (const a of articles) if (inScope(a, args.scope) && inRange(a, args.since, args.until) && !a.isRead) { a.isRead = true; n++; }
+      const typed = (a: ArticleItem) => !args.feedType || feeds.find((f) => f.id === a.feedId)?.feedType === args.feedType;
+      for (const a of articles) if (inScope(a, args.scope) && inRange(a, args.since, args.until) && typed(a) && !a.isRead) { a.isRead = true; n++; }
       return n;
     }
     case 'delete_articles':

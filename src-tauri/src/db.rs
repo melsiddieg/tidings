@@ -320,6 +320,9 @@ pub struct ListQuery {
     pub offset: Option<u32>,
     #[serde(flatten)]
     pub range: DateRange,
+    /// Only feeds of this type inside the scope (the type icons above the list).
+    #[serde(default)]
+    pub feed_type: Option<String>,
 }
 
 /// Published between `since` (inclusive) and `until` (exclusive), Unix seconds.
@@ -451,11 +454,19 @@ fn scope_sql(scope: &Scope, args: &mut Vec<Value>) -> String {
             args.push(Value::Integer(*id));
             format!("a.feed_id IN ({FOLDER_FEEDS_SQL})")
         }
-        Scope::Type { feed_type } if feed_types::is_type(feed_type) => {
-            args.push(Value::Text(feed_type.clone()));
+        Scope::Type { feed_type } => type_sql(Some(feed_type), args),
+    }
+}
+
+/// Articles of feeds of one type: the user's choice for the feed, else the detected one.
+fn type_sql(feed_type: Option<&str>, args: &mut Vec<Value>) -> String {
+    match feed_type {
+        None => "1 = 1".into(),
+        Some(t) if feed_types::is_type(t) => {
+            args.push(Value::Text(t.to_string()));
             "a.feed_id IN (SELECT fe.id FROM feeds fe WHERE COALESCE(fe.type_override, fe.detected_type) = ?)".into()
         }
-        Scope::Type { .. } => "1 = 0".into(),
+        Some(_) => "1 = 0".into(),
     }
 }
 
@@ -497,11 +508,22 @@ fn search_sql(query: &str, args: &mut Vec<Value>) -> String {
 }
 
 /// Builds the WHERE clause shared by list and "mark all read" queries.
-fn where_clause(scope: &Scope, filter: &str, query: &str, range: &DateRange, args: &mut Vec<Value>) -> String {
+/// The one place that turns the list's filters into SQL, so the list, its ID list and
+/// "mark all as read" always cover the same articles. `args` are pushed in the order
+/// the parts appear in the result.
+fn where_clause(
+    scope: &Scope,
+    filter: &str,
+    query: &str,
+    range: &DateRange,
+    feed_type: Option<&str>,
+    args: &mut Vec<Value>,
+) -> String {
     let scope = scope_sql(scope, args);
     let search = search_sql(query, args);
     let range = range_sql(range, args);
-    format!("a.is_deleted = 0 AND {scope} AND {} AND {search} AND {range}", filter_sql(filter))
+    let types = type_sql(feed_type, args);
+    format!("a.is_deleted = 0 AND {scope} AND {} AND {search} AND {range} AND {types}", filter_sql(filter))
 }
 
 pub fn list_articles(
@@ -510,7 +532,7 @@ pub fn list_articles(
     thumb: impl Fn(&str) -> String,
 ) -> Result<Vec<ArticleItem>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, &mut args);
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(200).min(1000) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -549,7 +571,7 @@ pub fn list_articles(
 
 pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, &mut args);
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(20).min(100) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -618,9 +640,9 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn mark_scope_read(conn: &Connection, scope: &Scope, range: &DateRange) -> Result<usize> {
+pub fn mark_scope_read(conn: &Connection, scope: &Scope, range: &DateRange, feed_type: Option<&str>) -> Result<usize> {
     let mut args = Vec::new();
-    let clause = where_clause(scope, "unread", "", range, &mut args);
+    let clause = where_clause(scope, "unread", "", range, feed_type, &mut args);
     let sql = format!(
         "UPDATE articles SET is_read = 1, is_new = 0
          WHERE id IN (SELECT a.id FROM articles a WHERE {clause})"

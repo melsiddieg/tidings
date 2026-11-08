@@ -81,6 +81,7 @@ fn query(scope: Scope, filter: &str, q: &str) -> ListQuery {
         limit: Some(100),
         offset: Some(0),
         range: db::DateRange::default(),
+        feed_type: None,
     }
 }
 
@@ -182,7 +183,7 @@ fn full_database_workflow() {
     assert_eq!(unread.len(), 2);
     let starred = db::list_articles(&conn, &query(Scope::Starred, "all", ""), thumb).unwrap();
     assert_eq!(starred.len(), 1);
-    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }, &db::DateRange::default()).unwrap();
+    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }, &db::DateRange::default(), None).unwrap();
     assert_eq!(marked, 2);
 
     // Tree has display titles and counts.
@@ -460,10 +461,30 @@ fn feed_types_and_date_ranges() {
 
     // "Mark all as read" honors the range: clear everything older than 20 days ago.
     let older = db::DateRange { since: None, until: Some(t0 + 20 * day) };
-    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &older).unwrap(), 4);
+    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &older, None).unwrap(), 4);
     assert_eq!(titles(&conn, &query(Scope::All, "unread", "")), ["post2", "post3"]);
     // Both podcast episodes were in that range, so the podcast scope has nothing left.
-    assert_eq!(db::mark_scope_read(&conn, &Scope::Type { feed_type: "podcast".into() }, &db::DateRange::default()).unwrap(), 0);
+    assert_eq!(db::mark_scope_read(&conn, &Scope::Type { feed_type: "podcast".into() }, &db::DateRange::default(), None).unwrap(), 0);
+
+    // One type inside a folder (the type icons above the list). The list and
+    // "mark all as read" cover the same articles.
+    let mixed = db::create_folder(&conn, "Mixed", None).unwrap();
+    db::move_feed(&conn, show, Some(mixed), None).unwrap();
+    db::move_feed(&conn, blog, Some(mixed), None).unwrap();
+    let typed = |filter: &str, t: Option<&str>| {
+        let mut q = query(Scope::Folder { id: mixed }, filter, "");
+        q.feed_type = t.map(Into::into);
+        q
+    };
+    assert_eq!(titles(&conn, &typed("all", None)).len(), 5);
+    assert_eq!(titles(&conn, &typed("all", Some("podcast"))), ["ep1", "ep2"]);
+    assert_eq!(titles(&conn, &typed("all", Some("article"))), ["post1", "post2", "post3"]);
+    assert!(titles(&conn, &typed("all", Some("code"))).is_empty(), "the code feed is not in the folder");
+    assert!(titles(&conn, &typed("all", Some("nonsense"))).is_empty());
+    assert_eq!(titles(&conn, &typed("unread", Some("article"))), ["post2", "post3"]);
+    let folder = Scope::Folder { id: mixed };
+    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("podcast")).unwrap(), 0);
+    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("article")).unwrap(), 2);
 
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);

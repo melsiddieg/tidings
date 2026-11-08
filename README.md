@@ -23,6 +23,8 @@ Source: <https://github.com/melsiddieg/tidings>
   each get a view in the sidebar. The type is worked out on your computer from the feed's
   address (GitHub, YouTube, Reddit, Substack and others) and from what its recent items
   carry (audio means podcast); you can set it yourself in the feed's properties.
+  Inside a folder (and in All articles and Starred), icons above the list show one type
+  at a time, with unread counts; "Mark all as read" then marks only that type.
 - **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
   a custom range. It combines with everything else, and "Mark all as read" follows it,
   so *Older than 30 days* then *Mark all as read* clears a backlog.

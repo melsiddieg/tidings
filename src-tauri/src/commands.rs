@@ -221,8 +221,9 @@ pub fn mark_all_read(
     scope: Scope,
     since: Option<i64>,
     until: Option<i64>,
+    feed_type: Option<String>,
 ) -> Result<usize> {
-    db::mark_scope_read(&state.db(), &scope, &db::DateRange { since, until })
+    db::mark_scope_read(&state.db(), &scope, &db::DateRange { since, until }, feed_type.as_deref())
 }
 
 #[tauri::command]

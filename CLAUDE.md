@@ -35,8 +35,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   you add or change a query.
 - `src/lib/store.svelte.ts` holds UI state and actions; components in `src/components/`.
   `src/lib/filters.ts` has the feed type list and the date range presets (`rangeBounds`).
-- Article filters all go through `db::where_clause` (scope, read state, search, `DateRange`),
-  so the list, "mark all as read" and ID lists always agree. Extend it there, not per query.
+- Article filters all go through `db::where_clause` (scope, read state, search, `DateRange`,
+  feed type inside the scope), so the list, "mark all as read" and ID lists always agree.
+  Extend it there, not per query.
 
 ## Rules that keep the app private and safe
 
