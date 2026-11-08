@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-07
+
 ### Added
 - Select several feeds and folders in the sidebar with ⌘/Ctrl-click (one by one) or
   Shift-click (a range), then delete them in one step: with the "Delete…" button that
@@ -164,7 +166,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/melsiddieg/tidings/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/melsiddieg/tidings/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/melsiddieg/tidings/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/melsiddieg/tidings/compare/v0.4.0...v0.4.1
