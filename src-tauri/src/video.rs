@@ -6,15 +6,21 @@
 //! The player makes its own connections, outside net.rs, like a browser started with
 //! "Open in browser". When a proxy is set, Tidings passes it to the player, and it
 //! refuses to start a player that cannot use that proxy, so videos never bypass it.
+//!
+//! Most failures come from an old yt-dlp, since YouTube changes often. When several
+//! copies are installed, mpv gets the newest, and an error names the copy mpv used
+//! when it is months old.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
+use chrono::NaiveDate;
 use serde::Serialize;
 use url::Url;
 
@@ -127,16 +133,20 @@ fn expand_home(path: &str) -> PathBuf {
     }
 }
 
-/// Folders searched for programs: PATH, then the usual install folders. Apps started
-/// from the macOS Finder get only /usr/bin:/bin:/usr/sbin:/sbin, which misses Homebrew.
+/// Folders searched for programs, in this order: the user's own folders, PATH, then
+/// the usual install folders. The user's folders come first, as Debian's and Ubuntu's
+/// ~/.profile puts them: a yt-dlp installed there (with pipx, uv or pip) is usually
+/// newer than the system's. Apps started from the macOS Finder, or from some desktop
+/// sessions, get a short PATH without these folders and without Homebrew.
 /// Relative PATH entries are skipped, so the current folder is never searched.
 pub fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs = Vec::new();
     if let Some(home) = home() {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join("bin"));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
     }
     for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin", "/usr/pkg/bin", "/snap/bin"] {
         dirs.push(PathBuf::from(dir));
@@ -161,8 +171,19 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// The largest window mpv opens, as a share of the screen's width and height. Without
+/// a limit, mpv opens a window as large as the video: a 4K or vertical video then runs
+/// off the screen. A single percentage (60%) would limit only the width. Smaller
+/// videos keep their own size.
+const WINDOW_FIT: &str = "60%x60%";
+
+/// Options in mpv.conf that set the window size. When one is there, Tidings leaves the
+/// window size to it.
+const WINDOW_OPTIONS: [&str; 5] = ["autofit", "autofit-larger", "autofit-smaller", "geometry", "window-scale"];
+
 /// The player's arguments for one video. `proxy` is the user's proxy setting.
-pub fn args(player: &Player, url: &Url, proxy: &str) -> Result<Vec<String>> {
+/// `fit_window` limits mpv's window to `WINDOW_FIT`; IINA sizes its own windows.
+pub fn args(player: &Player, url: &Url, proxy: &str, fit_window: bool) -> Result<Vec<String>> {
     let proxy = proxy.trim();
     if !proxy.is_empty() {
         // mpv only supports http:// proxies (it ignores others without a word), and
@@ -194,6 +215,9 @@ pub fn args(player: &Player, url: &Url, proxy: &str) -> Result<Vec<String>> {
                 args.push("--force-window=immediate".to_string());
                 // Only errors on stderr, so `play` can report them.
                 args.push("--msg-level=all=error".to_string());
+                if fit_window {
+                    args.push(format!("--autofit-larger={WINDOW_FIT}"));
+                }
             }
             if !proxy.is_empty() {
                 args.push(mpv_option("http-proxy", proxy));
@@ -207,39 +231,205 @@ pub fn args(player: &Player, url: &Url, proxy: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
+/// Whether the user's or the system's mpv.conf sets the window size.
+fn mpv_conf_sizes_window() -> bool {
+    let mut dirs = Vec::new();
+    // The folders mpv reads its configuration from, user folders first.
+    if let Some(dir) = std::env::var_os("MPV_HOME") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        dirs.push(PathBuf::from(dir).join("mpv"));
+    }
+    if let Some(home) = home() {
+        dirs.push(home.join(".config/mpv"));
+        dirs.push(home.join(".mpv"));
+    }
+    for dir in ["/etc/mpv", "/usr/local/etc/mpv", "/opt/homebrew/etc/mpv", "/usr/pkg/etc/mpv"] {
+        dirs.push(PathBuf::from(dir));
+    }
+    dirs.iter()
+        .filter(|d| d.is_absolute())
+        .any(|d| std::fs::read_to_string(d.join("mpv.conf")).is_ok_and(|text| sets_window_size(&text)))
+}
+
+/// Whether mpv.conf text sets one of `WINDOW_OPTIONS`, in any profile. Comments do not count.
+fn sets_window_size(conf: &str) -> bool {
+    conf.lines().any(|line| {
+        let line = line.trim().trim_start_matches("--");
+        let name = line.split(['=', ' ', '\t']).next().unwrap_or("");
+        WINDOW_OPTIONS.contains(&name)
+    })
+}
+
 /// Starts the player and waits up to `wait` for an early failure, such as a missing
-/// yt-dlp or an unavailable video. A player still running after that is playing.
-pub async fn play(player: &Player, url: &Url, proxy: &str, wait: Duration) -> Result<()> {
-    let args = args(player, url, proxy)?;
+/// yt-dlp or an unavailable video. A player still running after that is playing. If
+/// it fails later (mpv can take longer than `wait` to find that a stream does not
+/// open), the error goes to `late` instead.
+pub async fn play(
+    player: &Player,
+    url: &Url,
+    proxy: &str,
+    wait: Duration,
+    late: impl FnOnce(Error) + Send + 'static,
+) -> Result<()> {
+    let fit_window = player.kind == Kind::Mpv && !mpv_conf_sizes_window();
+    let args = args(player, url, proxy, fit_window)?;
+    let player = player.clone();
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+    // The player runs on its own thread until it exits, which also reaps it.
+    std::thread::spawn(move || {
+        let result = run(&player, &args);
+        // The send fails once `play` has stopped waiting.
+        if let Err(Err(e)) = done_tx.send(result) {
+            late(e);
+        }
+    });
+    match tokio::time::timeout(wait, &mut done_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Ok(()),
+        Err(_) => {
+            // Still running, so playing. After `close`, a result can no longer be sent
+            // here and goes to `late`; one sent just before is read now.
+            done_rx.close();
+            done_rx.try_recv().unwrap_or(Ok(()))
+        }
+    }
+}
+
+/// Runs the player until it exits. Blocks.
+fn run(player: &Player, args: &[String]) -> Result<()> {
+    // Let mpv find yt-dlp, and yt-dlp find its JavaScript runtime, even when Tidings
+    // was started from the Finder with a short PATH.
+    let dirs = player_dirs(player.kind);
     // The player writes errors to a private temporary file, not to a pipe. A pipe
     // closes when Tidings quits, and the player would then be killed (SIGPIPE) the
     // next time it writes an error, in the middle of a video.
     let (log_path, log) = error_log()?;
     let mut command = Command::new(&player.path);
-    command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log.try_clone()?);
-    // Let mpv find yt-dlp, and yt-dlp find its JavaScript runtime, even when Tidings
-    // was started from the Finder with a short PATH.
-    if let Ok(path) = std::env::join_paths(search_dirs()) {
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log.try_clone()?);
+    if let Ok(path) = std::env::join_paths(&dirs) {
         command.env("PATH", path);
     }
-    let result = match command.spawn() {
-        Err(e) => Err(Error::msg(format!("Could not start {}: {e}", player.name))),
-        Ok(mut child) => {
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            // This thread also reaps the player when it exits after `wait`.
-            std::thread::spawn(move || {
-                let _ = done_tx.send(child.wait());
-            });
-            match tokio::time::timeout(wait, done_rx).await {
-                Ok(Ok(Ok(status))) => check_exit(player, status, &last_lines(log)),
-                // Still running (playing), or the wait itself failed: nothing to report.
-                _ => Ok(()),
+    let spawned = command.spawn();
+    // The player writes to its own handle and Tidings reads through `log`, so the
+    // name can go now. Nothing is left behind, even if Tidings quits.
+    let _ = std::fs::remove_file(&log_path);
+    let mut child = spawned.map_err(|e| Error::msg(format!("Could not start {}: {e}", player.name)))?;
+    let status = child.wait()?;
+    check_exit(player, status, &last_lines(log), &dirs)
+}
+
+/// yt-dlp releases older than this often fail on YouTube, which changes often.
+const OLD_YT_DLP_DAYS: i64 = 90;
+
+/// How long `yt-dlp --version` may take.
+const VERSION_WAIT: Duration = Duration::from_secs(10);
+
+/// The folders for the player's PATH. IINA brings its own yt-dlp; for other players,
+/// see `newest_yt_dlp_first`.
+fn player_dirs(kind: Kind) -> Vec<PathBuf> {
+    let dirs = search_dirs();
+    if kind == Kind::Iina {
+        return dirs;
+    }
+    newest_yt_dlp_first(dirs)
+}
+
+/// When there are several copies of yt-dlp, moves the folder of the newest one to the
+/// front, so mpv uses it. A system package can be months older than a copy the user
+/// installed, and an old yt-dlp finds the video but returns streams that do not open.
+/// On a tie, the search order decides.
+fn newest_yt_dlp_first(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let copies: Vec<PathBuf> = dirs.iter().map(|d| d.join("yt-dlp")).filter(|p| is_executable(p)).collect();
+    if copies.len() < 2 {
+        return dirs;
+    }
+    // max_by_key returns the last of equal maximums, so search from the end.
+    let newest = copies
+        .iter()
+        .rev()
+        .max_by_key(|p| yt_dlp_version(p, &dirs))
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf);
+    if let Some(dir) = newest {
+        dirs.retain(|d| *d != dir);
+        dirs.insert(0, dir);
+    }
+    dirs
+}
+
+/// The release date that `yt-dlp --version` prints. Each copy runs once, and again
+/// after its file changes (an update).
+fn yt_dlp_version(path: &Path, dirs: &[PathBuf]) -> Option<NaiveDate> {
+    type Seen = HashMap<(PathBuf, SystemTime), Option<NaiveDate>>;
+    static SEEN: LazyLock<Mutex<Seen>> = LazyLock::new(Default::default);
+    let real = std::fs::canonicalize(path).ok()?;
+    let key = (real.clone(), std::fs::metadata(&real).and_then(|m| m.modified()).ok()?);
+    if let Some(version) = SEEN.lock().ok().and_then(|seen| seen.get(&key).copied()) {
+        return version;
+    }
+    let version = version_output(path, dirs).as_deref().and_then(parse_version);
+    if let Ok(mut seen) = SEEN.lock() {
+        seen.insert(key, version);
+    }
+    version
+}
+
+/// Runs `<path> --version` with the player's PATH and returns what it prints.
+/// yt-dlp makes no connections for this.
+fn version_output(path: &Path, dirs: &[PathBuf]) -> Option<String> {
+    let mut command = Command::new(path);
+    command.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Ok(env) = std::env::join_paths(dirs) {
+        command.env("PATH", env);
+    }
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + VERSION_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
         }
-    };
-    // A player still running keeps writing to its open handle; only the name goes.
-    let _ = std::fs::remove_file(&log_path);
-    result
+    }
+    let mut out = String::new();
+    child.stdout.take()?.take(256).read_to_string(&mut out).ok()?;
+    Some(out)
+}
+
+/// "2026.09.16", or "2026.09.16.232802" for a nightly build.
+fn parse_version(text: &str) -> Option<NaiveDate> {
+    let mut parts = text.trim().split('.');
+    let mut next = || parts.next()?.parse::<u32>().ok();
+    let (year, month, day) = (next()?, next()?, next()?);
+    NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)
+}
+
+/// Advice for a failed video when the yt-dlp that mpv used is old.
+fn old_yt_dlp_hint(path: &Path, version: NaiveDate, today: NaiveDate) -> Option<String> {
+    let days = (today - version).num_days();
+    (days > OLD_YT_DLP_DAYS).then(|| {
+        format!(
+            "mpv used yt-dlp {} from {}, which is {} months old. YouTube often breaks older \
+             versions: update yt-dlp and try again.",
+            version.format("%Y.%m.%d"),
+            path.display(),
+            days / 30
+        )
+    })
+}
+
+/// "Failed to open https://host/long?token" becomes "it could not open the stream
+/// from host". The rest of the address is long, and means nothing to the user.
+fn stream_failure(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("Failed to open ")?;
+    let url = Url::parse(rest.split_whitespace().next()?).ok()?;
+    Some(format!("it could not open the stream from {}.", url.host_str()?))
 }
 
 /// Creates an empty file only this user can read, under a name no one else can claim.
@@ -276,7 +466,9 @@ fn last_lines(mut file: File) -> Vec<String> {
     lines[lines.len().saturating_sub(20)..].to_vec()
 }
 
-fn check_exit(player: &Player, status: ExitStatus, lines: &[String]) -> Result<()> {
+/// Turns the player's exit into an error message, if it failed. `dirs` is the PATH the
+/// player had.
+fn check_exit(player: &Player, status: ExitStatus, lines: &[String], dirs: &[PathBuf]) -> Result<()> {
     // mpv exits with 1, 2 or 3 when it could not play; 0 and 4 mean the user quit.
     let failed = match player.kind {
         Kind::Mpv => matches!(status.code(), Some(1..=3)),
@@ -285,17 +477,32 @@ fn check_exit(player: &Player, status: ExitStatus, lines: &[String]) -> Result<(
     if !failed {
         return Ok(());
     }
+    // yt-dlp's own errors say the most, then a stream that did not open.
     let reason = lines
         .iter()
         .rev()
         .find_map(|l| l.split_once("ERROR: ").map(|(_, rest)| rest.to_string()))
+        .or_else(|| lines.iter().rev().find_map(|l| stream_failure(l)))
         .or_else(|| lines.last().cloned());
     let mut message = match reason {
         Some(reason) => format!("{} could not play this video: {reason}", player.name),
         None => format!("{} could not play this video (exit code {}).", player.name, status.code().unwrap_or(-1)),
     };
-    if player.kind == Kind::Mpv && find_in(&search_dirs(), "yt-dlp").is_none() {
-        message.push_str(" mpv needs yt-dlp for YouTube and similar sites, and it was not found.");
+    if player.kind == Kind::Mpv {
+        if !message.ends_with('.') {
+            message.push('.');
+        }
+        match find_in(dirs, "yt-dlp") {
+            None => message.push_str(" mpv needs yt-dlp for YouTube and similar sites, and it was not found."),
+            Some(path) => {
+                let today = chrono::Local::now().date_naive();
+                let hint = yt_dlp_version(&path, dirs).and_then(|v| old_yt_dlp_hint(&path, v, today));
+                if let Some(hint) = hint {
+                    message.push(' ');
+                    message.push_str(&hint);
+                }
+            }
+        }
     }
     Err(Error::msg(message))
 }
@@ -322,23 +529,41 @@ mod tests {
     fn arguments() {
         let url = video();
         assert_eq!(
-            args(&player(Kind::Mpv), &url, "").unwrap(),
-            ["--force-window=immediate", "--msg-level=all=error", "https://www.youtube.com/watch?v=abc"]
+            args(&player(Kind::Mpv), &url, "", true).unwrap(),
+            [
+                "--force-window=immediate",
+                "--msg-level=all=error",
+                "--autofit-larger=60%x60%",
+                "https://www.youtube.com/watch?v=abc"
+            ]
         );
-        assert_eq!(args(&player(Kind::Iina), &url, "").unwrap(), ["--no-stdin", "https://www.youtube.com/watch?v=abc"]);
-        assert_eq!(args(&player(Kind::Other), &url, " ").unwrap(), ["https://www.youtube.com/watch?v=abc"]);
+        // mpv.conf sets the window size: Tidings leaves it alone.
+        assert!(!args(&player(Kind::Mpv), &url, "", false).unwrap().iter().any(|a| a.starts_with("--autofit")));
+        // IINA sizes its own windows.
+        assert_eq!(args(&player(Kind::Iina), &url, "", true).unwrap(), ["--no-stdin", "https://www.youtube.com/watch?v=abc"]);
+        assert_eq!(args(&player(Kind::Other), &url, " ", true).unwrap(), ["https://www.youtube.com/watch?v=abc"]);
 
-        let mpv = args(&player(Kind::Mpv), &url, "http://proxy:3128").unwrap();
+        let mpv = args(&player(Kind::Mpv), &url, "http://proxy:3128", true).unwrap();
         assert!(mpv.contains(&"--http-proxy=http://proxy:3128".to_string()));
         assert!(mpv.contains(&"--ytdl-raw-options-append=proxy=http://proxy:3128".to_string()));
-        let iina = args(&player(Kind::Iina), &url, "http://proxy:3128").unwrap();
+        let iina = args(&player(Kind::Iina), &url, "http://proxy:3128", true).unwrap();
         assert!(iina.contains(&"--mpv-http-proxy=http://proxy:3128".to_string()));
         assert_eq!(iina.last().unwrap(), url.as_str());
 
         // A proxy the player cannot use must stop playback, not be skipped.
-        assert!(args(&player(Kind::Mpv), &url, "socks5h://127.0.0.1:9050").is_err());
-        assert!(args(&player(Kind::Mpv), &url, "https://proxy:3128").is_err());
-        assert!(args(&player(Kind::Other), &url, "http://proxy:3128").is_err());
+        assert!(args(&player(Kind::Mpv), &url, "socks5h://127.0.0.1:9050", true).is_err());
+        assert!(args(&player(Kind::Mpv), &url, "https://proxy:3128", true).is_err());
+        assert!(args(&player(Kind::Other), &url, "http://proxy:3128", true).is_err());
+    }
+
+    #[test]
+    fn window_size_in_mpv_conf() {
+        assert!(sets_window_size("hwdec=vaapi\nautofit=60%x60%\n"));
+        assert!(sets_window_size("[youtube]\n  geometry=50%:50%"));
+        assert!(sets_window_size("--autofit-larger=90%x90%"));
+        assert!(sets_window_size("window-scale 0.5"));
+        assert!(!sets_window_size("hwdec=vaapi\n# autofit=60%x60%\nautofit-something=1\n"));
+        assert!(!sets_window_size(""));
     }
 
     #[test]
@@ -367,7 +592,54 @@ mod tests {
         let p = find("").expect("no player found: install mpv or IINA");
         eprintln!("playing in {} ({})", p.name, p.path.display());
         let url = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
-        play(&p, &url, "", Duration::from_secs(15)).await.unwrap();
+        play(&p, &url, "", Duration::from_secs(15), |e| eprintln!("failed late: {e}")).await.unwrap();
+    }
+
+    #[test]
+    fn yt_dlp_versions() {
+        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert_eq!(parse_version("2026.09.16\n"), Some(date(2026, 9, 16)));
+        assert_eq!(parse_version("2026.09.16.232802"), Some(date(2026, 9, 16)));
+        assert_eq!(parse_version("yt-dlp 1"), None);
+        assert_eq!(parse_version("2026.13.01"), None);
+
+        let path = Path::new("/usr/bin/yt-dlp");
+        let hint = old_yt_dlp_hint(path, date(2026, 3, 17), date(2026, 11, 8)).unwrap();
+        assert!(hint.starts_with("mpv used yt-dlp 2026.03.17 from /usr/bin/yt-dlp, which is 7 months old."), "{hint}");
+        assert_eq!(old_yt_dlp_hint(path, date(2026, 9, 16), date(2026, 11, 8)), None);
+
+        assert_eq!(
+            stream_failure("Failed to open https://rr11---sn-abc.googlevideo.com/videoplayback?expire=1&sig=2").as_deref(),
+            Some("it could not open the stream from rr11---sn-abc.googlevideo.com.")
+        );
+        assert_eq!(stream_failure("No video or audio streams selected."), None);
+    }
+
+    #[test]
+    fn newest_yt_dlp_wins() {
+        let root = std::env::temp_dir().join(format!("tidings-ytdlp-{}", std::process::id()));
+        let dir = |name: &str, version: &str| {
+            let d = root.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            fake(&d, "yt-dlp", &format!("echo {version}"));
+            d
+        };
+        let user = dir("user", "2026.03.17");
+        let system = dir("system", "2026.09.16");
+        let broken = dir("broken", "not-a-version");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        // The newer copy's folder moves to the front; the others keep their order.
+        let dirs = newest_yt_dlp_first(vec![user.clone(), empty.clone(), system.clone(), broken.clone()]);
+        assert_eq!(dirs, [system.clone(), user.clone(), empty.clone(), broken.clone()]);
+        // A copy whose version cannot be read never wins.
+        assert_eq!(newest_yt_dlp_first(vec![broken.clone(), user.clone()]), [user.clone(), broken.clone()]);
+        // Equal versions, or a single copy: the search order stays.
+        let twin = dir("twin", "2026.09.16");
+        assert_eq!(newest_yt_dlp_first(vec![system.clone(), twin.clone()]), [system.clone(), twin.clone()]);
+        assert_eq!(newest_yt_dlp_first(vec![empty.clone(), user.clone()]), [empty, user]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Writes a shell script named `name` that stands in for a player.
@@ -389,23 +661,37 @@ mod tests {
         let path = fake(&dir, "myplayer", &format!("printf '%s\\n' \"$@\" > '{}'", out.display()));
         let p = find(path.to_str().unwrap()).expect("custom player");
         assert_eq!(p.kind, Kind::Other);
-        play(&p, &url, "", Duration::from_secs(5)).await.unwrap();
+        play(&p, &url, "", Duration::from_secs(5), |_| {}).await.unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), url.as_str());
 
         // An early failure comes back with the player's error line.
         let path = fake(&dir, "mpv", "echo '[ytdl_hook] ERROR: [youtube] abc: Video unavailable' >&2\nexit 2");
         let p = find(path.to_str().unwrap()).unwrap();
         assert_eq!(p.kind, Kind::Mpv);
-        let err = play(&p, &url, "", Duration::from_secs(5)).await.unwrap_err().to_string();
+        let err = play(&p, &url, "", Duration::from_secs(5), |_| {}).await.unwrap_err().to_string();
         assert!(err.starts_with("mpv could not play this video: [youtube] abc: Video unavailable"), "{err}");
 
         // mpv quit by the user (exit 4) is not an error.
         let path = fake(&dir, "mpv", "exit 4");
-        play(&player_at(path), &url, "", Duration::from_secs(5)).await.unwrap();
+        play(&player_at(path), &url, "", Duration::from_secs(5), |_| {}).await.unwrap();
 
         // A player still running after the wait counts as playing.
         let path = fake(&dir, "slow", "sleep 3");
-        play(&player_at(path), &url, "", Duration::from_millis(300)).await.unwrap();
+        play(&player_at(path), &url, "", Duration::from_millis(300), |_| {}).await.unwrap();
+
+        // A failure after the wait still reaches the caller, through `late`.
+        let path = fake(
+            &dir,
+            "mpv",
+            "sleep 1\necho 'Failed to open https://rr1.googlevideo.com/videoplayback?sig=x' >&2\n\
+             echo 'No video or audio streams selected.' >&2\nexit 2",
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        play(&player_at(path), &url, "", Duration::from_millis(200), move |e| tx.send(e.to_string()).unwrap())
+            .await
+            .unwrap();
+        let err = rx.recv_timeout(Duration::from_secs(20)).expect("late failure");
+        assert!(err.starts_with("mpv could not play this video: it could not open the stream from rr1.googlevideo.com."), "{err}");
 
         // The error logs are gone, also for the player that is still running.
         let prefix = format!("tidings-player-{}-", std::process::id());

@@ -5,6 +5,24 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+- "Watch video" could open mpv and then close it with no video and no error, mostly for
+  YouTube. Tidings gave mpv a PATH with the system folders before `~/.local/bin`, so mpv
+  ran an old yt-dlp from the distribution (apt) instead of a newer one installed with
+  pipx or uv. That old yt-dlp found the video, but its streams did not open.
+  - Programs are now looked up in `~/.local/bin` and `~/bin` first, as Debian's and
+    Ubuntu's `~/.profile` does.
+  - When several copies of yt-dlp are installed, mpv gets the newest, whichever folder
+    it is in.
+  - A failure after the first 20 seconds is now shown too. Before, Tidings stopped
+    watching mpv after that.
+  - The error names the stream host that did not open. When the yt-dlp mpv used is more
+    than three months old, the error gives its version and path and says to update it.
+- mpv opened 4K and vertical videos (YouTube Shorts) in a window as large as the video,
+  which ran off the screen. mpv's window now opens at most 60% of the screen's width and
+  height; smaller videos keep their size. If your `mpv.conf` sets a window size
+  (`autofit`, `geometry` or `window-scale`), Tidings leaves it to that. IINA is unchanged.
+
 ## [0.7.0] - 2026-11-08
 
 ### Added

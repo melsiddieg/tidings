@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
@@ -464,8 +464,9 @@ pub fn video_player(state: AppStateRef<'_>) -> Option<video::Player> {
 }
 
 /// Plays a video link in the external player (mpv or IINA). See video.rs.
+/// A failure after `video::STARTUP_WAIT` comes as a "video-failed" event.
 #[tauri::command]
-pub async fn play_video(state: AppStateRef<'_>, url: String) -> Result<()> {
+pub async fn play_video(app: AppHandle, state: AppStateRef<'_>, url: String) -> Result<()> {
     let settings = state.settings();
     let url = net::parse_web_url(&url)?;
     if settings.https_only && url.scheme() == "http" {
@@ -478,7 +479,10 @@ pub async fn play_video(state: AppStateRef<'_>, url: String) -> Result<()> {
         return Err(Error::blocked());
     }
     let player = video::find(&settings.video_player).ok_or_else(video::not_found)?;
-    video::play(&player, &url, &settings.proxy, video::STARTUP_WAIT).await
+    let late = move |e: Error| {
+        let _ = app.emit("video-failed", e.to_string());
+    };
+    video::play(&player, &url, &settings.proxy, video::STARTUP_WAIT, late).await
 }
 
 /// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.

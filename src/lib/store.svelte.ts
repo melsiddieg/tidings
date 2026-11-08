@@ -262,6 +262,8 @@ class Store {
       await on<FeedUpdated>('feed-updated', (e) => this.onFeedUpdated(e));
       await on<RefreshProgress>('refresh-progress', (p) => this.onProgress(p));
       await on<string>('menu', (id) => this.onMenu(id));
+      // mpv can fail after play_video has returned, for example on a stream that does not open.
+      await on<string>('video-failed', (text) => this.toast(text, 'error'));
     } catch (err) {
       this.error(err);
     } finally {

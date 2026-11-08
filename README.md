@@ -37,7 +37,11 @@ Source: <https://github.com/melsiddieg/tidings>
   play in [mpv](https://mpv.io) or [IINA](https://iina.io) (macOS) with one click or `W`.
   The site's own player never loads, so no site JavaScript, cookies or account are used.
   mpv needs [yt-dlp](https://github.com/yt-dlp/yt-dlp) for these sites. Tidings finds mpv
-  or IINA by itself; you can choose another program in Settings → Reading.
+  or IINA by itself; you can choose another program in Settings → Reading. When several
+  copies of yt-dlp are installed (say, one from apt and one from pipx or uv), mpv gets the
+  newest. YouTube often breaks older yt-dlp versions, so keep it up to date. mpv's window
+  opens at most 60% of the screen in each direction, unless your `mpv.conf` sets a
+  window size (`autofit`, `geometry` or `window-scale`).
 - **PeerTube videos play inside Tidings.** For PeerTube links and attached video files,
   Tidings picks a plain video file (up to 720p) and streams it through its own media proxy,
   like podcast audio. No PeerTube JavaScript or peer-to-peer traffic.
