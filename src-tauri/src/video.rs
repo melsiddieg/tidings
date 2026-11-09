@@ -520,10 +520,28 @@ pub struct AudioStream {
     pub url: String,
     pub mime: String,
     pub duration: Option<f64>,
+    /// When the address starts to work, in seconds since 1970 (yt-dlp's
+    /// `available_at`). YouTube answers 403 before then; `audio_stream` waits for it.
+    #[serde(skip)]
+    pub available_at: Option<f64>,
 }
 
 /// How long yt-dlp may take to find the stream.
 const LOOKUP_WAIT: Duration = Duration::from_secs(60);
+
+/// The longest wait for `available_at`. YouTube asks for a few seconds.
+const MAX_AVAILABLE_WAIT: Duration = Duration::from_secs(30);
+
+/// How long to wait before the address works: until `available_at` (seconds since
+/// 1970), with a quarter second to spare, and never more than `MAX_AVAILABLE_WAIT`.
+fn wait_before_use(available_at: Option<f64>, now: f64) -> Duration {
+    match available_at {
+        Some(at) if at.is_finite() && at > now => {
+            Duration::from_secs_f64(at - now + 0.25).min(MAX_AVAILABLE_WAIT)
+        }
+        _ => Duration::ZERO,
+    }
+}
 
 /// Audio only, as one file read in byte ranges (not HLS or DASH pieces). AAC in MP4
 /// first, since every web view plays it.
@@ -601,6 +619,10 @@ pub async fn audio_stream(page: &Url, proxy: &str) -> Result<AudioStream> {
         .map_err(|e| Error::msg(format!("Could not start yt-dlp: {e}")))?;
     if output.status.success() {
         if let Some(stream) = parse_audio(&output.stdout) {
+            // YouTube now gives a new address a start time a few seconds ahead (yt-dlp
+            // itself sleeps until then). A request before it gets HTTP 403.
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+            tokio::time::sleep(wait_before_use(stream.available_at, now)).await;
             return Ok(stream);
         }
     }
@@ -656,7 +678,8 @@ fn parse_audio(json: &[u8]) -> Option<AudioStream> {
         _ => "audio/mp4",
     };
     let duration = info.get("duration").and_then(|d| d.as_f64()).filter(|d| d.is_finite() && *d > 0.0);
-    Some(AudioStream { url: url.to_string(), mime: mime.into(), duration })
+    let available_at = chosen.get("available_at").or_else(|| info.get("available_at")).and_then(|v| v.as_f64());
+    Some(AudioStream { url: url.to_string(), mime: mime.into(), duration, available_at })
 }
 
 #[cfg(all(test, unix))]
@@ -758,15 +781,21 @@ mod tests {
 
         let json = br#"{"title": "T", "duration": 19.0, "requested_downloads": [
             {"url": "https://rr2.googlevideo.com/videoplayback?x=1", "protocol": "https",
-             "ext": "m4a", "acodec": "mp4a.40.2"}]}"#;
+             "ext": "m4a", "acodec": "mp4a.40.2", "available_at": 1794270000}]}"#;
         assert_eq!(
             parse_audio(json),
             Some(AudioStream {
                 url: "https://rr2.googlevideo.com/videoplayback?x=1".into(),
                 mime: "audio/mp4".into(),
-                duration: Some(19.0)
+                duration: Some(19.0),
+                available_at: Some(1794270000.0),
             })
         );
+        // Wait until the address works, a little longer, at most 30 seconds.
+        assert_eq!(wait_before_use(Some(1000.0), 996.5), Duration::from_secs_f64(3.75));
+        assert_eq!(wait_before_use(Some(1000.0), 1001.0), Duration::ZERO);
+        assert_eq!(wait_before_use(None, 1001.0), Duration::ZERO);
+        assert_eq!(wait_before_use(Some(5000.0), 1000.0), MAX_AVAILABLE_WAIT);
         // Older yt-dlp: the format at the top level.
         let top = br#"{"url": "https://a.example/x.webm", "protocol": "https", "ext": "webm", "acodec": "opus"}"#;
         assert_eq!(parse_audio(top).unwrap().mime, "audio/webm");
@@ -784,6 +813,9 @@ mod tests {
     async fn live_listen() {
         let page = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
         let stream = audio_stream(&page, "").await.unwrap();
+        // audio_stream waited for available_at.
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
+        assert!(stream.available_at.is_none_or(|at| at <= now));
         eprintln!("{} {:?} from {}", stream.mime, stream.duration, Url::parse(&stream.url).unwrap().host_str().unwrap());
         assert!(stream.url.starts_with("https://"));
     }

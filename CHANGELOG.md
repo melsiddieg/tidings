@@ -26,6 +26,16 @@ All notable changes to Tidings are listed here. Versions follow
   or similar video in Tidings' podcast player, with its speed control, saved position and
   media keys. yt-dlp finds the audio stream, and Tidings streams it through its own media
   proxy, like a podcast; the web view never contacts the video site. It uses much less
+### Fixed
+- Listen failed with "The audio of this video could not be played" for most regular
+  YouTube videos, while Shorts worked. YouTube now gives a new stream address a start
+  time a few seconds ahead (`available_at` in yt-dlp's output) and refuses requests
+  before it with HTTP 403; yt-dlp waits for it when it downloads, Tidings did not. It
+  affected videos with several audio tracks (YouTube's automatic dubbing), which most
+  Shorts lack. Tidings now waits for that time (Listen takes a few seconds longer to
+  start), then reads the first bytes before playing, so a stream YouTube still refuses
+  gets a clear message instead.
+
   data than the video (about 60 MB for an hour). It works with any proxy setting,
   Tor (`socks5h://`) included, and when a stream address expires or Tor changes its
   exit, Tidings asks yt-dlp for a new one and goes on from the same place. Needs

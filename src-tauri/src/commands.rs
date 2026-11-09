@@ -503,6 +503,15 @@ pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::
     if settings.https_only && stream.url.starts_with("http://") {
         return Err(Error::msg("HTTPS-only mode is on, and this audio stream uses plain http"));
     }
+    // Read the first bytes through the media proxy, as the player will: a refusal
+    // gets a clear message here instead of "could not be played", and the first
+    // block is then in the proxy's memory when the player asks for it.
+    if let Err(e) = crate::media::fetch(&state.net(), &state.media, &stream.url, Some("bytes=0-1")).await {
+        return Err(Error::msg(format!(
+            "The video site refused the audio stream ({e}). Updating yt-dlp often helps: \
+             see Settings → Security."
+        )));
+    }
     Ok(stream)
 }
 
