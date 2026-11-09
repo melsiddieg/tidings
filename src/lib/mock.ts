@@ -346,6 +346,26 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       return { name: 'mpv', path: '/usr/bin/mpv' };
     case 'play_video':
       return null;
+    case 'check_components':
+    case 'check_components_online': {
+      const online = cmd === 'check_components_online';
+      if (online) await new Promise((r) => setTimeout(r, 900));
+      return [
+        { id: 'tidings', name: 'Tidings', version: '0.8.0', detail: 'built 2026-11-09', status: online ? 'ok' : 'ok', message: online ? 'This is the newest release.' : 'Built recently.', command: null, link: null },
+        {
+          id: 'yt-dlp', name: 'yt-dlp', version: '2026.03.17', detail: '/usr/bin/yt-dlp', status: online ? 'update' : 'old',
+          message: online
+            ? 'yt-dlp 2026.10.26 is out. Update it with your package manager. Distribution packages are often months behind YouTube; a copy from pipx (pipx install yt-dlp) is newer, and Tidings prefers the newest.'
+            : 'This version is 7 months old, and YouTube often breaks older versions. Update it with your package manager.',
+          command: 'sudo apt update && sudo apt upgrade yt-dlp', link: null,
+        },
+        {
+          id: 'webkit', name: 'WebKitGTK', version: '2.52.5', detail: 'from your system', status: online ? 'update' : 'ok',
+          message: online ? 'This version has security holes fixed in 2.54.0 (WSA-2026-0006, 29 SEPTEMBER 2026). Install your system\'s updates:' : 'One series behind the newest. Your system may still be catching up.',
+          command: online ? 'sudo apt update && sudo apt upgrade' : null, link: online ? 'https://webkitgtk.org/security/WSA-2026-0006.html' : null,
+        },
+      ];
+    }
     case 'audio_stream':
       await new Promise((r) => setTimeout(r, 600));
       return { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', mime: 'audio/mpeg', duration: 372 };

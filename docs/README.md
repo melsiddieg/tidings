@@ -55,6 +55,11 @@ Source: <https://github.com/melsiddieg/tidings>
   [Sepia Search](https://sepiasearch.org) for the title and lists PeerTube videos you can
   play instead. It only runs when you click, since it sends the title to Sepia Search
   (run by Framasoft). Matches are by title, so check the channel and length.
+- **Security check** (Settings → Security): shows whether Tidings, yt-dlp and WebKitGTK
+  (Linux, BSD) are up to date, and how to update each one, matched to how it was installed.
+  Without going online it checks how old each one is, at every start, and shows a notice
+  when something needs an update. "Check now" asks GitHub for the newest releases and
+  webkitgtk.org for its latest security advisory, but only when you click it.
 - Right-to-left text (Arabic, Hebrew, Persian) is detected per article.
 - Light, dark, sepia and system themes, six accent colors, serif/sans/mono reading font, adjustable text size.
 
@@ -80,7 +85,7 @@ Source: <https://github.com/melsiddieg/tidings>
 
 | Measure | What it does |
 |---|---|
-| No telemetry | No analytics, crash reporting, update checks or accounts. The app only contacts the feeds you add and the pages and images of articles you open. |
+| No telemetry | No analytics, crash reporting, automatic update checks or accounts. The app only contacts the feeds you add and the pages and images of articles you open. The security check in Settings reads versions on this computer; it asks GitHub and webkitgtk.org for newer versions only when you click "Check now". |
 | HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. |
 | Strict Content Security Policy | The web view may only run the app's own scripts. It cannot load remote scripts, styles, fonts, frames or media. |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). Images can be turned off; then they load only when you click "Load images". |
@@ -348,6 +353,7 @@ src-tauri/src/
   sanitize.rs            HTML cleaning and tracker removal
   protocol.rs            tidings:// image proxy and feed icons
   images.rs              Re-encodes every image before the web view sees it
+  updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar

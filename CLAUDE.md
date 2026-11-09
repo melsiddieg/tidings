@@ -28,7 +28,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
-  in Rust before the web view sees it), `net.rs` (HTTP clients, private-address
+  in Rust before the web view sees it), `updates.rs` (security check: versions of Tidings,
+  yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
   `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
@@ -77,7 +78,10 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   when the user clicks "Find on PeerTube", never automatically.
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file
   access happen in Rust commands, not in the UI.
-- No telemetry, analytics, crash reporting or update checks.
+- No telemetry, analytics, crash reporting or automatic update checks. The security check
+  (`updates.rs`) reads versions on this computer at startup; it contacts GitHub and
+  webkitgtk.org only when the user clicks "Check now". Keep it that way, and keep its
+  requests on `Net::get`.
 - Never set `panic = "abort"` in `Cargo.toml`. wry relies on unwinding to catch the
   Objective-C exception WebKit throws when a cancelled `tidings://` request is answered;
   without it the macOS app aborts (see the comment in `[profile.release]`).

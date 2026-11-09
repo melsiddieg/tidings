@@ -3,7 +3,7 @@
   import Icon from '../lib/Icon.svelte';
   import Modal from './Modal.svelte';
   import { store } from '../lib/store.svelte';
-  import type { Settings } from '../lib/types';
+  import type { ComponentCheck, Settings } from '../lib/types';
   import { copyText } from '../lib/util';
 
   let { section = 'general' }: { section?: string } = $props();
@@ -14,6 +14,7 @@
     { id: 'reading', label: 'Reading', icon: 'book' },
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'privacy', label: 'Privacy & network', icon: 'shield' },
+    { id: 'security', label: 'Security', icon: 'lock' },
     { id: 'storage', label: 'Archive & data', icon: 'archive' },
     { id: 'about', label: 'About', icon: 'info' },
   ];
@@ -47,6 +48,21 @@
 
   // The user may have installed a player since startup.
   store.findVideoPlayer();
+
+  const STATUS: Record<ComponentCheck['status'], string> = {
+    ok: 'Up to date',
+    old: 'Old',
+    update: 'Update available',
+    missing: 'Not installed',
+    unknown: 'Unknown',
+    info: '',
+  };
+  const isMac = $derived(store.info?.platform === 'macos');
+
+  // Fresh offline results each time the section opens, unless "Check now" has run.
+  $effect(() => {
+    if (current === 'security' && !untrack(() => store.componentsCheckedOnline)) store.checkComponents();
+  });
 
   async function saveVideoPlayer() {
     if (videoPlayer.trim() === s.videoPlayer) return;
@@ -247,6 +263,51 @@
             </div>
           </div>
         </div>
+      {:else if current === 'security'}
+        <div class="card">
+          {#each store.components ?? [] as c (c.id)}
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">
+                  {c.name}
+                  {#if c.version}<span class="comp-version">{c.version}</span>{/if}
+                  {#if STATUS[c.status]}<span class="comp-status {c.status}">{STATUS[c.status]}</span>{/if}
+                </span>
+                <span class="hint">{c.message}</span>
+                {#if c.detail}<span class="hint comp-detail">{c.detail}</span>{/if}
+              </div>
+              {#if c.command || c.link}
+                <div class="inline">
+                  {#if c.command}
+                    {@const command = c.command}
+                    <code class="path selectable">{command}</code>
+                    <button class="btn small" onclick={() => copyText(command).then(() => store.toast('Command copied'))}><Icon name="copy" size={13} />Copy</button>
+                  {/if}
+                  {#if c.link}
+                    <button class="btn small" onclick={() => store.openExternal(c.link)}><Icon name="external" size={13} />Open page</button>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <div class="row"><span class="hint">Looking at the installed versions…</span></div>
+          {/each}
+        </div>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Check online</span>
+              <span class="hint">
+                Asks GitHub for the newest Tidings and yt-dlp releases{isMac ? '' : ', and webkitgtk.org for its latest security advisory'},
+                through your proxy. Tidings never does this by itself; without it, the list above only knows how old things are.
+                {#if store.componentsCheckedOnline}Last checked at {new Date(store.componentsCheckedOnline).toLocaleTimeString()}.{/if}
+              </span>
+            </div>
+            <button class="btn small" onclick={() => store.checkComponentsOnline()} disabled={store.checkingComponents}>
+              {#if store.checkingComponents}<span class="spinner"></span>{:else}<Icon name="refresh" size={13} />{/if}Check now
+            </button>
+          </div>
+        </div>
       {:else if current === 'storage'}
         <div class="card">
           <div class="row stack">
@@ -309,7 +370,7 @@
           <ul>
             <li><Icon name="check" size={14} />RSS, Atom and JSON Feed with folders and OPML</li>
             <li><Icon name="check" size={14} />Articles and web pages in tabs, in a script-free reader mode</li>
-            <li><Icon name="check" size={14} />No telemetry, no analytics, no update checks, no accounts</li>
+            <li><Icon name="check" size={14} />No telemetry, no analytics, no automatic update checks, no accounts</li>
             <li><Icon name="check" size={14} />Your data stays in a local database on this computer</li>
           </ul>
         </div>
@@ -319,6 +380,34 @@
 </Modal>
 
 <style>
+  .comp-version {
+    margin-left: 4px;
+    font-weight: 400;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .comp-status {
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--bg-hover);
+    color: var(--text-2);
+  }
+  .comp-status.ok {
+    color: var(--success, #2f9e5b);
+  }
+  .comp-status.old,
+  .comp-status.update {
+    background: var(--accent-softer);
+    color: var(--accent);
+  }
+  .comp-detail {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    word-break: break-all;
+  }
   .settings {
     display: grid;
     grid-template-columns: 200px 1fr;

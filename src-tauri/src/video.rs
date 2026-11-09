@@ -122,7 +122,7 @@ fn app_executable(path: PathBuf) -> PathBuf {
     path.join("Contents/MacOS").join(program)
 }
 
-fn home() -> Option<PathBuf> {
+pub(crate) fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
 }
 
@@ -321,7 +321,7 @@ fn run(player: &Player, args: &[String]) -> Result<()> {
 }
 
 /// yt-dlp releases older than this often fail on YouTube, which changes often.
-const OLD_YT_DLP_DAYS: i64 = 90;
+pub(crate) const OLD_YT_DLP_DAYS: i64 = 90;
 
 /// How long `yt-dlp --version` may take.
 const VERSION_WAIT: Duration = Duration::from_secs(10);
@@ -361,7 +361,7 @@ fn newest_yt_dlp_first(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// The release date that `yt-dlp --version` prints. Each copy runs once, and again
 /// after its file changes (an update).
-fn yt_dlp_version(path: &Path, dirs: &[PathBuf]) -> Option<NaiveDate> {
+pub(crate) fn yt_dlp_version(path: &Path, dirs: &[PathBuf]) -> Option<NaiveDate> {
     type Seen = HashMap<(PathBuf, SystemTime), Option<NaiveDate>>;
     static SEEN: LazyLock<Mutex<Seen>> = LazyLock::new(Default::default);
     let real = std::fs::canonicalize(path).ok()?;
@@ -403,7 +403,7 @@ fn version_output(path: &Path, dirs: &[PathBuf]) -> Option<String> {
 }
 
 /// "2026.09.16", or "2026.09.16.232802" for a nightly build.
-fn parse_version(text: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_version(text: &str) -> Option<NaiveDate> {
     let mut parts = text.trim().split('.');
     let mut next = || parts.next()?.parse::<u32>().ok();
     let (year, month, day) = (next()?, next()?, next()?);
@@ -536,7 +536,7 @@ const NO_YT_DLP: &str = "Listening needs yt-dlp, and it was not found. Install i
 /// The yt-dlp to run for listening, and the PATH to give it. The newest copy on
 /// PATH and in the usual folders wins; on macOS, the copy inside IINA is the last
 /// choice.
-fn find_yt_dlp() -> Option<(PathBuf, Vec<PathBuf>)> {
+pub(crate) fn find_yt_dlp() -> Option<(PathBuf, Vec<PathBuf>)> {
     let dirs = newest_yt_dlp_first(search_dirs());
     if let Some(path) = find_in(&dirs, "yt-dlp") {
         return Some((path, dirs));

@@ -183,8 +183,13 @@
       <span class="refresh-icon" class:spinning={!!store.progress}><Icon name="refresh" size={14} /></span>
       <span>{status}</span>
     </button>
-    <button class="icon-btn" title="Settings" onclick={() => (store.dialog = { kind: 'settings' })}>
+    <button
+      class="icon-btn settings-btn"
+      title={store.componentWarnings.length ? 'Settings: an update is needed' : 'Settings'}
+      onclick={() => (store.dialog = { kind: 'settings', section: store.componentWarnings.length ? 'security' : undefined })}
+    >
       <Icon name="settings" size={16} />
+      {#if store.componentWarnings.length}<span class="warn-dot"></span>{/if}
     </button>
   </footer>
 </aside>
@@ -378,5 +383,17 @@
   .spinning {
     animation: spin 1s linear infinite;
     color: var(--accent);
+  }
+  .settings-btn {
+    position: relative;
+  }
+  .warn-dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
   }
 </style>

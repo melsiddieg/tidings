@@ -156,6 +156,18 @@ export interface Settings {
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
+/** One line of the security check in Settings (updates.rs). */
+export interface ComponentCheck {
+  id: 'tidings' | 'yt-dlp' | 'webkit';
+  name: string;
+  version: string | null;
+  detail: string | null;
+  status: 'ok' | 'old' | 'update' | 'missing' | 'unknown' | 'info';
+  message: string;
+  command: string | null;
+  link: string | null;
+}
+
 /** The audio of a video, found by yt-dlp, for the podcast player ("Listen"). */
 export interface AudioStream {
   url: string;

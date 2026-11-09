@@ -3,6 +3,7 @@ import { api, errorText, on, setMediaBase } from './api';
 import type {
   AppInfo,
   ArticleItem,
+  ComponentCheck,
   DateRange,
   Dialog,
   Feed,
@@ -97,6 +98,12 @@ class Store {
   private markAnchor: string | null = null;
   /** The external video player, or null when none is found. */
   videoPlayer = $state<VideoPlayer | null>(null);
+  /** The security check in Settings (updates.rs), and when it last went online. */
+  components = $state<ComponentCheck[] | null>(null);
+  componentsCheckedOnline = $state<number | null>(null);
+  checkingComponents = $state(false);
+  /** Components that need an update. The Settings button shows a dot then. */
+  componentWarnings = $derived((this.components ?? []).filter((c) => c.status === 'old' || c.status === 'update'));
 
   scope = $state<Scope>(local.get<Scope>('scope', { kind: 'all' }));
   filter = $state<Filter>(local.get<Filter>('filter', 'all'));
@@ -252,6 +259,7 @@ class Store {
       this.error(err);
     }
     this.findVideoPlayer();
+    this.checkComponents(true);
     document.documentElement.dataset.platform = this.info?.platform ?? 'web';
     this.applyAppearance();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyAppearance());
@@ -671,6 +679,39 @@ class Store {
       return;
     }
     this.openWebTab(url, mode === 'background');
+  }
+
+  /**
+   * The offline security check: versions on this computer only, no network. At
+   * startup (`notify`), a finding is announced once a week at most.
+   */
+  async checkComponents(notify = false) {
+    try {
+      this.components = await api.checkComponents();
+    } catch {
+      return;
+    }
+    const warnings = this.componentWarnings;
+    if (!notify || warnings.length === 0) return;
+    const key = warnings.map((c) => `${c.id}:${c.version}`).join(',');
+    const last = local.get<{ key: string; at: number } | null>('securityNotice', null);
+    if (last && last.key === key && Date.now() - last.at < 7 * 86_400_000) return;
+    local.set('securityNotice', { key, at: Date.now() });
+    const names = warnings.map((c) => c.name).join(' and ');
+    this.toast(`${names} ${warnings.length > 1 ? 'need' : 'needs'} an update. See Settings → Security.`, 'info');
+  }
+
+  /** The online security check: only on the user's click ("Check now"). */
+  async checkComponentsOnline() {
+    this.checkingComponents = true;
+    try {
+      this.components = await api.checkComponentsOnline();
+      this.componentsCheckedOnline = Date.now();
+    } catch (err) {
+      this.error(err);
+    } finally {
+      this.checkingComponents = false;
+    }
   }
 
   /** Looks for the external video player again (the user may have installed one). */

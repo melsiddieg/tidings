@@ -17,6 +17,7 @@ use crate::reader;
 use crate::sanitize;
 use crate::settings::Settings;
 use crate::state::AppState;
+use crate::updates;
 use crate::video;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -503,6 +504,20 @@ pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::
         return Err(Error::msg("HTTPS-only mode is on, and this audio stream uses plain http"));
     }
     Ok(stream)
+}
+
+/// The offline security check (updates.rs): no network. The UI runs it at startup.
+#[tauri::command]
+pub async fn check_components() -> Vec<updates::Component> {
+    let today = chrono::Local::now().date_naive();
+    tokio::task::spawn_blocking(move || updates::check_offline(today)).await.unwrap_or_default()
+}
+
+/// The online security check. Only when the user clicks "Check now".
+#[tauri::command]
+pub async fn check_components_online(state: AppStateRef<'_>) -> Result<Vec<updates::Component>> {
+    let net = state.net();
+    Ok(updates::check_online(&net, chrono::Local::now().date_naive()).await)
 }
 
 /// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.

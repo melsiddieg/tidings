@@ -20,6 +20,7 @@ mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod updates;
 mod video;
 #[cfg(test)]
 mod tests;
@@ -159,6 +160,8 @@ fn main() {
             commands::video_player,
             commands::play_video,
             commands::audio_stream,
+            commands::check_components,
+            commands::check_components_online,
             commands::peertube_video,
             commands::search_peertube,
             commands::set_badge,

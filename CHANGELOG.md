@@ -5,6 +5,20 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Settings → Security shows whether Tidings and the programs it relies on are up to
+  date: Tidings itself, yt-dlp, and WebKitGTK on Linux and the BSDs (on macOS, WebKit
+  comes with macOS updates). Each finding says what to do, matched to how the program
+  was installed: `brew upgrade yt-dlp`, `uv tool upgrade yt-dlp`, `pipx upgrade
+  yt-dlp`, your distribution's update command, or the releases page.
+  - Without going online, Tidings checks how old each one is, at every start. When
+    something needs an update, a notice appears (at most once a week) and the Settings
+    button shows a dot.
+  - "Check now" asks GitHub for the newest Tidings and yt-dlp releases and webkitgtk.org
+    for its latest security advisory, so it can say when a version has known security
+    holes. It goes through your proxy and runs only when you click it; Tidings still
+    makes no automatic update checks.
+
 ## [0.8.0] - 2026-11-09
 
 ### Added
