@@ -2,7 +2,7 @@
 
 Tidings is a private RSS/Atom/JSON Feed reader. Tauri 2 (Rust) backend, Svelte 5 UI,
 SQLite storage. Targets: macOS, Linux, FreeBSD and OpenBSD.
-See README.md for features, the security design and user-facing build steps.
+See docs/README.md for features, the security design and user-facing build steps.
 
 ## Commands
 
