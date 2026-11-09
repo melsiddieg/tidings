@@ -26,7 +26,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
-  `protocol.rs` (`tidings://` image proxy and icons), `net.rs` (HTTP clients, private-address
+  `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
+  in Rust before the web view sees it), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
   `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
@@ -55,6 +56,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   the trusted host, and only when that host is itself private. Images and audio use
   `net.image`, behind `protocol::decode_target`. Do not add DNS lookups of your own: when a
   proxy is set (Tor), every lookup must go through it, and `Net::is_private_host` skips DNS then.
+- Every image the web view shows must come out of `images::clean`: `protocol.rs` serves only
+  re-encoded bytes, never the downloaded file. Keep the `image` crate to pure-Rust decoders
+  (no `avif-native` or other C libraries).
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
 - Videos play in an external player (`video.rs`), never in the web view: no iframes, no site

@@ -4,6 +4,8 @@
 //!   returns it. The web view never contacts image hosts itself, so no cookies,
 //!   no referrer, and the proxy setting applies to images too.
 //! - `tidings://localhost/icon/<feed id>` returns the stored favicon of a feed.
+//!
+//! Both return images re-encoded by images.rs, never the downloaded file.
 //! - `tidings://localhost/media/<base64url>` streams podcast audio in byte ranges.
 
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use reqwest::header::ACCEPT;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{AppHandle, Manager};
 
+use crate::images::{self, Use};
 use crate::media;
 use crate::net;
 use crate::state::{AppState, CachedImage};
@@ -49,19 +52,24 @@ pub async fn handle(app: &AppHandle, request: Request<Vec<u8>>) -> Response<Vec<
     } else if let Some(rest) = path.strip_prefix("/img/") {
         proxy_image(&state, rest).await
     } else if let Some(rest) = path.strip_prefix("/icon/") {
-        feed_icon(&state, rest)
+        feed_icon(&state, rest).await
     } else {
         empty(StatusCode::NOT_FOUND)
     }
 }
 
-fn feed_icon(state: &AppState, rest: &str) -> Response<Vec<u8>> {
+async fn feed_icon(state: &AppState, rest: &str) -> Response<Vec<u8>> {
     let Ok(id) = rest.trim_end_matches('/').parse::<i64>() else {
         return empty(StatusCode::BAD_REQUEST);
     };
-    match crate::db::icon(&state.db(), id) {
-        Ok(Some((bytes, mime))) => image_response(&mime, bytes, 7 * 86_400),
-        _ => empty(StatusCode::NOT_FOUND),
+    // Icons are stored as downloaded, and re-encoded each time they are shown
+    // (they are small). The web view keeps them for a week.
+    let Ok(Some((bytes, mime))) = crate::db::icon(&state.db(), id) else {
+        return empty(StatusCode::NOT_FOUND);
+    };
+    match images::clean(bytes, &mime, Use::Icon).await {
+        Some(clean) => image_response(clean.mime, clean.bytes, 7 * 86_400),
+        None => empty(StatusCode::NOT_FOUND),
     }
 }
 
@@ -143,7 +151,9 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
     let response = match net
         .image
         .get(target.as_str())
-        .header(ACCEPT, "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8")
+        // No AVIF: images.rs has no decoder for it, and sites that offer several
+        // formats then send one that it can re-encode.
+        .header(ACCEPT, "image/webp,image/png,image/jpeg,image/gif,image/svg+xml,image/*;q=0.5")
         .send()
         .await
     {
@@ -157,9 +167,26 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
     let Some(mime) = net::sniff_image(&bytes, &content_type) else {
         return empty(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     };
-    if bytes.len() <= 3 * 1024 * 1024 {
-        let entry = Arc::new(CachedImage { mime: mime.clone(), bytes: bytes.clone() });
+    #[cfg(debug_assertions)]
+    let (started, size) = (std::time::Instant::now(), bytes.len());
+    let clean = images::clean(bytes, &mime, Use::Article).await;
+    // Development builds log each re-encoded image (no URL).
+    #[cfg(debug_assertions)]
+    match &clean {
+        Some(c) => eprintln!(
+            "img {mime} {size} bytes -> {} {} bytes in {} ms",
+            c.mime,
+            c.bytes.len(),
+            started.elapsed().as_millis()
+        ),
+        None => eprintln!("img {mime} {size} bytes -> refused"),
+    }
+    let Some(clean) = clean else {
+        return empty(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    };
+    if clean.bytes.len() <= 3 * 1024 * 1024 {
+        let entry = Arc::new(CachedImage { mime: clean.mime.to_string(), bytes: clean.bytes.clone() });
         state.images.lock().unwrap_or_else(|e| e.into_inner()).put(target, entry);
     }
-    image_response(&mime, bytes, 86_400)
+    image_response(clean.mime, clean.bytes, 86_400)
 }

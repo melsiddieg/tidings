@@ -7,6 +7,7 @@ mod discover;
 mod error;
 mod feed_types;
 mod feeds;
+mod images;
 mod media;
 mod media_server;
 mod menu;

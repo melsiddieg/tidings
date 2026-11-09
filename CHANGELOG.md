@@ -5,6 +5,20 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+- Every image is re-encoded in Rust before the web view shows it. Tidings decodes
+  article images, thumbnails, video posters and feed icons with pure-Rust decoders and
+  memory limits, then writes a new JPEG, PNG or GIF. WebKit's own image libraries
+  (libwebp, libjpeg-turbo, libpng and others) never parse a file from the internet,
+  so a crafted image cannot reach a bug in them, like the libwebp bug exploited in 2023.
+  - Photos stay JPEG; PNG, icons, lossless WebP and images with transparency become PNG.
+    Animated GIFs keep all their frames.
+  - Images larger than 2400 pixels are scaled down. EXIF rotation is applied, and
+    metadata and color profiles are dropped.
+  - AVIF images are no longer shown, and animated WebP and PNG show only their first
+    frame. Tidings no longer asks image hosts for AVIF, so sites that offer several
+    formats send one it can re-encode.
+
 ## [0.7.1] - 2026-11-08
 
 ### Fixed

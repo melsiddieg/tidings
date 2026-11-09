@@ -34,6 +34,8 @@ thiserror = "2"
 chrono = "0.4"
 log = "0.4"
 encoding_rs = "0.8"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+gif = "0.14"
 
 [profile.release]
 codegen-units = 1
@@ -44,3 +46,35 @@ strip = true
 # wry answers a tidings:// request that the web view has just cancelled. wry catches it
 # with objc2::exception::catch, which only works when Rust code can unwind. With
 # panic = "abort" the exception aborts the whole app (the 0.4.0/0.4.1 crash).
+
+# Image decoding and encoding (images.rs) is slow at opt-level "s", and very slow in
+# debug builds. Build those crates for speed in both profiles.
+[profile.release.package.image]
+opt-level = 3
+[profile.release.package.zune-jpeg]
+opt-level = 3
+[profile.release.package.png]
+opt-level = 3
+[profile.release.package.image-webp]
+opt-level = 3
+[profile.release.package.gif]
+opt-level = 3
+[profile.release.package.fdeflate]
+opt-level = 3
+[profile.release.package.weezl]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3

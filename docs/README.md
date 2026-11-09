@@ -78,6 +78,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. |
 | Strict Content Security Policy | The web view may only run the app's own scripts. It cannot load remote scripts, styles, fonts, frames or media. |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). Images can be turned off; then they load only when you click "Load images". |
+| Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is passed through, since WebKit draws it with its own code and SVG inside `<img>` cannot run scripts; AVIF is not shown. |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
@@ -276,7 +277,7 @@ npm run check
 ```
 
 The Rust tests cover feed parsing, HTML sanitizing, tracker removal, the image
-proxy rules, reader-mode extraction, every database query and an OPML round trip.
+proxy rules, image re-encoding, reader-mode extraction, every database query and an OPML round trip.
 
 To check video playback on your machine (it opens mpv or IINA and plays a 19-second
 YouTube clip):
@@ -333,6 +334,7 @@ src-tauri/src/
   reader.rs              Reader mode (article extraction)
   sanitize.rs            HTML cleaning and tracker removal
   protocol.rs            tidings:// image proxy and feed icons
+  images.rs              Re-encodes every image before the web view sees it
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar
