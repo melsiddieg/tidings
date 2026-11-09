@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-09
+
 ### Added
 - Listen to a video: the Listen button (or `L`) plays only the sound of a YouTube, Vimeo
   or similar video in Tidings' podcast player, with its speed control, saved position and
@@ -219,7 +221,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/melsiddieg/tidings/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/melsiddieg/tidings/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/melsiddieg/tidings/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/melsiddieg/tidings/compare/v0.5.0...v0.6.0
