@@ -25,9 +25,9 @@ ARCH=$(uname -m)
 [ "$ARCH" = amd64 ] && ARCH=x86_64
 
 for tool in cargo node npm pkg-config; do
-  command -v "$tool" >/dev/null || { echo "$tool is missing; see 'Building on FreeBSD and OpenBSD' in README.md." >&2; exit 1; }
+  command -v "$tool" >/dev/null || { echo "$tool is missing; see 'Building on FreeBSD and OpenBSD' in docs/README.md." >&2; exit 1; }
 done
-pkg-config --exists webkit2gtk-4.1 || { echo "webkit2gtk-4.1 is missing; see README.md." >&2; exit 1; }
+pkg-config --exists webkit2gtk-4.1 || { echo "webkit2gtk-4.1 is missing; see docs/README.md." >&2; exit 1; }
 
 # OpenBSD limits how much memory one process may use by login class
 # (1.5 GB for "staff"). Linking the app needs more, so raise it to the hard limit.
