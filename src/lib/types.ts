@@ -156,6 +156,13 @@ export interface Settings {
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
+/** The audio of a video, found by yt-dlp, for the podcast player ("Listen"). */
+export interface AudioStream {
+  url: string;
+  mime: string;
+  duration: number | null;
+}
+
 export interface PeerTubeVideo {
   title: string;
   url: string;

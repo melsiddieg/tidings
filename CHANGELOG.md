@@ -5,6 +5,16 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Listen to a video: the Listen button (or `L`) plays only the sound of a YouTube, Vimeo
+  or similar video in Tidings' podcast player, with its speed control, saved position and
+  media keys. yt-dlp finds the audio stream, and Tidings streams it through its own media
+  proxy, like a podcast; the web view never contacts the video site. It uses much less
+  data than the video (about 60 MB for an hour). It works with any proxy setting,
+  Tor (`socks5h://`) included, and when a stream address expires or Tor changes its
+  exit, Tidings asks yt-dlp for a new one and goes on from the same place. Needs
+  yt-dlp; on macOS, the copy inside IINA is used when no other is installed.
+
 ### Security
 - Every image is re-encoded in Rust before the web view shows it. Tidings decodes
   article images, thumbnails, video posters and feed icons with pure-Rust decoders and

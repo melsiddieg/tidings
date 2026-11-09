@@ -954,3 +954,22 @@ async fn live_peertube() {
     assert!(chunk.mime.starts_with("video/"), "{}", chunk.mime);
     println!("media: {} bytes, {}, {:?}", chunk.bytes.len(), chunk.mime, chunk.content_range);
 }
+
+/// "Listen" end to end without the UI: yt-dlp finds the audio of a 19-second YouTube
+/// video, and the media proxy reads it in byte ranges, as the podcast player does.
+/// Needs yt-dlp: `cargo test live_listen_through_proxy -- --ignored`
+#[tokio::test]
+#[ignore]
+async fn live_listen_through_proxy() {
+    let page = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+    let stream = crate::video::audio_stream(&page, "").await.unwrap();
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let cache = std::sync::Arc::new(crate::media::Media::default());
+    let first = crate::media::fetch(&net, &cache, &stream.url, Some("bytes=0-")).await.unwrap();
+    assert_eq!(first.status, 206);
+    assert_eq!(first.mime, "audio/mp4");
+    // A seek into the middle.
+    let middle = crate::media::fetch(&net, &cache, &stream.url, Some("bytes=150000-")).await.unwrap();
+    assert_eq!(middle.status, 206);
+    println!("{} bytes, then {} bytes from the middle, {:?}", first.bytes.len(), middle.bytes.len(), middle.content_range);
+}

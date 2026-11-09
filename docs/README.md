@@ -42,6 +42,12 @@ Source: <https://github.com/melsiddieg/tidings>
   newest. YouTube often breaks older yt-dlp versions, so keep it up to date. mpv's window
   opens at most 60% of the screen in each direction, unless your `mpv.conf` sets a
   window size (`autofit`, `geometry` or `window-scale`).
+- **Listen to videos.** The Listen button (or `L`) plays only the sound of a YouTube, Vimeo
+  or similar video in the podcast player, with speed control, saved position and media keys.
+  yt-dlp finds the audio stream; Tidings streams it through its own media proxy, like a
+  podcast, so the video site never talks to the web view. It uses much less data than the
+  video and works with any proxy, Tor included. Needs yt-dlp (on macOS, the copy inside IINA
+  is used when no other is installed).
 - **PeerTube videos play inside Tidings.** For PeerTube links and attached video files,
   Tidings picks a plain video file (up to 720p) and streams it through its own media proxy,
   like podcast audio. No PeerTube JavaScript or peer-to-peer traffic.
@@ -82,7 +88,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
 | Reader mode for links | Linked pages are fetched by Rust and reduced to the article. No site JavaScript runs. |
-| Videos | PeerTube videos and video files play in a `<video>` element fed by the same Rust media proxy as podcasts: the video host never talks to the web view. Other videos are played by mpv or IINA, never by an embedded site player. The player makes its own connections. With a proxy set, Tidings passes it to mpv or IINA, and refuses to start a player when the video would bypass the proxy (mpv cannot use SOCKS proxies such as Tor). Video links follow the same local network rule as reader tabs. |
+| Videos | PeerTube videos and video files play in a `<video>` element fed by the same Rust media proxy as podcasts: the video host never talks to the web view. Other videos are played by mpv or IINA, never by an embedded site player. The player makes its own connections. With a proxy set, Tidings passes it to mpv or IINA, and refuses to start a player when the video would bypass the proxy (mpv cannot use SOCKS proxies such as Tor). Video links follow the same local network rule as reader tabs. "Listen" runs yt-dlp only to find a video's audio stream, with your proxy (SOCKS included) and without your yt-dlp configuration, so a `--cookies-from-browser` line there never sends your account cookies; the audio itself streams through Tidings' media proxy. |
 | No navigation | The window can only show the app itself. All other navigation and pop-ups are blocked; links open in a reader tab or your browser. |
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |
 | Local network protection | A feed cannot make the app send requests into your local network. Feeds, pages, favicons, images and audio may only reach public addresses; private and local ones are refused in the first URL, in every redirect and in DNS answers. The one exception is a feed you add yourself on a private host (a NAS or a self-hosted reader): Tidings may reach that host for the feed and for links to the same host. With a proxy, the proxy does DNS lookups, so only literal private addresses and local names are refused. |
@@ -286,6 +292,12 @@ YouTube clip):
 TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored
 ```
 
+To check Listen (yt-dlp finds the audio of the same clip, and the media proxy reads it):
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml live_listen -- --ignored
+```
+
 ### Working on the UI only
 
 `npm run dev` serves the UI at http://localhost:1420 with a fake in-memory backend
@@ -302,6 +314,7 @@ backend is only loaded in development and is not part of release builds.
 | `O` / `Enter` | Open the article in a tab |
 | `V` | Open in browser |
 | `W` | Watch the video in mpv or IINA |
+| `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
 | `S` | Star |

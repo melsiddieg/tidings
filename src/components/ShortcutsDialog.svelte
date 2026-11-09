@@ -16,6 +16,7 @@
         [['O', 'Enter'], 'Open article in a tab'],
         [['V'], 'Open in browser'],
         [['W'], 'Watch video in player'],
+        [['L'], 'Listen to a video (sound only)'],
         [['F'], 'Load full article'],
         [['I'], 'Show or hide images'],
       ],

@@ -129,6 +129,9 @@
       case 'w':
         store.send('watch');
         break;
+      case 'l':
+        store.send('listen');
+        break;
       case 's':
         store.send('star');
         break;

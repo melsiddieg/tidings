@@ -12,6 +12,7 @@ npm run check                            # Svelte/TypeScript type check (must be
 cargo test --manifest-path src-tauri/Cargo.toml                 # offline tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored    # + live network test
 TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored  # plays a clip in mpv/IINA
+cargo test --manifest-path src-tauri/Cargo.toml live_listen -- --ignored   # yt-dlp finds a clip's audio ("Listen")
 npm run tauri dev                        # run the app (Vite on port 1420)
 npm run tauri build                      # release packages for the host OS
 npm run dev                              # UI only in a browser, with the fake backend in src/lib/mock.ts
@@ -66,6 +67,10 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   browser". Keep `video::args` refusing to start when the player cannot use the proxy
   setting (mpv ignores anything but `http://` proxies), so videos never bypass Tor. Start
   the player with an argument list, never through a shell.
+- "Listen" (`video::audio_stream`) runs yt-dlp only to find a video's audio stream; the audio
+  itself streams through `mediaUrl(...)` like a podcast. Keep `--ignore-config` (the user's
+  yt-dlp config may hold `--cookies-from-browser`), keep passing the proxy, and keep the
+  stream to a single http(s) file. Start yt-dlp with an argument list ending in `--` and the URL.
 - Videos inside Tidings (PeerTube, attached video files) use a `<video>` element whose
   source is `mediaUrl(...)`, the same media proxy as podcasts. Never point it at a remote URL.
 - Sepia Search (`peertube::search`) sends the article title to sepiasearch.org. Call it only

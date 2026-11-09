@@ -485,6 +485,26 @@ pub async fn play_video(app: AppHandle, state: AppStateRef<'_>, url: String) -> 
     video::play(&player, &url, &settings.proxy, video::STARTUP_WAIT, late).await
 }
 
+/// Finds an audio-only stream of a video page with yt-dlp ("Listen"). The UI plays
+/// it in the podcast player, through the media proxy. Same checks as `play_video`.
+#[tauri::command]
+pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::AudioStream> {
+    let settings = state.settings();
+    let url = net::parse_web_url(&url)?;
+    if settings.https_only && url.scheme() == "http" {
+        return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
+    }
+    let trusted = subscribed_feed_on(&state, &url).is_some();
+    if !trusted && state.net().is_private_host(&url).await {
+        return Err(Error::blocked());
+    }
+    let stream = video::audio_stream(&url, &settings.proxy).await?;
+    if settings.https_only && stream.url.starts_with("http://") {
+        return Err(Error::msg("HTTPS-only mode is on, and this audio stream uses plain http"));
+    }
+    Ok(stream)
+}
+
 /// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.
 #[tauri::command]
 pub async fn peertube_video(state: AppStateRef<'_>, url: String) -> Result<peertube::VideoFile> {

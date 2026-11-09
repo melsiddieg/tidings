@@ -410,12 +410,12 @@ fn parse_version(text: &str) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)
 }
 
-/// Advice for a failed video when the yt-dlp that mpv used is old.
-fn old_yt_dlp_hint(path: &Path, version: NaiveDate, today: NaiveDate) -> Option<String> {
+/// Advice for a failed video when the yt-dlp that `user` (mpv, Tidings) ran is old.
+fn old_yt_dlp_hint(user: &str, path: &Path, version: NaiveDate, today: NaiveDate) -> Option<String> {
     let days = (today - version).num_days();
     (days > OLD_YT_DLP_DAYS).then(|| {
         format!(
-            "mpv used yt-dlp {} from {}, which is {} months old. YouTube often breaks older \
+            "{user} used yt-dlp {} from {}, which is {} months old. YouTube often breaks older \
              versions: update yt-dlp and try again.",
             version.format("%Y.%m.%d"),
             path.display(),
@@ -496,7 +496,7 @@ fn check_exit(player: &Player, status: ExitStatus, lines: &[String], dirs: &[Pat
             None => message.push_str(" mpv needs yt-dlp for YouTube and similar sites, and it was not found."),
             Some(path) => {
                 let today = chrono::Local::now().date_naive();
-                let hint = yt_dlp_version(&path, dirs).and_then(|v| old_yt_dlp_hint(&path, v, today));
+                let hint = yt_dlp_version(&path, dirs).and_then(|v| old_yt_dlp_hint("mpv", &path, v, today));
                 if let Some(hint) = hint {
                     message.push(' ');
                     message.push_str(&hint);
@@ -505,6 +505,158 @@ fn check_exit(player: &Player, status: ExitStatus, lines: &[String], dirs: &[Pat
         }
     }
     Err(Error::msg(message))
+}
+
+// Listening: the audio of a video in Tidings' own podcast player ---------------------
+
+/// An audio-only stream of a video, found by yt-dlp. Tidings plays it through its
+/// media proxy (net.rs), like a podcast; yt-dlp only finds the address.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStream {
+    /// A direct http(s) address of the audio file. YouTube's expire after some hours
+    /// and only work from the IP address that asked for them, so the UI asks again
+    /// each time it starts playing.
+    pub url: String,
+    pub mime: String,
+    pub duration: Option<f64>,
+}
+
+/// How long yt-dlp may take to find the stream.
+const LOOKUP_WAIT: Duration = Duration::from_secs(60);
+
+/// Audio only, as one file read in byte ranges (not HLS or DASH pieces). AAC in MP4
+/// first, since every web view plays it.
+const AUDIO_FORMAT: &str =
+    "bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https]/bestaudio[protocol=http]";
+
+const NO_YT_DLP: &str = "Listening needs yt-dlp, and it was not found. Install it \
+    (with Homebrew, your package manager or pipx) and try again.";
+
+/// The yt-dlp to run for listening, and the PATH to give it. The newest copy on
+/// PATH and in the usual folders wins; on macOS, the copy inside IINA is the last
+/// choice.
+fn find_yt_dlp() -> Option<(PathBuf, Vec<PathBuf>)> {
+    let dirs = newest_yt_dlp_first(search_dirs());
+    if let Some(path) = find_in(&dirs, "yt-dlp") {
+        return Some((path, dirs));
+    }
+    if cfg!(target_os = "macos") {
+        let mut apps = vec![PathBuf::from("/Applications")];
+        apps.extend(home().map(|h| h.join("Applications")));
+        // IINA ships yt-dlp under its old name.
+        let bundled = apps.iter().map(|a| a.join("IINA.app/Contents/MacOS/youtube-dl")).find(|p| is_executable(p));
+        return bundled.map(|path| (path, dirs));
+    }
+    None
+}
+
+/// yt-dlp's arguments. `--ignore-config` keeps out the user's yt-dlp settings: a
+/// `--cookies-from-browser` line there would send their YouTube account cookies.
+/// yt-dlp understands every proxy Tidings accepts, socks5h:// (Tor) included, and
+/// with socks5h:// it leaves DNS to the proxy, as net.rs does.
+fn audio_args(page: &Url, proxy: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--ignore-config",
+        "--no-playlist",
+        "--no-warnings",
+        "--no-progress",
+        "--dump-single-json",
+        "--socket-timeout",
+        "20",
+        "--format",
+        AUDIO_FORMAT,
+    ]
+    .map(String::from)
+    .to_vec();
+    let proxy = proxy.trim();
+    if !proxy.is_empty() {
+        args.push("--proxy".into());
+        args.push(proxy.into());
+    }
+    // After "--", nothing can be read as an option.
+    args.push("--".into());
+    args.push(page.to_string());
+    args
+}
+
+/// Finds an audio-only stream for a video page (YouTube, Vimeo...) with yt-dlp.
+pub async fn audio_stream(page: &Url, proxy: &str) -> Result<AudioStream> {
+    // Picking the newest yt-dlp may run `yt-dlp --version`.
+    let found = tokio::task::spawn_blocking(find_yt_dlp).await.ok().flatten();
+    let (path, dirs) = found.ok_or_else(|| Error::msg(NO_YT_DLP))?;
+    let mut command = tokio::process::Command::new(&path);
+    command
+        .args(audio_args(page, proxy))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Ok(env) = std::env::join_paths(&dirs) {
+        command.env("PATH", env);
+    }
+    let output = tokio::time::timeout(LOOKUP_WAIT, command.output())
+        .await
+        .map_err(|_| Error::msg("yt-dlp took too long to find the audio of this video."))?
+        .map_err(|e| Error::msg(format!("Could not start yt-dlp: {e}")))?;
+    if output.status.success() {
+        if let Some(stream) = parse_audio(&output.stdout) {
+            return Ok(stream);
+        }
+    }
+    let errors = String::from_utf8_lossy(&output.stderr);
+    let mut message = if errors.contains("Requested format is not available") || output.status.success() {
+        "This video has no audio-only stream that Tidings can play.".to_string()
+    } else {
+        let reason = errors
+            .lines()
+            .rev()
+            .find_map(|l| l.split_once("ERROR: ").map(|(_, rest)| rest.trim().chars().take(400).collect::<String>()));
+        match reason {
+            Some(reason) => format!("yt-dlp could not find the audio: {reason}"),
+            None => format!("yt-dlp could not find the audio (exit code {}).", output.status.code().unwrap_or(-1)),
+        }
+    };
+    if !message.ends_with('.') {
+        message.push('.');
+    }
+    let today = chrono::Local::now().date_naive();
+    let version = tokio::task::spawn_blocking({
+        let (path, dirs) = (path.clone(), dirs.clone());
+        move || yt_dlp_version(&path, &dirs)
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(hint) = version.and_then(|v| old_yt_dlp_hint("Tidings", &path, v, today)) {
+        message.push(' ');
+        message.push_str(&hint);
+    }
+    Err(Error::msg(message))
+}
+
+/// Reads yt-dlp's JSON. Only a single file over http(s) with sound is accepted.
+fn parse_audio(json: &[u8]) -> Option<AudioStream> {
+    let info: serde_json::Value = serde_json::from_slice(json).ok()?;
+    // The chosen format is in requested_downloads; older yt-dlp puts it at the top.
+    let chosen = info.get("requested_downloads").and_then(|d| d.get(0)).unwrap_or(&info);
+    let field = |name: &str| chosen.get(name).or_else(|| info.get(name)).and_then(|v| v.as_str());
+    let url = Url::parse(field("url")?).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || !matches!(field("protocol")?, "http" | "https") {
+        return None;
+    }
+    if field("acodec").is_some_and(|c| c == "none") {
+        return None;
+    }
+    let mime = match field("ext").unwrap_or("") {
+        "m4a" | "mp4" => "audio/mp4",
+        "webm" => "audio/webm",
+        "mp3" => "audio/mpeg",
+        "ogg" | "opus" => "audio/ogg",
+        _ => "audio/mp4",
+    };
+    let duration = info.get("duration").and_then(|d| d.as_f64()).filter(|d| d.is_finite() && *d > 0.0);
+    Some(AudioStream { url: url.to_string(), mime: mime.into(), duration })
 }
 
 #[cfg(all(test, unix))]
@@ -596,6 +748,47 @@ mod tests {
     }
 
     #[test]
+    fn listening() {
+        let page = video();
+        let args = audio_args(&page, " socks5h://127.0.0.1:9050 ");
+        assert_eq!(args[0], "--ignore-config");
+        assert!(args.windows(2).any(|w| w == ["--proxy", "socks5h://127.0.0.1:9050"]));
+        assert_eq!(&args[args.len() - 2..], ["--", page.as_str()]);
+        assert!(!audio_args(&page, "").contains(&"--proxy".to_string()));
+
+        let json = br#"{"title": "T", "duration": 19.0, "requested_downloads": [
+            {"url": "https://rr2.googlevideo.com/videoplayback?x=1", "protocol": "https",
+             "ext": "m4a", "acodec": "mp4a.40.2"}]}"#;
+        assert_eq!(
+            parse_audio(json),
+            Some(AudioStream {
+                url: "https://rr2.googlevideo.com/videoplayback?x=1".into(),
+                mime: "audio/mp4".into(),
+                duration: Some(19.0)
+            })
+        );
+        // Older yt-dlp: the format at the top level.
+        let top = br#"{"url": "https://a.example/x.webm", "protocol": "https", "ext": "webm", "acodec": "opus"}"#;
+        assert_eq!(parse_audio(top).unwrap().mime, "audio/webm");
+        // Pieces (HLS), a video without sound, other schemes and broken JSON are refused.
+        assert!(parse_audio(br#"{"url": "https://a.example/x.m3u8", "protocol": "m3u8_native"}"#).is_none());
+        assert!(parse_audio(br#"{"url": "https://a.example/x", "protocol": "https", "acodec": "none"}"#).is_none());
+        assert!(parse_audio(br#"{"url": "file:///etc/passwd", "protocol": "https"}"#).is_none());
+        assert!(parse_audio(b"not json").is_none());
+    }
+
+    /// Asks the yt-dlp on this machine for the audio of a 19-second YouTube video:
+    /// `cargo test live_listen -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn live_listen() {
+        let page = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+        let stream = audio_stream(&page, "").await.unwrap();
+        eprintln!("{} {:?} from {}", stream.mime, stream.duration, Url::parse(&stream.url).unwrap().host_str().unwrap());
+        assert!(stream.url.starts_with("https://"));
+    }
+
+    #[test]
     fn yt_dlp_versions() {
         let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
         assert_eq!(parse_version("2026.09.16\n"), Some(date(2026, 9, 16)));
@@ -604,9 +797,9 @@ mod tests {
         assert_eq!(parse_version("2026.13.01"), None);
 
         let path = Path::new("/usr/bin/yt-dlp");
-        let hint = old_yt_dlp_hint(path, date(2026, 3, 17), date(2026, 11, 8)).unwrap();
+        let hint = old_yt_dlp_hint("mpv", path, date(2026, 3, 17), date(2026, 11, 8)).unwrap();
         assert!(hint.starts_with("mpv used yt-dlp 2026.03.17 from /usr/bin/yt-dlp, which is 7 months old."), "{hint}");
-        assert_eq!(old_yt_dlp_hint(path, date(2026, 9, 16), date(2026, 11, 8)), None);
+        assert_eq!(old_yt_dlp_hint("mpv", path, date(2026, 9, 16), date(2026, 11, 8)), None);
 
         assert_eq!(
             stream_failure("Failed to open https://rr11---sn-abc.googlevideo.com/videoplayback?expire=1&sig=2").as_deref(),

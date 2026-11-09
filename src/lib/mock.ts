@@ -346,6 +346,9 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       return { name: 'mpv', path: '/usr/bin/mpv' };
     case 'play_video':
       return null;
+    case 'audio_stream':
+      await new Promise((r) => setTimeout(r, 600));
+      return { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', mime: 'audio/mpeg', duration: 372 };
     case 'peertube_video':
       return { title: 'What is PeerTube?', url: 'https://example.com/what-is-peertube-720.mp4', label: '720p', duration: 114 };
     case 'search_peertube':

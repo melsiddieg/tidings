@@ -158,6 +158,7 @@ fn main() {
             commands::open_external,
             commands::video_player,
             commands::play_video,
+            commands::audio_stream,
             commands::peertube_video,
             commands::search_peertube,
             commands::set_badge,
