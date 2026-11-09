@@ -28,7 +28,7 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
-  in Rust before the web view sees it), `updates.rs` (security check: versions of Tidings,
+  in Rust before the web view sees it), `brief.rs` (AI briefs by a local model), `updates.rs` (security check: versions of Tidings,
   yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
@@ -78,6 +78,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   when the user clicks "Find on PeerTube", never automatically.
 - Keep UI permissions in `src-tauri/capabilities/default.json` minimal. File dialogs and file
   access happen in Rust commands, not in the UI.
+- AI briefs (`brief.rs`) use only a model server on this computer or the local network.
+  Requests to it go through `Net::local_model`, which checks the address
+  (`net::check_local_model`: no public hosts; with a proxy, IPs and `localhost` only) and
+  never uses the proxy or follows redirects. Do not add cloud AI providers. Send the model
+  only titles, feed names, dates and excerpts; keep its answer JSON that cites article
+  numbers, drop citations of articles that were not sent, and show its text as plain text.
 - No telemetry, analytics, crash reporting or automatic update checks. The security check
   (`updates.rs`) reads versions on this computer at startup; it contacts GitHub and
   webkitgtk.org only when the user clicks "Check now". Keep it that way, and keep its

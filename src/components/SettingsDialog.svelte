@@ -4,6 +4,7 @@
   import Modal from './Modal.svelte';
   import { store } from '../lib/store.svelte';
   import type { ComponentCheck, Settings } from '../lib/types';
+  import { api, errorText } from '../lib/api';
   import { copyText } from '../lib/util';
 
   let { section = 'general' }: { section?: string } = $props();
@@ -15,6 +16,7 @@
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'privacy', label: 'Privacy & network', icon: 'shield' },
     { id: 'security', label: 'Security', icon: 'lock' },
+    { id: 'ai', label: 'AI briefs', icon: 'sparkles' },
     { id: 'storage', label: 'Archive & data', icon: 'archive' },
     { id: 'about', label: 'About', icon: 'info' },
   ];
@@ -33,6 +35,11 @@
   let proxy = $state(store.settings.proxy);
   let userAgent = $state(store.settings.userAgent);
   let videoPlayer = $state(store.settings.videoPlayer);
+  let aiEndpoint = $state(store.settings.aiEndpoint);
+  let aiModel = $state(store.settings.aiModel);
+  let aiModels = $state<string[] | null>(null);
+  let aiModelsError = $state<string | null>(null);
+  let aiLoading = $state(false);
   let retentionCount = $state(store.settings.retentionCount);
   let retentionDays = $state(store.settings.retentionDays);
 
@@ -68,6 +75,57 @@
     if (videoPlayer.trim() === s.videoPlayer) return;
     if (!(await store.updateSettings({ videoPlayer: videoPlayer.trim() }))) videoPlayer = s.videoPlayer;
   }
+
+  const AI_PROVIDERS: { id: Settings['aiProvider']; label: string; address: string }[] = [
+    { id: '', label: 'Off', address: '' },
+    { id: 'ollama', label: 'Ollama', address: 'http://127.0.0.1:11434' },
+    { id: 'openai', label: 'LM Studio, llama.cpp or another OpenAI-style server', address: 'http://127.0.0.1:1234' },
+  ];
+  const aiDefault = $derived(AI_PROVIDERS.find((p) => p.id === s.aiProvider)?.address ?? '');
+
+  /** Asks the model server which models it has. Also shows whether it answers. */
+  async function loadAiModels() {
+    if (!s.aiProvider) return;
+    aiLoading = true;
+    aiModelsError = null;
+    try {
+      aiModels = await api.aiModels();
+      if (aiModels.length === 0) aiModelsError = 'The server answered, but it has no models. Download one first (for example: ollama pull qwen3:4b).';
+    } catch (e) {
+      aiModels = null;
+      aiModelsError = errorText(e);
+    } finally {
+      aiLoading = false;
+    }
+  }
+
+  async function setAiProvider(id: Settings['aiProvider']) {
+    if (id === s.aiProvider) return;
+    aiModels = null;
+    aiModelsError = null;
+    if (await store.updateSettings({ aiProvider: id, aiEndpoint: '', aiModel: '' })) {
+      aiEndpoint = '';
+      aiModel = '';
+      loadAiModels();
+    }
+  }
+
+  async function saveAiEndpoint() {
+    if (aiEndpoint.trim() === s.aiEndpoint) return;
+    if (await store.updateSettings({ aiEndpoint: aiEndpoint.trim() })) loadAiModels();
+    else aiEndpoint = s.aiEndpoint;
+  }
+
+  async function saveAiModel(name: string) {
+    aiModel = name.trim();
+    if (aiModel === s.aiModel) return;
+    if (!(await store.updateSettings({ aiModel }))) aiModel = s.aiModel;
+  }
+
+  // Ask the server for its models when the section opens.
+  $effect(() => {
+    if (current === 'ai' && untrack(() => s.aiProvider && aiModels == null && !aiLoading)) loadAiModels();
+  });
 
   async function saveUserAgent() {
     if (userAgent.trim() === s.userAgent) return;
@@ -308,6 +366,57 @@
             </button>
           </div>
         </div>
+      {:else if current === 'ai'}
+        <div class="card">
+          <div class="row stack">
+            <div class="row-text">
+              <span class="row-title">Local model</span>
+              <span class="hint">
+                A brief summarizes the articles the list shows (a folder, a type, a date range) in a few topics, with links to
+                its sources. It is written by a language model on this computer or your local network, never in the cloud.
+                Tidings sends that model the titles, feed names, dates and short excerpts of those articles, and nothing else.
+              </span>
+            </div>
+            <div class="ai-providers">
+              {#each AI_PROVIDERS as p (p.id)}
+                <label class="radio"><input type="radio" checked={s.aiProvider === p.id} onchange={() => setAiProvider(p.id)} /> {p.label}</label>
+              {/each}
+            </div>
+          </div>
+          {#if s.aiProvider}
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">Server address</span>
+                <span class="hint">Only this computer or your local network. Leave empty for {aiDefault}{s.aiProvider === 'openai' ? ' (LM Studio; llama.cpp’s llama-server uses port 8080)' : ''}.</span>
+              </div>
+              <input class="input mono" bind:value={aiEndpoint} onblur={saveAiEndpoint} onkeydown={onEnter(saveAiEndpoint)} placeholder={aiDefault} spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">Model</span>
+                <span class="hint">
+                  {#if aiLoading}Asking the server for its models…
+                  {:else if aiModelsError}{aiModelsError}
+                  {:else if aiModels}The server is running. Small instruction models (3–8B, such as Qwen3 4B Instruct or Llama 3.2 3B) write briefs in about a minute.
+                  {:else}Choose the model that writes briefs.{/if}
+                </span>
+              </div>
+              <div class="inline">
+                {#if aiModels && aiModels.length > 0}
+                  <select class="input" value={aiModel} onchange={(e) => saveAiModel((e.currentTarget as HTMLSelectElement).value)}>
+                    {#if !aiModels.includes(aiModel)}<option value={aiModel}>{aiModel || 'Choose a model…'}</option>{/if}
+                    {#each aiModels as m (m)}<option value={m}>{m}</option>{/each}
+                  </select>
+                {:else}
+                  <input class="input mono" bind:value={aiModel} onblur={() => saveAiModel(aiModel)} onkeydown={onEnter(() => saveAiModel(aiModel))} placeholder="qwen3:4b" spellcheck="false" autocomplete="off" />
+                {/if}
+                <button class="btn small" onclick={loadAiModels} disabled={aiLoading}>
+                  {#if aiLoading}<span class="spinner"></span>{:else}<Icon name="refresh" size={13} />{/if}Check server
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
       {:else if current === 'storage'}
         <div class="card">
           <div class="row stack">
@@ -380,6 +489,10 @@
 </Modal>
 
 <style>
+  .ai-providers {
+    display: grid;
+    gap: 6px;
+  }
   .comp-version {
     margin-left: 4px;
     font-weight: 400;

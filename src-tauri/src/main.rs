@@ -1,6 +1,7 @@
 // Tidings: a private, secure feed reader.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod brief;
 mod commands;
 mod db;
 mod discover;
@@ -161,6 +162,11 @@ fn main() {
             commands::play_video,
             commands::audio_stream,
             commands::check_components,
+            commands::ai_models,
+            commands::make_brief,
+            commands::briefs,
+            commands::brief,
+            commands::delete_brief,
             commands::check_components_online,
             commands::peertube_video,
             commands::search_peertube,

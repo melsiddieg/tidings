@@ -1,6 +1,6 @@
 // Fake backend for `npm run dev` in a normal browser (UI work only).
 // It is loaded only in development and never ships in release builds.
-import type { ArticleDetail, ArticleItem, Feed, Folder, ListQuery, Scope, Settings } from './types';
+import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Scope, Settings } from './types';
 
 type Handler = (p: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -132,7 +132,7 @@ let settings: Settings = {
   loadImages: true, stripTracking: true, httpsOnly: false, proxy: '',
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
-  concurrency: 6, videoPlayer: '',
+  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b',
 };
 
 function counts() {
@@ -191,6 +191,32 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let nextId = 1000;
+
+/** Briefs written by the fake local model. */
+const briefs: Brief[] = [];
+
+function mockBrief(q: ListQuery, title: string): Brief {
+  const picked = query({ ...q, offset: 0, limit: 300 });
+  if (picked.length === 0) throw 'There are no articles to brief here.';
+  const source = (a: (typeof articles)[number]) => ({
+    id: a.id, feedId: a.feedId, feed: feeds.find((f) => f.id === a.feedId)?.title ?? '', title: a.title, published: a.published,
+  });
+  const ids = picked.map((a) => a.id);
+  const brief: Brief = {
+    id: nextId++, createdAt: Math.floor(Date.now() / 1000), title, model: settings.aiModel || 'qwen3:4b', query: q,
+    sections: [
+      { title: 'The main story', points: [
+        { text: `${picked[0].title}. Several outlets covered it, with more detail expected later today.`, sources: ids.slice(0, 2) },
+        { text: 'Reactions were mixed; the articles disagree on what happens next.', sources: ids.slice(1, 3) },
+      ] },
+      { title: 'Also in the news', points: picked.slice(2, 5).map((a) => ({ text: `${a.title}.`, sources: [a.id] })) },
+    ].filter((s) => s.points.length > 0),
+    sources: picked.slice(0, 5).map(source),
+    articlesUsed: picked.length, articlesTotal: picked.length, seconds: 4.2,
+  };
+  briefs.unshift(brief);
+  return brief;
+}
 
 export async function invoke(cmd: string, args: Record<string, any> = {}): Promise<unknown> {
   await wait(30);
@@ -366,6 +392,19 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         },
       ];
     }
+    case 'ai_models':
+      await wait(300);
+      return settings.aiProvider === 'ollama' ? ['llama3.2:latest', 'qwen3:4b'] : ['qwen3-4b-instruct-2507'];
+    case 'make_brief':
+      await wait(2500);
+      return structuredClone(mockBrief(args.query, args.title));
+    case 'briefs':
+      return briefs.map(({ id, createdAt, title, model }) => ({ id, createdAt, title, model }));
+    case 'brief':
+      return structuredClone(briefs.find((b) => b.id === args.id) ?? null);
+    case 'delete_brief':
+      briefs.splice(briefs.findIndex((b) => b.id === args.id), 1);
+      return null;
     case 'audio_stream':
       await new Promise((r) => setTimeout(r, 600));
       return { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', mime: 'audio/mpeg', duration: 372 };

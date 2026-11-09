@@ -146,6 +146,23 @@ fn migrate(conn: &Connection) -> Result<()> {
             }
         }
     }
+    if version < 4 {
+        // v4: AI briefs (brief.rs). `query` is the article filter a brief was written
+        // from (JSON, to write it again); `body` is the brief itself (JSON).
+        conn.execute_batch(
+            "BEGIN;
+            CREATE TABLE IF NOT EXISTS briefs (
+                id         INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                title      TEXT NOT NULL,
+                model      TEXT NOT NULL,
+                query      TEXT NOT NULL,
+                body       TEXT NOT NULL
+            );
+            PRAGMA user_version = 4;
+            COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -292,7 +309,7 @@ pub struct ArticleRow {
     pub is_new: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Scope {
     All,
@@ -306,7 +323,7 @@ pub enum Scope {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListQuery {
     pub scope: Scope,
@@ -326,7 +343,7 @@ pub struct ListQuery {
 }
 
 /// Published between `since` (inclusive) and `until` (exclusive), Unix seconds.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DateRange {
     #[serde(default)]
@@ -567,6 +584,97 @@ pub fn list_articles(
         }
     }
     Ok(items)
+}
+
+/// One article as the model of a brief sees it (brief.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BriefSource {
+    pub id: i64,
+    pub feed_id: i64,
+    /// The feed's name, as the sidebar shows it.
+    pub feed: String,
+    pub title: String,
+    pub excerpt: String,
+    pub published: i64,
+}
+
+/// The newest `limit` articles that `q` shows (same filters as the list), and how
+/// many it shows in all.
+pub fn brief_sources(conn: &Connection, q: &ListQuery, limit: u32) -> Result<(Vec<BriefSource>, usize)> {
+    let mut args = Vec::new();
+    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let total: i64 =
+        conn.query_row(&format!("SELECT COUNT(*) FROM articles a WHERE {clause}"), params_from_iter(args.clone()), |r| r.get(0))?;
+    args.push(Value::Integer(i64::from(limit)));
+    let sql = format!(
+        "SELECT a.id, a.feed_id, COALESCE(NULLIF(fd.custom_title, ''), NULLIF(fd.title, ''), fd.url),
+                a.title, COALESCE(a.excerpt, ''), a.published
+         FROM articles a JOIN feeds fd ON fd.id = a.feed_id
+         WHERE {clause} ORDER BY a.published DESC, a.id DESC LIMIT ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(args), |r| {
+        Ok(BriefSource {
+            id: r.get(0)?,
+            feed_id: r.get(1)?,
+            feed: r.get(2)?,
+            title: r.get(3)?,
+            excerpt: r.get(4)?,
+            published: r.get(5)?,
+        })
+    })?;
+    Ok((rows.collect::<std::result::Result<_, _>>()?, total.max(0) as usize))
+}
+
+/// A stored brief, without its body (the list of past briefs).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BriefInfo {
+    pub id: i64,
+    pub created_at: i64,
+    pub title: String,
+    pub model: String,
+}
+
+/// The briefs kept: older ones are removed when a new one is stored.
+const KEEP_BRIEFS: i64 = 100;
+
+/// Stores a brief and returns its id. `query` and `body` are JSON.
+pub fn insert_brief(conn: &Connection, title: &str, model: &str, query: &str, body: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO briefs (created_at, title, model, query, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![now(), title, model, query, body],
+    )?;
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "DELETE FROM briefs WHERE id NOT IN (SELECT id FROM briefs ORDER BY created_at DESC, id DESC LIMIT ?1)",
+        [KEEP_BRIEFS],
+    )?;
+    Ok(id)
+}
+
+/// The newest briefs first.
+pub fn list_briefs(conn: &Connection, limit: u32) -> Result<Vec<BriefInfo>> {
+    let mut stmt =
+        conn.prepare("SELECT id, created_at, title, model FROM briefs ORDER BY created_at DESC, id DESC LIMIT ?1")?;
+    let rows = stmt.query_map([i64::from(limit)], |r| {
+        Ok(BriefInfo { id: r.get(0)?, created_at: r.get(1)?, title: r.get(2)?, model: r.get(3)? })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// A brief's info, query and body.
+pub fn get_brief(conn: &Connection, id: i64) -> Result<Option<(BriefInfo, String, String)>> {
+    Ok(conn
+        .query_row("SELECT id, created_at, title, model, query, body FROM briefs WHERE id = ?1", [id], |r| {
+            Ok((BriefInfo { id: r.get(0)?, created_at: r.get(1)?, title: r.get(2)?, model: r.get(3)? }, r.get(4)?, r.get(5)?))
+        })
+        .optional()?)
+}
+
+pub fn delete_brief(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM briefs WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {

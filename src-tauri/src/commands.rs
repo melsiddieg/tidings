@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::brief;
 use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
 use crate::discover::{self, Candidate};
 use crate::error::{Error, Result};
@@ -513,6 +514,70 @@ pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::
         )));
     }
     Ok(stream)
+    // Read the first bytes through the media proxy, as the player will: a refusal
+    // gets a clear message here instead of "could not be played", and the first
+    // block is then in the proxy's memory when the player asks for it.
+    if let Err(e) = crate::media::fetch(&state.net(), &state.media, &stream.url, Some("bytes=0-1")).await {
+        return Err(Error::msg(format!(
+            "The video site refused the audio stream ({e}). Updating yt-dlp often helps: \
+             see Settings → Security."
+        )));
+    }
+}
+
+/// A stored brief with its body, for the brief tab.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BriefView {
+    #[serde(flatten)]
+    info: db::BriefInfo,
+    /// The article filter it was written from, to write it again.
+    query: serde_json::Value,
+    #[serde(flatten)]
+    body: brief::Body,
+}
+
+fn brief_view(state: &AppState, id: i64) -> Result<Option<BriefView>> {
+    let Some((info, query, body)) = db::get_brief(&state.db(), id)? else { return Ok(None) };
+    let query = serde_json::from_str(&query).unwrap_or(serde_json::Value::Null);
+    let body = serde_json::from_str(&body).map_err(|_| Error::msg("This brief could not be read"))?;
+    Ok(Some(BriefView { info, query, body }))
+}
+
+/// The models the configured local model server offers (Settings → AI briefs).
+#[tauri::command]
+pub async fn ai_models(state: AppStateRef<'_>) -> Result<Vec<String>> {
+    brief::models(&state.net(), &state.settings()).await
+}
+
+/// Writes a brief of the articles `query` shows, with the local model, and stores it.
+#[tauri::command]
+pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String) -> Result<BriefView> {
+    let settings = state.settings();
+    let (sources, total) = db::brief_sources(&state.db(), &query, brief::MAX_ARTICLES)?;
+    let title: String = title.trim().chars().take(200).collect();
+    let title = if title.is_empty() { "Brief".to_string() } else { title };
+    let (body, model) = brief::write(&state.net(), &settings, &title, &sources, total).await?;
+    let query_json = serde_json::to_string(&query).map_err(|e| Error::msg(e.to_string()))?;
+    let body_json = serde_json::to_string(&body).map_err(|e| Error::msg(e.to_string()))?;
+    let id = db::insert_brief(&state.db(), &title, &model, &query_json, &body_json)?;
+    brief_view(&state, id)?.ok_or_else(|| Error::msg("The brief was not stored"))
+}
+
+/// Past briefs, newest first.
+#[tauri::command]
+pub fn briefs(state: AppStateRef<'_>) -> Result<Vec<db::BriefInfo>> {
+    db::list_briefs(&state.db(), 50)
+}
+
+#[tauri::command]
+pub fn brief(state: AppStateRef<'_>, id: i64) -> Result<Option<BriefView>> {
+    brief_view(&state, id)
+}
+
+#[tauri::command]
+pub fn delete_brief(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    db::delete_brief(&state.db(), id)
 }
 
 /// The offline security check (updates.rs): no network. The UI runs it at startup.

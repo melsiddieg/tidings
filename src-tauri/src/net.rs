@@ -32,6 +32,11 @@ pub struct Net {
     pub local: Client,
     /// Used for images and podcast audio. Same rules as `web`, with a shorter timeout.
     pub image: Client,
+    /// Used only for the AI model server of briefs, which must be on this computer
+    /// or the local network (`check_local_model`). It never uses the proxy: the
+    /// request does not leave the local network, and Tor could not reach it anyway.
+    /// No redirects, so the server cannot send the request anywhere else.
+    model: Client,
     /// A proxy is set. The app then makes no DNS lookups of its own, so that with
     /// Tor every lookup goes through Tor.
     proxied: bool,
@@ -58,7 +63,20 @@ impl Net {
                 }
             }))
             .build()?;
-        Ok(Net { web, local, image, proxied })
+        let model = Client::builder()
+            .user_agent(settings.user_agent.clone())
+            .no_proxy()
+            .redirect(Policy::none())
+            .referer(false)
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
+        Ok(Net { web, local, image, model, proxied })
+    }
+
+    /// Starts a request to the AI model server for briefs. See `check_local_model`.
+    pub fn local_model(&self, method: reqwest::Method, url: &Url) -> Result<RequestBuilder> {
+        check_local_model(url, self.proxied)?;
+        Ok(self.model.request(method, url.as_str()))
     }
 
     /// Starts a GET request for a feed, page or favicon. `trusted` is the address
@@ -234,6 +252,34 @@ pub fn host_looks_public(url: &Url) -> bool {
         Some(Host::Domain(name)) => !is_local_name(name),
         None => false,
     }
+}
+
+/// The AI model server must be on this computer or the local network: a loopback or
+/// private IP address, `localhost`, or a local name such as `gpu-box.lan`. With a
+/// proxy set, only addresses that need no DNS lookup (IPs and `localhost`), so no
+/// name is looked up outside the proxy.
+pub fn check_local_model(url: &Url, proxied: bool) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::msg("The model server address must start with http:// or https://"));
+    }
+    if host_looks_public(url) {
+        return Err(Error::msg(
+            "Tidings only uses AI models on this computer or your local network. \
+             Use an address like http://127.0.0.1:11434.",
+        ));
+    }
+    if proxied {
+        if let Some(Host::Domain(name)) = url.host() {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            if name != "localhost" && !name.ends_with(".localhost") {
+                return Err(Error::msg(
+                    "With a proxy set, give the model server as an IP address (like 127.0.0.1), \
+                     so its name is not looked up outside the proxy.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Names that only make sense on this computer or a local network:

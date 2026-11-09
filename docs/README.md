@@ -55,6 +55,12 @@ Source: <https://github.com/melsiddieg/tidings>
   [Sepia Search](https://sepiasearch.org) for the title and lists PeerTube videos you can
   play instead. It only runs when you click, since it sends the title to Sepia Search
   (run by Framasoft). Matches are by title, so check the channel and length.
+- **AI briefs with a local model**: the sparkles button above the article list writes a
+  short brief of what the list shows (a folder, a feed type, unread, a date range): a few
+  topics with points that link to their source articles. A language model on this
+  computer or your local network writes it (Ollama, LM Studio, llama.cpp), never a cloud
+  service, and it only sees titles, feed names, dates and short excerpts. Off until you
+  choose a model in Settings → AI briefs.
 - **Security check** (Settings → Security): shows whether Tidings, yt-dlp and WebKitGTK
   (Linux, BSD) are up to date, and how to update each one, matched to how it was installed.
   Without going online it checks how old each one is, at every start, and shows a notice
@@ -89,6 +95,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. |
 | Strict Content Security Policy | The web view may only run the app's own scripts. It cannot load remote scripts, styles, fonts, frames or media. |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). Images can be turned off; then they load only when you click "Load images". |
+| AI briefs | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. |
 | Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is passed through, since WebKit draws it with its own code and SVG inside `<img>` cannot run scripts; AVIF is not shown. |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. |
@@ -354,6 +361,7 @@ src-tauri/src/
   protocol.rs            tidings:// image proxy and feed icons
   images.rs              Re-encodes every image before the web view sees it
   updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
+  brief.rs               AI briefs written by a local model (Ollama, LM Studio, llama.cpp)
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar

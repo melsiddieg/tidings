@@ -153,6 +153,10 @@ export interface Settings {
   concurrency: number;
   /** External video player: empty = find mpv or IINA, else a program name or path. */
   videoPlayer: string;
+  /** AI briefs: '' (off), 'ollama' or 'openai' (LM Studio, llama.cpp). Local servers only. */
+  aiProvider: '' | 'ollama' | 'openai';
+  aiEndpoint: string;
+  aiModel: string;
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
@@ -238,8 +242,35 @@ export interface RefreshProgress {
   total: number;
 }
 
+/** A stored AI brief, without its body (brief.rs). */
+export interface BriefInfo {
+  id: number;
+  createdAt: number;
+  title: string;
+  model: string;
+}
+
+export interface BriefSource {
+  id: number;
+  feedId: number;
+  feed: string;
+  title: string;
+  published: number;
+}
+
+export interface Brief extends BriefInfo {
+  /** The article filter it was written from. */
+  query: ListQuery;
+  sections: { title: string; points: { text: string; sources: number[] }[] }[];
+  sources: BriefSource[];
+  articlesUsed: number;
+  articlesTotal: number;
+  seconds: number;
+}
+
 export type Tab =
   | { id: string; kind: 'main' }
+  | { id: string; kind: 'brief'; briefId: number | null; title: string; query?: ListQuery }
   | { id: string; kind: 'article'; articleId: number; feedId: number | null; title: string }
   | { id: string; kind: 'web'; url: string; title: string };
 

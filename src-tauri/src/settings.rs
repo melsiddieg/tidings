@@ -38,6 +38,13 @@ pub struct Settings {
     pub concurrency: u32,
     /// External video player: empty finds mpv or IINA, else a program name or path.
     pub video_player: String,
+    /// AI briefs (brief.rs): "" (off), "ollama", or "openai" for a server with an
+    /// OpenAI-style API (LM Studio, llama.cpp). Only on this computer or the local network.
+    pub ai_provider: String,
+    /// The model server's address. Empty uses the provider's usual local address.
+    pub ai_endpoint: String,
+    /// The model's name on that server.
+    pub ai_model: String,
 }
 
 impl Default for Settings {
@@ -63,6 +70,9 @@ impl Default for Settings {
             dock_badge: true,
             concurrency: 6,
             video_player: String::new(),
+            ai_provider: String::new(),
+            ai_endpoint: String::new(),
+            ai_model: String::new(),
         }
     }
 }
@@ -106,6 +116,21 @@ impl Settings {
             return Err(Error::msg("The video player path contains invalid characters"));
         }
 
+        self.ai_provider = self.ai_provider.trim().to_string();
+        if !matches!(self.ai_provider.as_str(), "" | "ollama" | "openai") {
+            self.ai_provider = String::new();
+        }
+        self.ai_model = self.ai_model.trim().to_string();
+        if self.ai_model.chars().any(|c| c.is_control()) || self.ai_model.len() > 300 {
+            return Err(Error::msg("The model name contains invalid characters"));
+        }
+        self.ai_endpoint = self.ai_endpoint.trim().trim_end_matches('/').to_string();
+        if !self.ai_endpoint.is_empty() {
+            let url = url::Url::parse(&self.ai_endpoint)
+                .map_err(|_| Error::msg("The model server address is not a valid URL"))?;
+            crate::net::check_local_model(&url, !self.proxy.is_empty())?;
+        }
+
         self.user_agent = self.user_agent.trim().to_string();
         if self.user_agent.is_empty() {
             self.user_agent = DEFAULT_USER_AGENT.into();
@@ -114,6 +139,20 @@ impl Settings {
             return Err(Error::msg("The user agent contains invalid characters"));
         }
         Ok(self)
+    }
+}
+
+impl Settings {
+    /// The model server for briefs, or None when briefs are off.
+    pub fn ai_server(&self) -> Option<url::Url> {
+        let default = match self.ai_provider.as_str() {
+            "ollama" => "http://127.0.0.1:11434",
+            // LM Studio's usual port; llama.cpp's llama-server uses 8080.
+            "openai" => "http://127.0.0.1:1234",
+            _ => return None,
+        };
+        let address = if self.ai_endpoint.is_empty() { default } else { &self.ai_endpoint };
+        url::Url::parse(address).ok()
     }
 }
 

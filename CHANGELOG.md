@@ -6,6 +6,13 @@ All notable changes to Tidings are listed here. Versions follow
 ## [Unreleased]
 
 ### Added
+- AI briefs with a local model. The sparkles button above the article list writes a short
+  brief of what the list shows (a folder, a feed type, unread, a date range): a few
+  topics, each with points that link to their source articles. It opens in a tab;
+  earlier briefs stay available. The model runs on this computer or your local network,
+  never in the cloud: Ollama, or LM Studio, llama.cpp's llama-server or another server
+  with an OpenAI-style API (Settings → AI briefs). Tidings sends it only the titles,
+  feed names, dates and short excerpts of those articles. Off by default.
 - Settings → Security shows whether Tidings and the programs it relies on are up to
   date: Tidings itself, yt-dlp, and WebKitGTK on Linux and the BSDs (on macOS, WebKit
   comes with macOS updates). Each finding says what to do, matched to how the program
@@ -18,6 +25,16 @@ All notable changes to Tidings are listed here. Versions follow
     for its latest security advisory, so it can say when a version has known security
     holes. It goes through your proxy and runs only when you click it; Tidings still
     makes no automatic update checks.
+
+### Fixed
+- Listen failed with "The audio of this video could not be played" for most regular
+  YouTube videos, while Shorts worked. YouTube now gives a new stream address a start
+  time a few seconds ahead (`available_at` in yt-dlp's output) and refuses requests
+  before it with HTTP 403; yt-dlp waits for it when it downloads, Tidings did not. It
+  affected videos with several audio tracks (YouTube's automatic dubbing), which most
+  Shorts lack. Tidings now waits for that time (Listen takes a few seconds longer to
+  start), then reads the first bytes before playing, so a stream YouTube still refuses
+  gets a clear message instead.
 
 ## [0.8.0] - 2026-11-09
 

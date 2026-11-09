@@ -358,7 +358,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -514,7 +514,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -889,7 +889,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -972,4 +972,228 @@ async fn live_listen_through_proxy() {
     let middle = crate::media::fetch(&net, &cache, &stream.url, Some("bytes=150000-")).await.unwrap();
     assert_eq!(middle.status, 206);
     println!("{} bytes, then {} bytes from the middle, {:?}", first.bytes.len(), middle.bytes.len(), middle.content_range);
+}
+
+fn article(guid: &str, published: i64, excerpt: &str) -> db::NewArticle {
+    db::NewArticle { excerpt: excerpt.into(), ..item(guid, published, None) }
+}
+
+#[test]
+fn brief_sources_and_storage() {
+    let (mut conn, dir) = temp_db();
+    let t0 = db::now() - 3_600;
+    let alpha = db::insert_feed(&conn, "https://alpha.example/rss", None, Some("Alpha"), None).unwrap();
+    let beta = db::insert_feed(&conn, "https://beta.example/rss", None, Some("Beta"), None).unwrap();
+    store(&mut conn, alpha, &[article("a1", t0, "First."), article("a2", t0 + 100, "Second.")]);
+    store(&mut conn, beta, &[article("b1", t0 + 50, "")]);
+    let a1 = db::list_articles(&conn, &query(Scope::All, "all", "a1"), |u| u.to_string()).unwrap()[0].id;
+    db::set_read(&conn, &[a1], true).unwrap();
+
+    // The same filters as the list, newest first, with feed names and excerpts.
+    let (sources, total) = db::brief_sources(&conn, &query(Scope::All, "all", ""), 300).unwrap();
+    assert_eq!(total, 3);
+    let seen: Vec<(&str, &str, &str)> = sources.iter().map(|s| (s.title.as_str(), s.feed.as_str(), s.excerpt.as_str())).collect();
+    assert_eq!(seen, [("a2", "Alpha", "Second."), ("b1", "Beta", ""), ("a1", "Alpha", "First.")]);
+    let (unread, total) = db::brief_sources(&conn, &query(Scope::All, "unread", ""), 300).unwrap();
+    assert_eq!((unread.len(), total), (2, 2));
+    let (newest, total) = db::brief_sources(&conn, &query(Scope::Feed { id: alpha }, "all", ""), 1).unwrap();
+    assert_eq!((newest[0].title.as_str(), total), ("a2", 2));
+
+    // Stored briefs: newest first, read back whole, deleted, and only the newest 100 kept.
+    let first = db::insert_brief(&conn, "Morning", "qwen3:4b", "{\"q\":1}", "{\"b\":1}").unwrap();
+    let second = db::insert_brief(&conn, "Evening", "qwen3:4b", "{}", "{}").unwrap();
+    let list = db::list_briefs(&conn, 10).unwrap();
+    assert_eq!(list.iter().map(|b| b.id).collect::<Vec<_>>(), [second, first]);
+    let (info, q, body) = db::get_brief(&conn, first).unwrap().unwrap();
+    assert_eq!((info.title.as_str(), info.model.as_str(), q.as_str(), body.as_str()), ("Morning", "qwen3:4b", "{\"q\":1}", "{\"b\":1}"));
+    db::delete_brief(&conn, second).unwrap();
+    assert!(db::get_brief(&conn, second).unwrap().is_none());
+    for i in 0..105 {
+        db::insert_brief(&conn, &format!("B{i}"), "m", "{}", "{}").unwrap();
+    }
+    assert_eq!(db::list_briefs(&conn, 500).unwrap().len(), 100);
+    assert!(db::get_brief(&conn, first).unwrap().is_none());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A model server on 127.0.0.1 that answers like Ollama (`openai` false) or like an
+/// OpenAI-style server that refuses JSON schemas. It keeps the request bodies.
+async fn model_server(openai: bool) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                // Read the head, then as much body as Content-Length says.
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= head_end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(body.to_string());
+                let brief = r#"{"sections": [{"title": "Elections", "points": [{"text": "Polls opened and turnout was high.", "sources": [1, 3, 7]}]}]}"#;
+                let (status, reply) = match (openai, path.as_str()) {
+                    (false, "/api/tags") => ("200 OK", r#"{"models": [{"name": "qwen3:4b"}, {"name": "llama3.2:latest"}]}"#.to_string()),
+                    (false, "/api/chat") => ("200 OK", serde_json::json!({"message": {"role": "assistant", "content": brief}, "done": true}).to_string()),
+                    (true, "/v1/models") => ("200 OK", r#"{"data": [{"id": "qwen3-4b-instruct"}]}"#.to_string()),
+                    (true, "/v1/chat/completions") if body.contains("response_format") => {
+                        ("400 Bad Request", r#"{"error": {"message": "response_format is not supported"}}"#.to_string())
+                    }
+                    (true, "/v1/chat/completions") => {
+                        ("200 OK", serde_json::json!({"choices": [{"message": {"content": format!("Sure! {brief}")}}]}).to_string())
+                    }
+                    _ => ("404 Not Found", r#"{"error": "model 'nope' not found"}"#.to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (port, bodies)
+}
+
+#[tokio::test]
+async fn briefs_with_a_local_model() {
+    let sources = vec![
+        db::BriefSource { id: 501, feed_id: 1, feed: "CBC".into(), title: "Polls open".into(), excerpt: "Voters lined up.".into(), published: 1_794_200_000 },
+        db::BriefSource { id: 502, feed_id: 1, feed: "CBC".into(), title: "Snow".into(), excerpt: String::new(), published: 1_794_190_000 },
+        db::BriefSource { id: 503, feed_id: 2, feed: "Globe".into(), title: "Turnout high".into(), excerpt: String::new(), published: 1_794_180_000 },
+    ];
+    for openai in [false, true] {
+        let (port, bodies) = model_server(openai).await;
+        let settings = crate::settings::Settings {
+            ai_provider: if openai { "openai" } else { "ollama" }.into(),
+            ai_endpoint: format!("http://127.0.0.1:{port}"),
+            ai_model: "qwen3:4b".into(),
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        let net = crate::net::Net::new(&settings).unwrap();
+        let models = crate::brief::models(&net, &settings).await.unwrap();
+        assert_eq!(models, if openai { vec!["qwen3-4b-instruct"] } else { vec!["llama3.2:latest", "qwen3:4b"] });
+
+        let (body, model) = crate::brief::write(&net, &settings, "Canadian News", &sources, 40).await.unwrap();
+        assert_eq!(model, "qwen3:4b");
+        assert_eq!((body.articles_used, body.articles_total), (3, 40));
+        assert_eq!(body.sections[0].title, "Elections");
+        // Article 7 was never sent, so its citation is dropped.
+        assert_eq!(body.sections[0].points[0].sources, [501, 503]);
+        assert_eq!(body.sources.iter().map(|s| s.id).collect::<Vec<_>>(), [501, 503]);
+
+        // The model got the titles, feeds and excerpts, and nothing else of the database.
+        let sent = bodies.lock().unwrap().last().unwrap().clone();
+        assert!(sent.contains("Polls open") && sent.contains("Voters lined up.") && sent.contains("[3] Globe"), "{sent}");
+        if openai {
+            // The schema was refused once, then the request went without it.
+            assert!(bodies.lock().unwrap().iter().filter(|b| b.contains("chat")).count() <= 2);
+            assert!(!sent.contains("response_format"));
+        } else {
+            assert!(sent.contains("\"format\"") && sent.contains("num_ctx"));
+        }
+    }
+
+    // A model the server does not have: its own words come back.
+    let (port, _) = model_server(false).await;
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: format!("http://127.0.0.1:{port}/nope"),
+        ai_model: "nope".into(),
+        ..Default::default()
+    };
+    let err = crate::brief::write(&crate::net::Net::new(&settings).unwrap(), &settings, "x", &sources, 3).await.unwrap_err();
+    assert!(err.to_string().contains("not found"), "{err}");
+
+    // Nobody listening.
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: "http://127.0.0.1:9".into(),
+        ai_model: "m".into(),
+        ..Default::default()
+    };
+    let err = crate::brief::models(&crate::net::Net::new(&settings).unwrap(), &settings).await.unwrap_err();
+    assert!(err.to_string().starts_with("Could not reach Ollama at http://127.0.0.1:9/"), "{err}");
+}
+
+#[test]
+fn model_server_must_be_local() {
+    let check = |endpoint: &str, proxy: &str| {
+        crate::settings::Settings { ai_provider: "ollama".into(), ai_endpoint: endpoint.into(), proxy: proxy.into(), ..Default::default() }
+            .validated()
+            .map(|s| s.ai_server().unwrap().to_string())
+    };
+    assert_eq!(check("", "").unwrap(), "http://127.0.0.1:11434/");
+    assert!(check("http://192.168.1.20:11434/", "").is_ok());
+    assert!(check("http://gpu-box.lan:11434", "").is_ok());
+    assert!(check("http://localhost:1234", "socks5h://127.0.0.1:9050").is_ok());
+    // A public host would send the articles over the internet.
+    assert!(check("https://api.example.com", "").is_err());
+    assert!(check("http://8.8.8.8:11434", "").is_err());
+    // With a proxy, names would be looked up outside it.
+    assert!(check("http://gpu-box.lan:11434", "socks5h://127.0.0.1:9050").is_err());
+    assert!(check("ftp://127.0.0.1", "").is_err());
+    // Briefs off: no server.
+    let off = crate::settings::Settings::default().validated().unwrap();
+    assert!(off.ai_server().is_none());
+}
+
+/// Writes a brief with a real local model from a copy of a real database, and prints
+/// it. Never point it at the live database: it is migrated in place.
+/// `TIDINGS_DB_COPY=copy.db TIDINGS_BRIEF_FOLDER="Canadian News" TIDINGS_AI_PROVIDER=openai
+///  TIDINGS_AI_ENDPOINT=http://127.0.0.1:8080 TIDINGS_AI_MODEL=qwen3 cargo test live_brief -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn live_brief() {
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
+    let conn = db::open(std::path::Path::new(&var("TIDINGS_DB_COPY"))).unwrap();
+    let folder: i64 = conn.query_row("SELECT id FROM folders WHERE title = ?1", [var("TIDINGS_BRIEF_FOLDER")], |r| r.get(0)).unwrap();
+    let hours: i64 = std::env::var("TIDINGS_BRIEF_HOURS").ok().and_then(|h| h.parse().ok()).unwrap_or(24);
+    let mut q = query(Scope::Folder { id: folder }, "all", "");
+    q.range = db::DateRange { since: Some(db::now() - hours * 3600), until: None };
+    let (sources, total) = db::brief_sources(&conn, &q, crate::brief::MAX_ARTICLES).unwrap();
+    let settings = crate::settings::Settings {
+        ai_provider: var("TIDINGS_AI_PROVIDER"),
+        ai_endpoint: var("TIDINGS_AI_ENDPOINT"),
+        ai_model: var("TIDINGS_AI_MODEL"),
+        ..Default::default()
+    }
+    .validated()
+    .unwrap();
+    let net = crate::net::Net::new(&settings).unwrap();
+    let title = format!("{} · last {hours} hours", var("TIDINGS_BRIEF_FOLDER"));
+    let (body, model) = crate::brief::write(&net, &settings, &title, &sources, total).await.unwrap();
+    println!("\n{title} — {model}, {} of {} articles, {} s\n", body.articles_used, body.articles_total, body.seconds);
+    let by_id: std::collections::HashMap<i64, &crate::brief::SourceRef> = body.sources.iter().map(|s| (s.id, s)).collect();
+    for section in &body.sections {
+        println!("## {}", section.title);
+        for point in &section.points {
+            let cites: Vec<String> = point.sources.iter().filter_map(|id| by_id.get(id)).map(|s| format!("{}: {}", s.feed, s.title)).collect();
+            println!("- {}\n    [{}]", point.text, cites.join(" | "));
+        }
+    }
 }
