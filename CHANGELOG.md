@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-10
+
 ### Security
 - SVG images are now drawn to a PNG in Rust, like every other image. Before, an SVG was
   passed to the web view as it came. Images that an SVG refers to are not loaded, and
@@ -346,7 +348,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/melsiddieg/tidings/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/melsiddieg/tidings/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/melsiddieg/tidings/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/melsiddieg/tidings/compare/v0.8.0...v0.9.0
