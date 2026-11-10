@@ -31,11 +31,22 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Node.js for the Vite build and the Tauri CLI.
+# The download is checked against the SHA-256 that nodejs.org published for it.
+# When you change NODE_VERSION, take the new values from
+# https://nodejs.org/dist/v<version>/SHASUMS256.txt
 ARG NODE_VERSION=22.22.3
+ARG NODE_SHA256_ARM64=1c4a9933a5e45bc88f54f70b5f91232c127ec49f1a5989d23fb85824c7adf9b7
+ARG NODE_SHA256_X64=2e5d13569282d016861fae7c8f935e741693c269101a5bebcf761a5376d1f99f
 RUN set -eux; \
-    case "$(dpkg --print-architecture)" in arm64) a=arm64;; amd64) a=x64;; *) exit 1;; esac; \
-    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${a}.tar.xz" \
-      | tar -xJ -C /usr/local --strip-components=1
+    case "$(dpkg --print-architecture)" in \
+        arm64) a=arm64; sum="$NODE_SHA256_ARM64";; \
+        amd64) a=x64; sum="$NODE_SHA256_X64";; \
+        *) exit 1;; \
+    esac; \
+    curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${a}.tar.xz"; \
+    echo "$sum  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJ -f /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+    rm /tmp/node.tar.xz
 
 # Rust with the x86_64 Linux target.
 ARG RUST_VERSION=1.89.0
