@@ -12,19 +12,22 @@
 //!   frame without loss (feed icons become a still PNG).
 //! - Large images are scaled down. EXIF rotation is applied; metadata, color
 //!   profiles and the frames after the first of an animated WebP or PNG are dropped.
-//! - SVG passes through: WebKit draws it with its own code, like the article HTML,
-//!   and SVG inside `<img>` cannot run scripts. AVIF is refused, since no Rust
-//!   decoder for it is included.
+//! - SVG is drawn to a PNG here too (resvg), so WebKit's SVG code never sees a file
+//!   from the internet either. Images inside an SVG are not loaded: an SVG may name
+//!   any file on this computer. AVIF is refused, since no Rust decoder for it is
+//!   included.
 
 use std::borrow::Cow;
 use std::io::Cursor;
 use std::num::NonZeroU64;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
+use resvg::usvg::fontdb;
+use resvg::{tiny_skia, usvg};
 use tokio::sync::Semaphore;
 
 /// How large a re-encoded image may be, and the format it ends up in.
@@ -55,6 +58,10 @@ const MAX_DIMENSION: u32 = 16_384;
 const MAX_ALLOC: u64 = 192 * 1024 * 1024;
 /// SVG files larger than this are not shown.
 const MAX_SVG_BYTES: usize = 1024 * 1024;
+/// Nor ones with more shapes than this after parsing: drawing them takes too long.
+const MAX_SVG_NODES: usize = 100_000;
+/// The longest side of a drawn SVG, in pixels.
+const MAX_SVG_SIDE: f32 = 1600.0;
 /// Images decoded at the same time, at most.
 const MAX_PARALLEL: usize = 4;
 /// Animated GIFs: at most this many frames, and this many pixels in all frames together.
@@ -77,9 +84,11 @@ pub async fn clean(bytes: Vec<u8>, mime: &str, usage: Use) -> Option<Clean> {
         Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()).min(MAX_PARALLEL))
     });
     if mime == "image/svg+xml" {
-        // Passed through, not re-encoded: see the module comment. Real icons and
-        // drawings are small; refuse anything large.
-        return (bytes.len() <= MAX_SVG_BYTES).then_some(Clean { bytes, mime: "image/svg+xml" });
+        // One at a time: a crafted SVG can use far more memory and time than its
+        // size suggests, and real ones are drawn in a few milliseconds.
+        static ONE: Semaphore = Semaphore::const_new(1);
+        let _permit = ONE.acquire().await.ok()?;
+        return tokio::task::spawn_blocking(move || svg(&bytes, usage)).await.ok().flatten();
     }
     let mime = mime.to_string();
     let _permit = PERMITS.acquire().await.ok()?;
@@ -143,6 +152,80 @@ fn still(bytes: &[u8], format: ImageFormat, usage: Use, lossy: bool) -> Option<C
         encoder.write_image(&picture.to_rgb8(), width, height, ExtendedColorType::Rgb8).ok()?;
     }
     Some(Clean { bytes: out, mime: "image/png" })
+}
+
+/// The fonts on this computer, for text in SVG images. Read once.
+fn fonts() -> Arc<fontdb::Database> {
+    static FONTS: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        // fontdb expects Arial and Times New Roman, which Linux and the BSDs
+        // usually lack. Any installed font is still used when these are missing.
+        if cfg!(webkitgtk) {
+            db.set_sans_serif_family("DejaVu Sans");
+            db.set_serif_family("DejaVu Serif");
+            db.set_monospace_family("DejaVu Sans Mono");
+        }
+        Arc::new(db)
+    });
+    FONTS.clone()
+}
+
+/// Draws an SVG to a PNG. Drawings are sharp at any size, so one is drawn at up to
+/// twice its own size (for high-density screens), and an icon at the full icon size.
+pub fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
+    if bytes.len() > MAX_SVG_BYTES {
+        return None;
+    }
+    let options = usvg::Options {
+        // An SVG can name images by path or address. Load none of them: usvg would
+        // read any file on this computer that the SVG names.
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        fontdb: fonts(),
+        ..Default::default()
+    };
+    // usvg stops at a million elements, which bounds files that multiply themselves
+    // with nested <use>.
+    let tree = usvg::Tree::from_data(bytes, &options).ok()?;
+    if count_nodes(tree.root(), 0)? > MAX_SVG_NODES {
+        return None;
+    }
+    let (width, height) = (tree.size().width(), tree.size().height());
+    let longest = width.max(height);
+    if !longest.is_finite() || longest <= 0.0 {
+        return None;
+    }
+    let scale = match usage {
+        Use::Icon => usage.max_side() as f32 / longest,
+        Use::Article => (MAX_SVG_SIDE / longest).min(2.0),
+    };
+    let size = |v: f32| ((v * scale).round() as u32).clamp(1, MAX_SVG_SIDE as u32);
+    let mut pixmap = tiny_skia::Pixmap::new(size(width), size(height))?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    Some(Clean { bytes: pixmap.encode_png().ok()?, mime: "image/png" })
+}
+
+/// The number of nodes in a parsed SVG, or None past the limit or when groups are
+/// nested too deeply to walk safely.
+fn count_nodes(group: &usvg::Group, depth: usize) -> Option<usize> {
+    if depth > 256 {
+        return None;
+    }
+    let mut count = 0usize;
+    for node in group.children() {
+        count += 1;
+        if let usvg::Node::Group(inner) = node {
+            count += count_nodes(inner, depth + 1)?;
+        }
+        if count > MAX_SVG_NODES {
+            return None;
+        }
+    }
+    Some(count)
 }
 
 /// A WebP file is lossy when its image data is a "VP8 " chunk. "VP8L" is lossless,

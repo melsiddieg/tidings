@@ -1551,10 +1551,8 @@ fn special_addresses_are_not_public() {
 /// L-3, L-4, L-10: limits on what a feed can make Tidings do.
 #[tokio::test]
 async fn feed_content_limits() {
-    // An SVG is passed through only when it is small.
-    let small = b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec();
-    assert!(crate::images::clean(small, "image/svg+xml", crate::images::Use::Article).await.is_some());
-    let mut large = b"<svg xmlns='http://www.w3.org/2000/svg'>".to_vec();
+    // An SVG over 1 MB is not drawn.
+    let mut large = b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'>".to_vec();
     large.resize(1024 * 1024 + 1, b' ');
     assert!(crate::images::clean(large, "image/svg+xml", crate::images::Use::Article).await.is_none());
 
@@ -1569,4 +1567,59 @@ async fn feed_content_limits() {
     let rss = format!("<rss version=\"2.0\"><channel><title>Big</title>{items}</channel></rss>");
     let parsed = feeds::parse_feed(rss.as_bytes(), &base, true).unwrap();
     assert_eq!(parsed.articles.len(), feeds::MAX_ENTRIES);
+}
+
+/// L-3: SVG is drawn to a PNG in Rust; the web view never gets the SVG.
+#[tokio::test]
+async fn svg_is_drawn_to_png() {
+    use crate::images::{clean, svg, Use};
+    let picture = |c: &crate::images::Clean| image::load_from_memory(&c.bytes).unwrap().to_rgba8();
+    let red = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+        <script>alert(1)</script>
+        <rect width="40" height="20" fill="#ff0000" onclick="alert(2)"/>
+        <foreignObject width="40" height="20"><body xmlns="http://www.w3.org/1999/xhtml"><script>alert(3)</script></body></foreignObject>
+    </svg>"##;
+    let out = clean(red.as_bytes().to_vec(), "image/svg+xml", Use::Article).await.unwrap();
+    assert_eq!(out.mime, "image/png");
+    let img = picture(&out);
+    // Drawn at twice its size, for high-density screens.
+    assert_eq!((img.width(), img.height()), (80, 40));
+    assert_eq!(img.get_pixel(40, 20).0, [255, 0, 0, 255]);
+    // Nothing of the SVG's text is in what the web view gets.
+    assert!(!out.bytes.windows(6).any(|w| w == b"script" || w == b"alert("));
+
+    // An icon fills the icon size; a huge drawing is scaled down.
+    assert_eq!(picture(&svg(red.as_bytes(), Use::Icon).unwrap()).width(), 128);
+    let wide = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="50000"><rect width="100000" height="50000" fill="blue"/></svg>"#;
+    let img = picture(&svg(wide.as_bytes(), Use::Article).unwrap());
+    assert_eq!((img.width(), img.height()), (1600, 800));
+
+    // An SVG may name any file as an image. It is not read: the picture stays empty.
+    let dir = std::env::temp_dir().join(format!("tidings-svg-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret = dir.join("secret.png");
+    image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 255, 0, 255])).save(&secret).unwrap();
+    let thief = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <image width="10" height="10" href="{0}"/><image width="10" height="10" xlink:href="file://{0}"/></svg>"#,
+        secret.display()
+    );
+    let img = picture(&svg(thief.as_bytes(), Use::Article).unwrap());
+    assert!(img.pixels().all(|p| p.0 == [0, 0, 0, 0]), "a local file was drawn");
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Broken files, and files without a size, are refused.
+    assert!(svg(b"<svg", Use::Article).is_none());
+    assert!(svg(b"not svg at all", Use::Article).is_none());
+
+    // A file that multiplies itself with nested <use> (3^13 shapes from 1 KB) is
+    // refused quickly instead of filling the memory.
+    let mut bomb = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><defs><rect id="g0" width="1" height="1"/>"#);
+    for level in 1..=13 {
+        bomb.push_str(&format!(r##"<g id="g{level}"><use xlink:href="#g{0}"/><use xlink:href="#g{0}"/><use xlink:href="#g{0}"/></g>"##, level - 1));
+    }
+    bomb.push_str(r##"</defs><use xlink:href="#g13"/></svg>"##);
+    let started = std::time::Instant::now();
+    assert!(svg(bomb.as_bytes(), Use::Article).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }

@@ -481,7 +481,7 @@ pub fn sniff_image(bytes: &[u8], content_type: &str) -> Option<String> {
         if (content_type.contains("svg") || head.starts_with("<?xml") || head.starts_with("<svg"))
             && head.contains("<svg")
         {
-            // SVG inside <img> cannot run scripts, so it is safe to display.
+            // images.rs draws it to a PNG; the web view never gets the SVG itself.
             "image/svg+xml"
         } else {
             return None;

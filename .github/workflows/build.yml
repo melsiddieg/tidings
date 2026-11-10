@@ -153,7 +153,7 @@ jobs:
           | Fedora, openSUSE | `.rpm` | `sudo dnf install ./Tidings-*.x86_64.rpm` |
           | CachyOS, Arch, Manjaro | `.tar.gz` | `sudo pacman -S --needed webkit2gtk-4.1 gtk3 xdotool`, then unpack and run `./install.sh` |
           | Any Linux | `.AppImage` | `chmod +x Tidings_*.AppImage` and run it |
-          | macOS 11+ | `.dmg` | Open the disk image and drag Tidings to Applications |
+          | macOS 12.3+ | `.dmg` | Open the disk image and drag Tidings to Applications |
 
           The macOS app is not signed. The first time, right-click it and choose **Open**,
           or run `xattr -dr com.apple.quarantine /Applications/Tidings.app`.

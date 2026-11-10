@@ -46,7 +46,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 
 - All network traffic goes through `net.rs` clients. The web view must never load remote
   resources: images use `tidings://localhost/img/<base64url>`; the CSP in `tauri.conf.json`
-  blocks everything else. Do not loosen the CSP or add remote URLs to it.
+  blocks everything else. Do not loosen the CSP or add remote URLs to it. `style-src` is
+  `'self'` only; inline `style` attributes are allowed through `style-src-attr`, but a
+  `<style>` element added at run time is blocked, so do not add libraries that inject one.
 - One deliberate exception: `media-src` allows `http://127.0.0.1:*`. WebKitGTK plays media
   through GStreamer, which cannot read `tidings://` URLs, so on Linux podcast audio comes from
   `media_server.rs`: a server bound to 127.0.0.1 on a random port that only answers URLs with
@@ -71,7 +73,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   (`settings::load`): that would drop the proxy. Reset the invalid field, or start offline.
 - Every image the web view shows must come out of `images::clean`: `protocol.rs` serves only
   re-encoded bytes, never the downloaded file. Keep the `image` crate to pure-Rust decoders
-  (no `avif-native` or other C libraries).
+  (no `avif-native` or other C libraries). SVG is drawn to PNG with resvg; keep its image
+  resolver empty (`images::svg`), or an SVG could read files on this computer.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
 - Videos play in an external player (`video.rs`), never in the web view: no iframes, no site

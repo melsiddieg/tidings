@@ -31,9 +31,9 @@ fn image_response(mime: &str, bytes: Vec<u8>, max_age: u32) -> Response<Vec<u8>>
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, format!("max-age={max_age}"))
         .header("X-Content-Type-Options", "nosniff")
-        // For SVG, which is passed through as it came: if it were ever opened as a
-        // document instead of inside <img>, it could run nothing and load nothing.
-        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+        // Only PNG, JPEG and GIF made by images.rs are served. If one were ever opened
+        // as a document, it could run nothing and load nothing.
+        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox")
         .body(bytes)
         .unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
 }

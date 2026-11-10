@@ -14,13 +14,11 @@
     "withGlobalTauri": false,
     "security": {
       "freezePrototype": true,
-      "dangerousDisableAssetCspModification": [
-        "style-src"
-      ],
       "csp": {
         "default-src": "'self'",
         "script-src": "'self'",
-        "style-src": "'self' 'unsafe-inline'",
+        "style-src": "'self'",
+        "style-src-attr": "'unsafe-inline'",
         "img-src": "'self' data: tidings:",
         "font-src": "'self' data:",
         "connect-src": "ipc: http://ipc.localhost",
@@ -61,7 +59,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "12.3"
     }
   }
 }

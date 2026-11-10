@@ -5,6 +5,17 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+- SVG images are now drawn to a PNG in Rust, like every other image. Before, an SVG was
+  passed to the web view as it came. Images that an SVG refers to are not loaded, and
+  an SVG that is too complex to draw is not shown.
+- The Content Security Policy no longer allows inline `<style>` elements, only `style`
+  attributes. If a hole were ever found in the HTML cleaner, injected CSS would not apply.
+
+### Changed
+- macOS 12.3 or newer is now required (the stricter policy needs its WebKit). On Linux
+  and the BSDs it needs WebKitGTK 2.36 or newer, which Ubuntu 22.04 and Debian 12 have.
+
 ## [0.9.2] - 2026-11-10
 
 ### Security
