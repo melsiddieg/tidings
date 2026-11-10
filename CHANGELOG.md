@@ -5,6 +5,25 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+Fixes from a security and privacy audit of the code.
+- A feed can no longer gain access to your local network by changing its DNS. Whether a
+  feed is on a private network is now recorded once, at its first fetch after you add it
+  (for existing feeds: at the first fetch after this update). Before, any feed whose
+  address resolved to a private address at the time of a request was fetched there, so
+  the owner of a public feed could point its name at a device on your network. A feed
+  on a private host can also no longer redirect to another host. If a feed really moves
+  into your local network, remove it and add it again.
+- AI briefs: a model server given by name (such as `gpu-box.lan`) must now resolve to
+  this computer or the local network. On someone else's network, the name could have
+  led to a server on the internet. Settings also warns when the server is another machine.
+- An OPML file with thousands of nested folders crashed Tidings on import. Folders
+  nested deeper than 32 levels are now refused.
+- Crafted images in a feed could use several gigabytes of memory. Images are now decoded
+  at most four at a time with 192 MB each, and the image cache holds at most 64 MB.
+- If the saved proxy setting cannot be used at startup, Tidings now stays offline and
+  says so, instead of connecting without the proxy.
+
 ## [0.9.0] - 2026-11-09
 
 ### Added

@@ -48,6 +48,10 @@ fn outline_from(e: &BytesStart<'_>) -> Outline {
     out
 }
 
+/// Folders inside folders, at most this deep. Real lists are a few levels deep; a
+/// crafted file with thousands of levels would overflow the stack on import.
+const MAX_DEPTH: usize = 32;
+
 pub fn parse(xml: &str) -> Result<Vec<Outline>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -58,7 +62,12 @@ pub fn parse(xml: &str) -> Result<Vec<Outline>> {
         match reader.read_event() {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
                 b"opml" => saw_opml = true,
-                b"outline" => stack.push(outline_from(&e)),
+                b"outline" => {
+                    if stack.len() > MAX_DEPTH {
+                        return Err(Error::msg("This OPML file has folders nested too deeply to import"));
+                    }
+                    stack.push(outline_from(&e));
+                }
                 _ => {}
             },
             Ok(Event::Empty(e)) => {

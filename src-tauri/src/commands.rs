@@ -132,8 +132,10 @@ pub async fn fetch_full_text(
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
-        // The link may reach a private network only if it is on the feed's own host.
-        let feed_url = url::Url::parse(&db::fetch_info(&state.db(), row.feed_id)?.url).ok();
+        // The link may reach a private network only if it is on the host of its own
+        // feed, and that feed was on a private network when the user added it.
+        let info = db::fetch_info(&state.db(), row.feed_id)?;
+        let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local == Some(true));
         let extracted =
             reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
         db::save_full_content(&state.db(), id, &extracted.html)?;
@@ -175,7 +177,8 @@ pub async fn read_url(
         Some(page) => page,
         None => {
             // Reader tabs open links from articles, which feeds control. A link may
-            // reach a private network only if it is on the host of a subscribed feed.
+            // reach a private network only if it is on the host of a feed the user
+            // added on a private network.
             let trusted = url::Url::parse(&key).ok().and_then(|t| subscribed_feed_on(&state, &t));
             let page = Arc::new(
                 reader::extract_url(&state.net(), &key, trusted.as_ref(), settings.strip_tracking).await?,
@@ -198,9 +201,10 @@ pub async fn read_url(
     })
 }
 
-/// A subscribed feed on the same host as `url`, if there is one.
+/// A subscribed feed on the same host as `url` that was on a private network when
+/// the user added it, if there is one.
 fn subscribed_feed_on(state: &AppState, url: &url::Url) -> Option<url::Url> {
-    db::feed_urls(&state.db())
+    db::local_feed_urls(&state.db())
         .ok()?
         .iter()
         .filter_map(|u| url::Url::parse(u).ok())
@@ -613,6 +617,8 @@ pub struct AppInfo {
     pub platform: &'static str,
     /// Linux: base URL of the loopback audio server. None elsewhere.
     pub media_base: Option<String>,
+    /// Shown once at startup: the saved proxy could not be used and Tidings is offline.
+    pub startup_warning: Option<String>,
 }
 
 #[tauri::command]
@@ -622,5 +628,6 @@ pub fn app_info(state: AppStateRef<'_>) -> AppInfo {
         data_dir: state.data_dir.display().to_string(),
         platform: std::env::consts::OS,
         media_base: state.media_base.get().cloned(),
+        startup_warning: state.startup_warning.clone(),
     }
 }

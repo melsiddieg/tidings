@@ -129,6 +129,8 @@ export interface AppInfo {
   platform: string;
   /** Linux only: loopback server for podcast audio (WebKitGTK cannot play tidings:// media). */
   mediaBase?: string | null;
+  /** The saved proxy could not be used at startup; Tidings is offline until it is fixed. */
+  startupWarning?: string | null;
 }
 
 export interface Settings {

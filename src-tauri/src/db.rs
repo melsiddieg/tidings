@@ -163,6 +163,18 @@ fn migrate(conn: &Connection) -> Result<()> {
             COMMIT;",
         )?;
     }
+    if version < 5 {
+        // v5: `local` says whether a feed may be fetched from a private network: 1 when
+        // its host was private at the first fetch after it was added (or after this
+        // upgrade), 0 when it was public, NULL until then. A public feed whose DNS later
+        // points into the local network is then not followed there.
+        conn.execute_batch(
+            "BEGIN;
+            ALTER TABLE feeds ADD COLUMN local INTEGER;
+            PRAGMA user_version = 5;
+            COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -785,19 +797,28 @@ pub struct FetchInfo {
     pub icon_checked: Option<i64>,
     pub retention_mode: Option<String>,
     pub retention_value: Option<i64>,
+    /// Whether the feed may be fetched from a private network; None until the first fetch.
+    pub local: Option<bool>,
 }
 
-/// The address of every subscribed feed.
-pub fn feed_urls(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT url FROM feeds")?;
+/// The addresses of the feeds that were on a private network when they were added.
+/// Only links to their hosts may reach a private network.
+pub fn local_feed_urls(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT url FROM feeds WHERE local = 1")?;
     let rows = stmt.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Records whether a feed is on a private network. Set once, at its first fetch.
+pub fn set_feed_local(conn: &Connection, id: i64, local: bool) -> Result<()> {
+    conn.execute("UPDATE feeds SET local = ?2 WHERE id = ?1", params![id, local])?;
+    Ok(())
 }
 
 pub fn fetch_info(conn: &Connection, id: i64) -> Result<FetchInfo> {
     conn.query_row(
         "SELECT url, etag, last_modified, site_url, icon IS NOT NULL, icon_checked,
-                retention_mode, retention_value
+                retention_mode, retention_value, local
          FROM feeds WHERE id = ?1",
         [id],
         |r| {
@@ -810,6 +831,7 @@ pub fn fetch_info(conn: &Connection, id: i64) -> Result<FetchInfo> {
                 icon_checked: r.get(5)?,
                 retention_mode: r.get(6)?,
                 retention_value: r.get(7)?,
+                local: r.get(8)?,
             })
         },
     )
@@ -1088,8 +1110,11 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
     let old_folder: Option<i64> =
         conn.query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))?;
     conn.execute(
+        // A new address is decided again at its first fetch (`local`). The right-hand
+        // `url` is the old address.
         "UPDATE feeds SET custom_title = ?2, url = ?3, update_interval = ?4, retention_mode = ?5,
-            retention_value = ?6, full_text = ?7, paused = ?8, type_override = ?9
+            retention_value = ?6, full_text = ?7, paused = ?8, type_override = ?9,
+            local = CASE WHEN url = ?3 THEN local ELSE NULL END
          WHERE id = ?1",
         params![
             id,

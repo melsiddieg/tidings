@@ -49,8 +49,12 @@ impl Use {
 
 /// Larger images are refused before decoding.
 const MAX_DIMENSION: u32 = 16_384;
-/// The most memory one decode may allocate. An 8000 x 8000 image with transparency fits.
-const MAX_ALLOC: u64 = 256 * 1024 * 1024;
+/// The most memory one decode may allocate. A 48-megapixel photo fits (144 MB).
+/// With `MAX_PARALLEL` decodes at once, crafted images can hold at most 768 MB for
+/// a moment.
+const MAX_ALLOC: u64 = 192 * 1024 * 1024;
+/// Images decoded at the same time, at most.
+const MAX_PARALLEL: usize = 4;
 /// Animated GIFs: at most this many frames, and this many pixels in all frames together.
 const MAX_GIF_FRAMES: usize = 1_000;
 const MAX_GIF_PIXELS: u64 = 200_000_000;
@@ -68,7 +72,7 @@ pub struct Clean {
 /// not shown. Decoding runs on the blocking thread pool, a few images at a time.
 pub async fn clean(bytes: Vec<u8>, mime: &str, usage: Use) -> Option<Clean> {
     static PERMITS: LazyLock<Semaphore> = LazyLock::new(|| {
-        Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()))
+        Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()).min(MAX_PARALLEL))
     });
     if mime == "image/svg+xml" {
         return Some(Clean { bytes, mime: "image/svg+xml" });

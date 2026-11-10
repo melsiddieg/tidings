@@ -132,14 +132,44 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let net = state.net();
 
     let feed_url = Url::parse(&info.url).map_err(|_| Error::msg("The feed address is not valid"))?;
-    let mut request = net.get(&feed_url, Some(&feed_url)).await?.header(ACCEPT, FEED_ACCEPT);
+    // Whether this feed may be fetched from a private network is decided once, at
+    // its first fetch: where its host is then is where the user added it. A public
+    // feed whose DNS later points at a device on the local network is refused.
+    let local = match info.local {
+        Some(local) => local,
+        None => match net.private_host(&feed_url).await {
+            Some(local) => {
+                db::set_feed_local(&state.db(), id, local)?;
+                local
+            }
+            // Not known now (the name could not be looked up): decide next time.
+            None => false,
+        },
+    };
+    let trusted = local.then_some(&feed_url);
+    let moved = "This feed's address now points into your local network, which it did not when \
+        you added it, so Tidings did not connect. If the feed really moved there, remove it and add it again.";
+    let request = match net.get(&feed_url, trusted).await {
+        Ok(request) => request,
+        Err(_) if info.local == Some(false) => return Err(Error::msg(moved)),
+        Err(e) => return Err(e),
+    };
+    let mut request = request.header(ACCEPT, FEED_ACCEPT);
     if let Some(etag) = &info.etag {
         request = request.header(IF_NONE_MATCH, etag);
     }
     if let Some(modified) = &info.last_modified {
         request = request.header(IF_MODIFIED_SINCE, modified);
     }
-    let response = request.send().await?;
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            if info.local == Some(false) && net.private_host(&feed_url).await == Some(true) {
+                return Err(Error::msg(moved));
+            }
+            return Err(e.into());
+        }
+    };
     let status = response.status();
     if status == StatusCode::NOT_MODIFIED {
         db::set_not_modified(&state.db(), id)?;
@@ -187,7 +217,7 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let icon_due = info.icon_checked.is_none_or(|t| db::now() - t > 7 * 86_400);
     if !info.has_icon && icon_due {
         let site = parsed.site_url.as_deref().or(info.site_url.as_deref());
-        let icon = fetch_icon(&net, site, parsed.icon_url.as_deref(), &final_url).await;
+        let icon = fetch_icon(&net, site, parsed.icon_url.as_deref(), &final_url, local).await;
         let _ = db::set_icon(&state.db(), id, icon.as_ref().map(|(b, m)| (b.as_slice(), m.as_str())));
     }
     Ok(added)
@@ -424,8 +454,8 @@ fn icon_links(html: &str, page: &Url) -> Vec<Url> {
     scored.into_iter().map(|(_, u)| u).collect()
 }
 
-async fn download_icon(net: &Net, url: &Url, feed_url: &Url) -> Option<(Vec<u8>, String)> {
-    let response = net.get(url, Some(feed_url)).await.ok()?.header(ACCEPT, "image/*").send().await.ok()?;
+async fn download_icon(net: &Net, url: &Url, trusted: Option<&Url>) -> Option<(Vec<u8>, String)> {
+    let response = net.get(url, trusted).await.ok()?.header(ACCEPT, "image/*").send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -440,18 +470,20 @@ pub async fn fetch_icon(
     site_url: Option<&str>,
     feed_icon: Option<&str>,
     feed_url: &Url,
+    local: bool,
 ) -> Option<(Vec<u8>, String)> {
     // A feed controls its site link and icon URLs. Only follow them to public hosts,
-    // or to the feed's own host (for feeds on a private network). `Net::get`
-    // also checks DNS answers.
-    let allowed = |u: &Url| net::host_looks_public(u) || net::same_host(u, feed_url);
+    // or to the feed's own host when the feed is on a private network (`local`).
+    // `Net::get` also checks DNS answers.
+    let trusted = local.then_some(feed_url);
+    let allowed = |u: &Url| net::host_looks_public(u) || (local && net::same_host(u, feed_url));
     let site = site_url
         .and_then(|s| Url::parse(s).ok())
         .filter(|u| allowed(u))
         .unwrap_or_else(|| feed_url.clone());
     let mut candidates: Vec<Url> = Vec::new();
 
-    let request = net.get(&site, Some(feed_url)).await;
+    let request = net.get(&site, trusted).await;
     if let Ok(response) = async { request?.header(ACCEPT, "text/html").send().await.map_err(Error::from) }.await {
         if response.status().is_success() {
             let page = response.url().clone();
@@ -481,7 +513,7 @@ pub async fn fetch_icon(
         if seen.len() > 6 {
             break;
         }
-        if let Some(icon) = download_icon(net, &candidate, feed_url).await {
+        if let Some(icon) = download_icon(net, &candidate, trusted).await {
             return Some(icon);
         }
     }

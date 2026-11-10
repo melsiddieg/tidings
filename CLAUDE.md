@@ -53,8 +53,10 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   a random secret token, and that serves through the same `protocol::proxy_media` code.
   macOS keeps using `tidings://`. Do not extend this to other directives or hosts.
 - Start feed, page and favicon requests with `Net::get(url, trusted)`, never with a client
-  directly. `trusted` is the address the user chose (the feed the request belongs to, or the
-  address they typed); pass `None` for anything else. Private addresses are allowed only on
+  directly. `trusted` is an address the user chose on a private network: a feed whose `local` column
+  is 1 (decided once, at its first fetch; see `feeds::fetch_and_store`), or the address they
+  just typed. Pass `None` for anything else, also for a feed that was public when added: its
+  DNS may point into the local network later. Private addresses are allowed only on
   the trusted host, and only when that host is itself private. Images and audio use
   `net.image`, behind `protocol::decode_target`. Do not add DNS lookups of your own: when a
   proxy is set (Tor), every lookup must go through it, and `Net::is_private_host` skips DNS then.
@@ -84,6 +86,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   never uses the proxy or follows redirects. Do not add cloud AI providers. Send the model
   only titles, feed names, dates and excerpts; keep its answer JSON that cites article
   numbers, drop citations of articles that were not sent, and show its text as plain text.
+- If the saved proxy cannot be used at startup, `AppState::init` uses `Net::offline()`.
+  Never fall back to a direct connection: it would bypass Tor without the user knowing.
 - No telemetry, analytics, crash reporting or automatic update checks. The security check
   (`updates.rs`) reads versions on this computer at startup; it contacts GitHub and
   webkitgtk.org only when the user clicks "Check now". Keep it that way, and keep its

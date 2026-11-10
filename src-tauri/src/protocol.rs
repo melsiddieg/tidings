@@ -19,7 +19,7 @@ use tauri::{AppHandle, Manager};
 use crate::images::{self, Use};
 use crate::media;
 use crate::net;
-use crate::state::{AppState, CachedImage};
+use crate::state::{AppState, CachedImage, ImageCache};
 
 fn empty(status: StatusCode) -> Response<Vec<u8>> {
     Response::builder().status(status).body(Vec::new()).unwrap_or_default()
@@ -143,7 +143,7 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
         Err(code) => return empty(code),
     };
 
-    if let Some(hit) = state.images.lock().unwrap_or_else(|e| e.into_inner()).get(&target).cloned() {
+    if let Some(hit) = state.images.lock().unwrap_or_else(|e| e.into_inner()).get(&target) {
         return image_response(&hit.mime, hit.bytes.clone(), 86_400);
     }
 
@@ -184,7 +184,7 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
     let Some(clean) = clean else {
         return empty(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     };
-    if clean.bytes.len() <= 3 * 1024 * 1024 {
+    if clean.bytes.len() <= ImageCache::MAX_IMAGE {
         let entry = Arc::new(CachedImage { mime: clean.mime.to_string(), bytes: clean.bytes.clone() });
         state.images.lock().unwrap_or_else(|e| e.into_inner()).put(target, entry);
     }

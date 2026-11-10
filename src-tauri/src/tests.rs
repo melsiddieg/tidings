@@ -132,9 +132,30 @@ fn full_database_workflow() {
     let rust = db::create_folder(&conn, "Rust", Some(tech)).unwrap();
     let feed_a = db::insert_feed(&conn, url.as_str(), Some(rust), None, None).unwrap();
     let feed_b = db::insert_feed(&conn, "https://other.example/rss", None, Some("Other"), None).unwrap();
-    let mut urls = db::feed_urls(&conn).unwrap();
-    urls.sort();
-    assert_eq!(urls, ["https://example.com/feed.xml", "https://other.example/rss"]);
+    // Whether a feed is on a private network is not known until its first fetch.
+    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, None);
+    assert!(db::local_feed_urls(&conn).unwrap().is_empty());
+    db::set_feed_local(&conn, feed_a, false).unwrap();
+    db::set_feed_local(&conn, feed_b, true).unwrap();
+    assert_eq!(db::local_feed_urls(&conn).unwrap(), ["https://other.example/rss"]);
+    assert_eq!(db::fetch_info(&conn, feed_a).unwrap().local, Some(false));
+    // Editing a feed keeps the answer; a new address is decided again.
+    let patch = |url: &str| db::FeedPatch {
+        custom_title: Some("Other".into()),
+        url: url.into(),
+        folder_id: None,
+        update_interval: None,
+        retention_mode: None,
+        retention_value: None,
+        full_text: false,
+        paused: false,
+        type_override: None,
+    };
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss")).unwrap();
+    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, Some(true));
+    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss")).unwrap();
+    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, None);
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss")).unwrap();
 
     // Store articles; storing twice must not duplicate.
     for _ in 0..2 {
@@ -358,7 +379,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -507,6 +528,7 @@ fn migration_detects_types_of_existing_feeds() {
     conn.execute_batch(
         "ALTER TABLE feeds DROP COLUMN type_override;
          ALTER TABLE feeds DROP COLUMN detected_type;
+         ALTER TABLE feeds DROP COLUMN local;
          PRAGMA user_version = 2;",
     )
     .unwrap();
@@ -514,7 +536,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -763,7 +785,73 @@ async fn private_addresses_need_a_trusted_host() {
     let same = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://127.0.0.1:{port}/ok")).unwrap();
     assert_eq!(fetch(same, Some(lan_feed.clone())).await.unwrap(), "ok");
     let other = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://localhost:{port}/ok")).unwrap();
-    blocked(fetch(other, Some(lan_feed)).await);
+    blocked(fetch(other, Some(lan_feed.clone())).await);
+    // Nor to any other name: this client does not check where names lead, and a
+    // name that looks public could resolve to another device on the local network.
+    let named = Url::parse(&format!("http://127.0.0.1:{port}/redirect?https://example.com/feed.xml")).unwrap();
+    blocked(fetch(named, Some(lan_feed)).await);
+
+    // Literal addresses and local names are known without a lookup.
+    let private = |u: &str| { let net = net.clone(); let u = Url::parse(u).unwrap(); async move { net.private_host(&u).await } };
+    assert_eq!(private("http://192.168.1.10/feed").await, Some(true));
+    assert_eq!(private("http://nas.local/feed").await, Some(true));
+    assert_eq!(private("https://8.8.8.8/feed").await, Some(false));
+    // A name that cannot be looked up is not decided.
+    assert_eq!(private("https://no-such-host.invalid/feed").await, None);
+}
+
+#[tokio::test]
+async fn offline_when_the_proxy_is_unusable() {
+    // A proxy value that cannot be used must not become "no proxy".
+    let broken = crate::settings::Settings { proxy: "not a proxy".into(), ..Default::default() };
+    assert!(crate::net::Net::new(&broken).is_err());
+    let net = crate::net::Net::offline().unwrap();
+    let port = test_server().await;
+    // Even a server on this computer is not reached: every client goes to a dead proxy.
+    let url = format!("http://127.0.0.1:{port}/ok");
+    assert!(net.local.get(&url).send().await.is_err());
+    assert!(net.image.get("http://example.com/a.png").send().await.is_err());
+    // No lookups of its own, like any proxied setup.
+    assert!(!net.is_private_host(&Url::parse("https://no-such-host.invalid/").unwrap()).await);
+}
+
+#[test]
+fn image_cache_is_limited_by_size() {
+    use crate::state::{CachedImage, ImageCache};
+    let image = |n: usize| std::sync::Arc::new(CachedImage { mime: "image/png".into(), bytes: vec![0; n] });
+    let mut cache = ImageCache::default();
+    for i in 0..40 {
+        cache.put(format!("https://example.com/{i}.png"), image(3 * 1024 * 1024));
+    }
+    let (count, bytes) = cache.size();
+    assert_eq!((count, bytes), (21, 63 * 1024 * 1024));
+    // The oldest are gone, the newest stay.
+    assert!(cache.get("https://example.com/0.png").is_none());
+    assert!(cache.get("https://example.com/39.png").is_some());
+    // Replacing an entry counts its new size; too large an image is not kept.
+    cache.put("https://example.com/39.png".into(), image(1024));
+    assert_eq!(cache.size(), (21, 60 * 1024 * 1024 + 1024));
+    cache.put("https://example.com/huge.png".into(), image(4 * 1024 * 1024));
+    assert!(cache.get("https://example.com/huge.png").is_none());
+}
+
+#[test]
+fn opml_nesting_is_limited() {
+    let nested = |depth: usize| {
+        format!(
+            "<opml><body>{}<outline text=\"f\" xmlUrl=\"https://example.com/rss\"/>{}</body></opml>",
+            "<outline text=\"a\">".repeat(depth),
+            "</outline>".repeat(depth)
+        )
+    };
+    let (conn, dir) = temp_db();
+    let stats = opml::import(&conn, &opml::parse(&nested(10)).unwrap()).unwrap();
+    assert_eq!((stats.feeds, stats.folders), (1, 10));
+    // A crafted file with thousands of levels used to overflow the stack.
+    let err = opml::parse(&nested(5000)).unwrap_err().to_string();
+    assert!(err.contains("nested too deeply"), "{err}");
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -823,7 +911,7 @@ async fn live_network() {
     println!("feed: {:?}, {} articles", parsed.title, parsed.articles.len());
 
     // Favicon lookup.
-    let icon = feeds::fetch_icon(&net, parsed.site_url.as_deref(), parsed.icon_url.as_deref(), &feed_url).await;
+    let icon = feeds::fetch_icon(&net, parsed.site_url.as_deref(), parsed.icon_url.as_deref(), &feed_url, false).await;
     println!("icon: {:?}", icon.as_ref().map(|(b, m)| (b.len(), m.clone())));
 
     // Reader mode on the newest article.
@@ -889,7 +977,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -1117,6 +1205,17 @@ async fn briefs_with_a_local_model() {
             assert!(sent.contains("\"format\"") && sent.contains("num_ctx"));
         }
     }
+
+    // By name: `localhost` resolves to this computer, which the resolver accepts.
+    let (port, _) = model_server(false).await;
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: format!("http://localhost:{port}"),
+        ai_model: "qwen3:4b".into(),
+        ..Default::default()
+    };
+    let models = crate::brief::models(&crate::net::Net::new(&settings).unwrap(), &settings).await.unwrap();
+    assert_eq!(models.len(), 2);
 
     // A model the server does not have: its own words come back.
     let (port, _) = model_server(false).await;

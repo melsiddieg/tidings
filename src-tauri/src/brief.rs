@@ -351,6 +351,18 @@ async fn send(request: reqwest::RequestBuilder, server: &Server) -> Result<Value
         Kind::OpenAi => "the model server",
     };
     let response = request.send().await.map_err(|e| {
+        // The name of the server resolved to a public address: refused in net.rs.
+        let mut source: Option<&dyn std::error::Error> = Some(&e);
+        while let Some(inner) = source {
+            if inner.to_string().contains(net::NOT_LOCAL) {
+                return Error::msg(format!(
+                    "{} does not lead to this computer or your local network on this connection, \
+                     so Tidings did not send it anything.",
+                    server.base.host_str().unwrap_or("The model server's name")
+                ));
+            }
+            source = inner.source();
+        }
         if e.is_timeout() {
             Error::msg(format!("{name} took too long to answer."))
         } else {

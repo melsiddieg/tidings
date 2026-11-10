@@ -82,6 +82,15 @@
     { id: 'openai', label: 'LM Studio, llama.cpp or another OpenAI-style server', address: 'http://127.0.0.1:1234' },
   ];
   const aiDefault = $derived(AI_PROVIDERS.find((p) => p.id === s.aiProvider)?.address ?? '');
+  /** The model server is another machine: what a brief sends crosses the network. */
+  const aiRemote = $derived.by(() => {
+    try {
+      const host = new URL(s.aiEndpoint || aiDefault).hostname.replace(/^\[|\]$/g, '');
+      return !(host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host.startsWith('127.'));
+    } catch {
+      return false;
+    }
+  });
 
   /** Asks the model server which models it has. Also shows whether it answers. */
   async function loadAiModels() {
@@ -390,6 +399,12 @@
                 <span class="hint">Only this computer or your local network. Leave empty for {aiDefault}{s.aiProvider === 'openai' ? ' (LM Studio; llama.cpp’s llama-server uses port 8080)' : ''}.</span>
               </div>
               <input class="input mono" bind:value={aiEndpoint} onblur={saveAiEndpoint} onkeydown={onEnter(saveAiEndpoint)} placeholder={aiDefault} spellcheck="false" autocomplete="off" />
+              {#if aiRemote}
+                <span class="hint">
+                  <Icon name="alert" size={12} /> This server is another machine. Briefs send it article titles and excerpts over your
+                  network{(s.aiEndpoint || aiDefault).startsWith('https:') ? '' : ', unencrypted'}. Use it only on a network you trust.
+                </span>
+              {/if}
             </div>
             <div class="row stack">
               <div class="row-text">

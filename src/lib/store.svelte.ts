@@ -264,6 +264,7 @@ class Store {
       this.tree = tree;
       this.info = info;
       setMediaBase(info.mediaBase);
+      if (info.startupWarning) this.toast(info.startupWarning, 'error');
     } catch (err) {
       this.error(err);
     }
