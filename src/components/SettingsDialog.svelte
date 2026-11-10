@@ -49,8 +49,11 @@
 
   async function saveProxy() {
     if (proxy.trim() === s.proxy) return;
-    if (await store.updateSettings({ proxy: proxy.trim() })) store.toast(proxy.trim() ? 'Proxy enabled' : 'Proxy removed', 'success');
-    else proxy = s.proxy;
+    if (await store.updateSettings({ proxy: proxy.trim() })) {
+      // The saved value may differ: socks5:// is stored as socks5h://.
+      proxy = store.settings.proxy;
+      store.toast(proxy ? 'Proxy enabled' : 'Proxy removed', 'success');
+    } else proxy = s.proxy;
   }
 
   // The user may have installed a player since startup.
@@ -315,7 +318,7 @@
           <div class="row stack">
             <div class="row-text">
               <span class="row-title">Proxy</span>
-              <span class="hint">Route all traffic through a proxy. For Tor use <code class="selectable">socks5h://127.0.0.1:9050</code>. Leave empty for a direct connection.</span>
+              <span class="hint">Route all traffic through a proxy. For Tor use <code class="selectable">socks5h://127.0.0.1:9050</code>. Leave empty for a direct connection. <code>socks5://</code> is saved as <code>socks5h://</code>, so that names are looked up by the proxy and not on this computer.</span>
             </div>
             <input class="input mono" bind:value={proxy} onblur={saveProxy} onkeydown={onEnter(saveProxy)} placeholder="socks5h://127.0.0.1:9050" spellcheck="false" autocomplete="off" />
           </div>
@@ -477,7 +480,7 @@
           <div class="row stack">
             <div class="row-text">
               <span class="row-title">Data folder</span>
-              <span class="hint">Everything Tidings stores lives in one SQLite database here, readable only by your user account.</span>
+              <span class="hint">Your feeds, articles, settings and briefs are in one SQLite database here, readable only by your user account. Open tabs, playback positions, the window size and cached images are kept by the system's web view, in its own folders.</span>
             </div>
             <div class="inline">
               <code class="path selectable">{store.info?.dataDir ?? '—'}</code>

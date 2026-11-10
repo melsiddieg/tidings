@@ -132,10 +132,10 @@ pub async fn fetch_full_text(
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
-        // The link may reach a private network only if it is on the host of its own
-        // feed, and that feed was on a private network when the user added it.
+        // The link may reach the local network only if it is on the host and port of
+        // its own feed, and the user allowed that feed there.
         let info = db::fetch_info(&state.db(), row.feed_id)?;
-        let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local == Some(true));
+        let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local);
         let extracted =
             reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
         db::save_full_content(&state.db(), id, &extracted.html)?;
@@ -176,13 +176,11 @@ pub async fn read_url(
     let page = match cached {
         Some(page) => page,
         None => {
-            // Reader tabs open links from articles, which feeds control. A link may
-            // reach a private network only if it is on the host of a feed the user
-            // added on a private network.
-            let trusted = url::Url::parse(&key).ok().and_then(|t| subscribed_feed_on(&state, &t));
-            let page = Arc::new(
-                reader::extract_url(&state.net(), &key, trusted.as_ref(), settings.strip_tracking).await?,
-            );
+            // Reader tabs open links from articles and web pages, which anyone can
+            // write. They never reach the local network, also when the user has a
+            // feed there: any feed could otherwise link to that host. Local pages
+            // open in the browser.
+            let page = Arc::new(reader::extract_url(&state.net(), &key, None, settings.strip_tracking).await?);
             state.pages.lock().unwrap_or_else(|e| e.into_inner()).put(key, page.clone());
             page
         }
@@ -199,16 +197,6 @@ pub async fn read_url(
         html: rendered.html,
         blocked_images: rendered.blocked_images,
     })
-}
-
-/// A subscribed feed on the same host as `url` that was on a private network when
-/// the user added it, if there is one.
-fn subscribed_feed_on(state: &AppState, url: &url::Url) -> Option<url::Url> {
-    db::local_feed_urls(&state.db())
-        .ok()?
-        .iter()
-        .filter_map(|u| url::Url::parse(u).ok())
-        .find(|f| net::same_host(f, url))
 }
 
 #[tauri::command]
@@ -234,16 +222,21 @@ pub fn mark_all_read(
 
 #[tauri::command]
 pub fn delete_articles(state: AppStateRef<'_>, ids: Vec<i64>) -> Result<()> {
-    db::delete_articles(&state.db(), &ids)
+    let conn = state.db();
+    db::delete_articles(&conn, &ids)?;
+    // The deleted text is overwritten in the database; empty the log that may still hold it.
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Subscriptions
 // ---------------------------------------------------------------------------
 
+/// `allow_local`: the user agreed to connect to this address on the local network.
 #[tauri::command]
-pub async fn discover_feeds(state: AppStateRef<'_>, url: String) -> Result<Vec<Candidate>> {
-    discover::discover(&state.net(), &url).await
+pub async fn discover_feeds(state: AppStateRef<'_>, url: String, allow_local: Option<bool>) -> Result<Vec<Candidate>> {
+    discover::discover(&state.net(), &url, allow_local.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -253,15 +246,27 @@ pub fn add_feed(
     url: String,
     folder_id: Option<i64>,
     title: Option<String>,
+    allow_local: Option<bool>,
 ) -> Result<i64> {
     let url = net::parse_web_url(&url)?;
+    let allow_local = allow_local.unwrap_or(false);
+    // A feed on the local network needs the user's consent for that address. A web
+    // page could otherwise name `http://192.168.1.1/...` as its feed and have it
+    // subscribed in one click.
+    if !allow_local && !net::host_looks_public(&url) {
+        return Err(net::needs_consent(&url));
+    }
     let id = {
         let conn = state.db();
         if db::feed_id_by_url(&conn, url.as_str())?.is_some() {
             return Err(Error::msg("You are already subscribed to this feed"));
         }
         let title = title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-        db::insert_feed(&conn, url.as_str(), folder_id, title, None)?
+        let id = db::insert_feed(&conn, url.as_str(), folder_id, title, None)?;
+        if allow_local {
+            db::set_feed_local(&conn, id, true)?;
+        }
+        id
     };
     spawn_refresh(&app, state.inner(), vec![id]);
     Ok(id)
@@ -407,8 +412,10 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         return Err(Error::msg("This file is too large to be an OPML subscription list"));
     }
     let bytes = std::fs::read(&path)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let outlines = opml::parse(&text)?;
+    // Parsing is CPU work on a file from anywhere: keep it off the async threads.
+    let outlines = tokio::task::spawn_blocking(move || opml::parse(&String::from_utf8_lossy(&bytes)))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))??;
     let stats = opml::import(&state.db(), &outlines)?;
     spawn_refresh(&app, state.inner(), stats.new_feed_ids.clone());
     Ok(Some(stats))
@@ -432,8 +439,30 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     });
     let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
     let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
-    std::fs::write(&path, xml)?;
+    write_private(&path, xml.as_bytes())?;
     Ok(Some(path.display().to_string()))
+}
+
+/// Writes a file only this user can read. The export lists every feed address, and
+/// an address can hold a password.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    // An existing file keeps its old mode: tighten it too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -478,10 +507,10 @@ pub async fn play_video(app: AppHandle, state: AppStateRef<'_>, url: String) -> 
     if settings.https_only && url.scheme() == "http" {
         return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
     }
-    // Feeds control these links. Like reader tabs, a link may reach a private
-    // network only if it is on the host of a subscribed feed.
-    let trusted = subscribed_feed_on(&state, &url).is_some();
-    if !trusted && state.net().is_private_host(&url).await {
+    // Feeds control these links. Like reader tabs, they never lead to the local
+    // network. This covers the address given to the player; the player then makes
+    // its own connections and follows redirects by itself.
+    if state.net().is_private_host(&url).await {
         return Err(Error::blocked());
     }
     let player = video::find(&settings.video_player).ok_or_else(video::not_found)?;
@@ -500,8 +529,7 @@ pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::
     if settings.https_only && url.scheme() == "http" {
         return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
     }
-    let trusted = subscribed_feed_on(&state, &url).is_some();
-    if !trusted && state.net().is_private_host(&url).await {
+    if state.net().is_private_host(&url).await {
         return Err(Error::blocked());
     }
     let stream = video::audio_stream(&url, &settings.proxy).await?;
@@ -575,18 +603,40 @@ pub fn delete_brief(state: AppStateRef<'_>, id: i64) -> Result<()> {
     db::delete_brief(&state.db(), id)
 }
 
-/// The offline security check (updates.rs): no network. The UI runs it at startup.
+/// What the last check that ran yt-dlp saw, kept in the database.
+const YT_DLP_SEEN: &str = "yt_dlp_seen";
+
+fn yt_dlp_seen(state: &AppState) -> Option<updates::Seen> {
+    db::get_value(&state.db(), YT_DLP_SEEN).and_then(|json| serde_json::from_str(&json).ok())
+}
+
+fn remember_yt_dlp(state: &AppState, seen: Option<updates::Seen>) {
+    if let Some(json) = seen.and_then(|s| serde_json::to_string(&s).ok()) {
+        let _ = db::set_value(&state.db(), YT_DLP_SEEN, &json);
+    }
+}
+
+/// The offline security check (updates.rs): no network. With `run` (the Security
+/// section of Settings is open) it runs `yt-dlp --version`; at startup it does not
+/// start any program and uses the version seen last time.
 #[tauri::command]
-pub async fn check_components() -> Vec<updates::Component> {
+pub async fn check_components(state: AppStateRef<'_>, run: Option<bool>) -> Result<Vec<updates::Component>> {
     let today = chrono::Local::now().date_naive();
-    tokio::task::spawn_blocking(move || updates::check_offline(today)).await.unwrap_or_default()
+    let (run, seen) = (run.unwrap_or(false), yt_dlp_seen(&state));
+    let (list, seen) = tokio::task::spawn_blocking(move || updates::check_offline(today, run, seen))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))?;
+    remember_yt_dlp(&state, seen);
+    Ok(list)
 }
 
 /// The online security check. Only when the user clicks "Check now".
 #[tauri::command]
 pub async fn check_components_online(state: AppStateRef<'_>) -> Result<Vec<updates::Component>> {
     let net = state.net();
-    Ok(updates::check_online(&net, chrono::Local::now().date_naive()).await)
+    let (list, seen) = updates::check_online(&net, chrono::Local::now().date_naive()).await;
+    remember_yt_dlp(&state, seen);
+    Ok(list)
 }
 
 /// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.

@@ -18,6 +18,9 @@ use crate::sanitize;
 use crate::settings::Settings;
 use crate::state::AppState;
 
+/// The most items read from one fetch of a feed.
+pub const MAX_ENTRIES: usize = 5_000;
+
 pub const FEED_ACCEPT: &str = "application/rss+xml, application/atom+xml, application/feed+json, \
     application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5";
 
@@ -132,26 +135,16 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let net = state.net();
 
     let feed_url = Url::parse(&info.url).map_err(|_| Error::msg("The feed address is not valid"))?;
-    // Whether this feed may be fetched from a private network is decided once, at
-    // its first fetch: where its host is then is where the user added it. A public
-    // feed whose DNS later points at a device on the local network is refused.
-    let local = match info.local {
-        Some(local) => local,
-        None => match net.private_host(&feed_url).await {
-            Some(local) => {
-                db::set_feed_local(&state.db(), id, local)?;
-                local
-            }
-            // Not known now (the name could not be looked up): decide next time.
-            None => false,
-        },
-    };
+    // Only a feed the user allowed on the local network (`local`) may be fetched
+    // from a private address. Where the name resolves plays no part in that.
+    let local = info.local;
     let trusted = local.then_some(&feed_url);
-    let moved = "This feed's address now points into your local network, which it did not when \
-        you added it, so Tidings did not connect. If the feed really moved there, remove it and add it again.";
+    let blocked = "This feed's address is on your local network, or points there, and you have not \
+        allowed that, so Tidings did not connect. To allow it, open the feed's properties and turn on \
+        “Feed on my local network”.";
     let request = match net.get(&feed_url, trusted).await {
         Ok(request) => request,
-        Err(_) if info.local == Some(false) => return Err(Error::msg(moved)),
+        Err(_) if !local => return Err(Error::msg(blocked)),
         Err(e) => return Err(e),
     };
     let mut request = request.header(ACCEPT, FEED_ACCEPT);
@@ -164,8 +157,8 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let response = match request.send().await {
         Ok(response) => response,
         Err(e) => {
-            if info.local == Some(false) && net.private_host(&feed_url).await == Some(true) {
-                return Err(Error::msg(moved));
+            if !local && net.is_private_host(&feed_url).await {
+                return Err(Error::msg(blocked));
             }
             return Err(e.into());
         }
@@ -186,9 +179,15 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let last_modified = header(LAST_MODIFIED);
     let bytes = net::read_limited(response, net::MAX_FEED_BYTES).await?;
     let (parse_url, strip) = (final_url.clone(), settings.strip_tracking);
-    let parsed = tokio::task::spawn_blocking(move || parse_feed(&bytes, &parse_url, strip))
-        .await
-        .map_err(|e| Error::msg(e.to_string()))??;
+    // A feed can be 50 MB. Parse at most two at a time, so several huge feeds in one
+    // refresh do not hold a few gigabytes of parsed text together.
+    static PARSING: Semaphore = Semaphore::const_new(2);
+    let parsed = {
+        let _permit = PARSING.acquire().await.map_err(|e| Error::msg(e.to_string()))?;
+        tokio::task::spawn_blocking(move || parse_feed(&bytes, &parse_url, strip))
+            .await
+            .map_err(|e| Error::msg(e.to_string()))??
+    };
 
     let (mode, value) =
         retention_for(info.retention_mode.as_deref(), info.retention_value, &settings);
@@ -264,7 +263,9 @@ pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<Parse
         .filter(|d| !d.is_empty())
         .map(|d| sanitize::truncate(&d, 500));
     let icon_url = feed.icon.as_ref().map(|i| i.uri.clone());
-    let articles = feed.entries.iter().map(|e| entry_to_article(e, url, strip_tracking)).collect();
+    // Feeds list the newest items first. A feed with more items than this is either
+    // a huge archive or built to waste time and memory.
+    let articles = feed.entries.iter().take(MAX_ENTRIES).map(|e| entry_to_article(e, url, strip_tracking)).collect();
     Ok(ParsedFeed { title, site_url, description, icon_url, articles })
 }
 
@@ -473,10 +474,11 @@ pub async fn fetch_icon(
     local: bool,
 ) -> Option<(Vec<u8>, String)> {
     // A feed controls its site link and icon URLs. Only follow them to public hosts,
-    // or to the feed's own host when the feed is on a private network (`local`).
+    // or to the feed's own host and port when the user allowed the feed on the
+    // local network (`local`).
     // `Net::get` also checks DNS answers.
     let trusted = local.then_some(feed_url);
-    let allowed = |u: &Url| net::host_looks_public(u) || (local && net::same_host(u, feed_url));
+    let allowed = |u: &Url| net::host_looks_public(u) || (local && net::same_site(u, feed_url));
     let site = site_url
         .and_then(|s| Url::parse(s).ok())
         .filter(|u| allowed(u))

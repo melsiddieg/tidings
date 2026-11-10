@@ -132,15 +132,12 @@ fn full_database_workflow() {
     let rust = db::create_folder(&conn, "Rust", Some(tech)).unwrap();
     let feed_a = db::insert_feed(&conn, url.as_str(), Some(rust), None, None).unwrap();
     let feed_b = db::insert_feed(&conn, "https://other.example/rss", None, Some("Other"), None).unwrap();
-    // Whether a feed is on a private network is not known until its first fetch.
-    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, None);
-    assert!(db::local_feed_urls(&conn).unwrap().is_empty());
-    db::set_feed_local(&conn, feed_a, false).unwrap();
+    // A feed is allowed on the local network only by the user's consent.
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
     db::set_feed_local(&conn, feed_b, true).unwrap();
-    assert_eq!(db::local_feed_urls(&conn).unwrap(), ["https://other.example/rss"]);
-    assert_eq!(db::fetch_info(&conn, feed_a).unwrap().local, Some(false));
-    // Editing a feed keeps the answer; a new address is decided again.
-    let patch = |url: &str| db::FeedPatch {
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    assert!(db::feeds(&conn).unwrap().iter().find(|f| f.id == feed_b).unwrap().local);
+    let patch = |url: &str, local: Option<bool>| db::FeedPatch {
         custom_title: Some("Other".into()),
         url: url.into(),
         folder_id: None,
@@ -150,12 +147,18 @@ fn full_database_workflow() {
         full_text: false,
         paused: false,
         type_override: None,
+        local,
     };
-    db::update_feed(&conn, feed_b, &patch("https://other.example/rss")).unwrap();
-    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, Some(true));
-    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss")).unwrap();
-    assert_eq!(db::fetch_info(&conn, feed_b).unwrap().local, None);
-    db::update_feed(&conn, feed_b, &patch("https://other.example/rss")).unwrap();
+    // Editing a feed keeps the consent; a new address starts without it.
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss", None)).unwrap();
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss", None)).unwrap();
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
+    // The properties dialog can give and take it.
+    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss", Some(true))).unwrap();
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss", Some(false))).unwrap();
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
 
     // Store articles; storing twice must not duplicate.
     for _ in 0..2 {
@@ -257,6 +260,7 @@ fn full_database_workflow() {
             full_text: true,
             paused: false,
             type_override: None,
+            local: None,
         },
     )
     .unwrap();
@@ -379,7 +383,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -456,6 +460,7 @@ fn feed_types_and_date_ranges() {
         full_text: false,
         paused: false,
         type_override: Some("newsletter".into()),
+        local: None,
     };
     db::update_feed(&conn, blog, &patch).unwrap();
     db::detect_feed_type(&conn, blog).unwrap();
@@ -536,7 +541,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -624,7 +629,7 @@ fn image_host_checks() {
 
 #[test]
 fn local_names() {
-    use crate::net::{host_looks_public, is_local_name, same_host};
+    use crate::net::{host_looks_public, is_local_name, same_site};
     for name in ["localhost", "nas", "router.lan", "printer.local", "box.home.arpa", "db.internal", "LOCALHOST."] {
         assert!(is_local_name(name), "{name}");
     }
@@ -637,8 +642,12 @@ fn local_names() {
     assert!(!host_looks_public(&u("http://[fd00::1]/feed")));
     assert!(!host_looks_public(&u("http://100.64.0.1/feed"))); // carrier-grade NAT, Tailscale
     assert!(host_looks_public(&u("https://example.com/feed")));
-    assert!(same_host(&u("http://10.0.0.5/feed"), &u("https://10.0.0.5:8443/story")));
-    assert!(!same_host(&u("http://10.0.0.5/feed"), &u("http://10.0.0.6/feed")));
+    // Trust for a local feed covers its host and port, and the move from http to https.
+    assert!(same_site(&u("http://10.0.0.5:8080/feed"), &u("http://10.0.0.5:8080/story")));
+    assert!(same_site(&u("http://nas.local/feed"), &u("https://nas.local/feed")));
+    assert!(!same_site(&u("http://10.0.0.5/feed"), &u("https://10.0.0.5:8443/story")));
+    assert!(!same_site(&u("http://nas:8080/feed"), &u("http://nas:22/")));
+    assert!(!same_site(&u("http://10.0.0.5/feed"), &u("http://10.0.0.6/feed")));
 }
 
 /// A tiny HTTP server on 127.0.0.1 for the private-network tests.
@@ -709,7 +718,7 @@ async fn media_blocks() {
     use crate::media::{fetch, Media, CHUNK};
     use std::sync::atomic::Ordering;
     let mut net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
-    net.image = net.local.clone(); // the test server is on 127.0.0.1
+    net.unguarded = true; // the test server is on 127.0.0.1
     let size = (CHUNK * 5 + 1234) as usize;
     let (port, hits) = range_server(size, CHUNK as usize / 3).await;
     let url = format!("http://127.0.0.1:{port}/v.mp4");
@@ -789,7 +798,11 @@ async fn private_addresses_need_a_trusted_host() {
     // Nor to any other name: this client does not check where names lead, and a
     // name that looks public could resolve to another device on the local network.
     let named = Url::parse(&format!("http://127.0.0.1:{port}/redirect?https://example.com/feed.xml")).unwrap();
-    blocked(fetch(named, Some(lan_feed)).await);
+    blocked(fetch(named, Some(lan_feed.clone())).await);
+    // Another port on the same machine is another service: not covered by the consent.
+    let port2 = test_server().await;
+    let other_port = Url::parse(&format!("http://127.0.0.1:{port2}/ok")).unwrap();
+    blocked(fetch(other_port, Some(lan_feed)).await);
 
     // Literal addresses and local names are known without a lookup.
     let private = |u: &str| { let net = net.clone(); let u = Url::parse(u).unwrap(); async move { net.private_host(&u).await } };
@@ -810,7 +823,7 @@ async fn offline_when_the_proxy_is_unusable() {
     // Even a server on this computer is not reached: every client goes to a dead proxy.
     let url = format!("http://127.0.0.1:{port}/ok");
     assert!(net.local.get(&url).send().await.is_err());
-    assert!(net.image.get("http://example.com/a.png").send().await.is_err());
+    assert!(net.public("http://example.com/a.png").unwrap().send().await.is_err());
     // No lookups of its own, like any proxied setup.
     assert!(!net.is_private_host(&Url::parse("https://no-such-host.invalid/").unwrap()).await);
 }
@@ -846,6 +859,10 @@ fn opml_nesting_is_limited() {
     };
     let (conn, dir) = temp_db();
     let stats = opml::import(&conn, &opml::parse(&nested(10)).unwrap()).unwrap();
+    // An imported feed gets no consent for the local network, whatever its address.
+    let imported = opml::parse("<opml><body><outline text=\"r\" xmlUrl=\"http://192.168.1.1/feed\"/></body></opml>").unwrap();
+    let ids = opml::import(&conn, &imported).unwrap().new_feed_ids;
+    assert!(!db::fetch_info(&conn, ids[0]).unwrap().local);
     assert_eq!((stats.feeds, stats.folders), (1, 10));
     // A crafted file with thousands of levels used to overflow the stack.
     let err = opml::parse(&nested(5000)).unwrap_err().to_string();
@@ -900,7 +917,7 @@ async fn live_network() {
     let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
 
     // Autodiscovery from a home page, then fetch and parse the feed.
-    let found = crate::discover::discover(&net, "blog.rust-lang.org").await.unwrap();
+    let found = crate::discover::discover(&net, "blog.rust-lang.org", false).await.unwrap();
     assert!(!found.is_empty(), "no feed discovered");
     let feed_url = Url::parse(&found[0].url).unwrap();
     let resp = net.web.get(feed_url.as_str()).send().await.unwrap();
@@ -977,7 +994,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -1295,4 +1312,261 @@ async fn live_brief() {
             println!("- {}\n    [{}]", point.text, cites.join(" | "));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for the second audit (0.9.2)
+// ---------------------------------------------------------------------------
+
+/// H-1: every media request is checked where it starts, also after URL rewriting.
+#[tokio::test]
+async fn media_refuses_private_targets() {
+    use crate::media::{fetch, strip_trackers, Media};
+    let port = test_server().await;
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let media = std::sync::Arc::new(Media::default());
+    for target in [
+        format!("http://127.0.0.1:{port}/ok"),
+        format!("http://localhost:{port}/ok"),
+        "http://[::1]/a.mp3".to_string(),
+        "http://192.168.1.1/a.mp3".to_string(),
+        "http://169.254.169.254/latest/meta-data".to_string(),
+        "http://[64:ff9b::7f00:1]/a.mp3".to_string(),
+        "file:///etc/passwd".to_string(),
+    ] {
+        let err = fetch(&net, &media, &target, Some("bytes=0-1")).await.err().expect(&target).to_string();
+        assert!(err.starts_with("Blocked") || err.contains("http://"), "{target}: {err}");
+        assert!(net.public(&target).is_err(), "{target}");
+    }
+    // A tracker prefix cannot smuggle a private address in: the URL stays as it was.
+    for hidden in [
+        format!("https://op3.dev/e/http://127.0.0.1:{port}/ok"),
+        "https://dts.podtrac.com/redirect.mp3/192.168.1.1/x.mp3".to_string(),
+        "https://pdst.fm/e/localhost.localdomain.local/x.mp3".to_string(),
+    ] {
+        assert_eq!(strip_trackers(&hidden), hidden);
+    }
+    assert_eq!(strip_trackers("https://op3.dev/e/https://example.com/a.mp3"), "https://example.com/a.mp3");
+}
+
+/// H-2: an address on the local network needs the user's consent, and a web page
+/// cannot name a local feed and have it subscribed without that.
+#[tokio::test]
+async fn local_addresses_need_consent() {
+    use crate::net::LOCAL_CONSENT;
+    let port = test_server().await;
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let typed = format!("http://127.0.0.1:{port}/ok");
+    // Not contacted without consent; the error names the host for the question.
+    let err = crate::discover::discover(&net, &typed, false).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{LOCAL_CONSENT}127.0.0.1"));
+    let err = crate::discover::discover(&net, "http://nas.local/feed", false).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{LOCAL_CONSENT}nas.local"));
+    // With consent the request is made (this server has no feed).
+    let err = crate::discover::discover(&net, &typed, true).await.unwrap_err().to_string();
+    assert_eq!(err, "No feed was found at this address");
+
+    // A public page that names a feed on the local network: the candidate is marked.
+    let page = Url::parse("https://blog.example/").unwrap();
+    let html = r#"<link rel="alternate" type="application/rss+xml" href="http://192.168.1.1/feed">
+                  <link rel="alternate" type="application/atom+xml" href="/atom.xml">"#;
+    let found = crate::discover::feed_links(html, &page);
+    assert_eq!(found.iter().map(|c| (c.url.as_str(), c.local)).collect::<Vec<_>>(), [("http://192.168.1.1/feed", true), ("https://blog.example/atom.xml", false)]);
+
+    // DNS plays no part: a trusted host covers only itself, whatever resolves where.
+    let other = Url::parse("https://example.com/feed").unwrap();
+    let lan = Url::parse(&typed).unwrap();
+    assert!(net.get(&lan, Some(&other)).await.is_err());
+    assert!(net.get(&lan, None).await.is_err());
+}
+
+/// H-2: 0.9.1 marked feeds as local by DNS. The upgrade keeps that only for
+/// addresses that are private by their own text.
+#[test]
+fn upgrade_resets_local_feeds_decided_by_dns() {
+    let (conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let by_dns = db::insert_feed(&conn, "http://127.0.0.1.nip.io/feed", None, None, None).unwrap();
+    let by_ip = db::insert_feed(&conn, "http://192.168.1.5:8080/feed", None, None, None).unwrap();
+    let by_name = db::insert_feed(&conn, "http://nas.local/feed", None, None, None).unwrap();
+    let public = db::insert_feed(&conn, "https://example.com/feed", None, None, None).unwrap();
+    conn.execute("UPDATE feeds SET local = 1 WHERE id IN (?1, ?2)", [by_dns, by_ip]).unwrap();
+    conn.execute("UPDATE feeds SET local = NULL WHERE id = ?1", [by_name]).unwrap();
+    conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    let local = |id| db::fetch_info(&conn, id).unwrap().local;
+    assert_eq!((local(by_dns), local(by_ip), local(by_name), local(public)), (false, true, true, false));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// M-1: unreadable or invalid saved settings never become "no proxy".
+#[test]
+fn settings_load_never_silently_drops_proxy() {
+    use crate::settings::{load, save, Settings};
+    let (conn, dir) = temp_db();
+    // A new installation: defaults, online.
+    let fresh = load(&conn);
+    assert!(fresh.offline.is_none() && fresh.settings.proxy.is_empty());
+
+    // Another field no longer validates: it is reset, the proxy stays.
+    let mut saved = Settings { proxy: "socks5h://127.0.0.1:9050".into(), ..Default::default() };
+    saved.ai_provider = "ollama".into();
+    saved.ai_endpoint = "http://gpu-box.lan:11434".into(); // refused with a proxy
+    saved.theme = "sepia".into();
+    save(&conn, &saved).unwrap();
+    let loaded = load(&conn);
+    assert_eq!(loaded.settings.proxy, "socks5h://127.0.0.1:9050");
+    assert_eq!((loaded.settings.ai_endpoint.as_str(), loaded.settings.theme.as_str()), ("", "sepia"));
+    assert!(loaded.offline.is_none());
+
+    // The proxy itself is invalid: kept as text, and Tidings stays offline.
+    save(&conn, &Settings { proxy: "ftp://nope".into(), ..Default::default() }).unwrap();
+    let loaded = load(&conn);
+    assert_eq!(loaded.settings.proxy, "ftp://nope");
+    assert!(loaded.offline.is_some());
+
+    // The row cannot be read at all: offline, since a proxy may have been set.
+    conn.execute("UPDATE settings SET value = '{\"proxy\": \"socks5h://127.0.0.1:9050\", ' WHERE key = 'app'", []).unwrap();
+    assert!(load(&conn).offline.is_some());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// M-2: socks5:// would look names up on this computer; it becomes socks5h://.
+#[test]
+fn socks5_uses_the_proxy_for_dns() {
+    use crate::settings::Settings;
+    let s = Settings { proxy: " socks5://127.0.0.1:9050 ".into(), ..Default::default() }.validated().unwrap();
+    assert_eq!(s.proxy, "socks5h://127.0.0.1:9050");
+    for ok in ["socks5h://127.0.0.1:9050", "http://proxy:3128", "https://proxy.example:443"] {
+        assert_eq!(Settings { proxy: ok.into(), ..Default::default() }.validated().unwrap().proxy, ok);
+    }
+    for bad in ["socks4://127.0.0.1:9050", "ftp://nope", "socks5h://", "not a proxy"] {
+        assert!(Settings { proxy: bad.into(), ..Default::default() }.validated().is_err(), "{bad}");
+    }
+}
+
+/// M-4: one tag with very many attributes took minutes in quick-xml 0.38.
+#[test]
+fn opml_attribute_bomb_is_bounded() {
+    let attrs: String = (0..80_000).map(|i| format!(" a{i}=\"1\"")).collect();
+    let xml = format!("<opml><body><outline text=\"x\" xmlUrl=\"https://example.com/rss\"{attrs}/></body></opml>");
+    let started = std::time::Instant::now();
+    let outlines = opml::parse(&xml).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    // Such an outline is ignored; a normal one next to it is read.
+    assert!(outlines[0].xml_url.is_none());
+    let normal = opml::parse("<opml><body><outline text=\"A &amp; B\" xmlUrl=\"https://example.com/rss\"/></body></opml>").unwrap();
+    assert_eq!((normal[0].title.as_str(), normal[0].xml_url.as_deref()), ("A & B", Some("https://example.com/rss")));
+}
+
+/// L-1: the export lists every feed address; only this user may read it.
+#[cfg(unix)]
+#[test]
+fn opml_export_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tidings-export-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("subscriptions.opml");
+    // Also when a file readable by everyone is already there.
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    crate::commands::write_private(&path, b"<opml/>").unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&path).unwrap(), b"<opml/>");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-2: a deleted or archived article keeps only what stops it from coming back.
+#[test]
+fn delete_clears_article_metadata() {
+    let (mut conn, dir) = temp_db();
+    let feed = db::insert_feed(&conn, "https://example.com/feed", None, Some("F"), None).unwrap();
+    let t = db::now() - 100;
+    let mut a = article("secret-1", t, "An excerpt.");
+    a.author = Some("Someone".into());
+    store(&mut conn, feed, &[a, article("old-2", t - 10, ""), article("new-3", t + 10, "")]);
+    let id: i64 = conn.query_row("SELECT id FROM articles WHERE guid = 'secret-1'", [], |r| r.get(0)).unwrap();
+    db::delete_articles(&conn, &[id]).unwrap();
+    db::apply_retention(&conn, feed, "count", 1).unwrap();
+    db::checkpoint(&conn);
+    type Row = (String, String, Option<String>, Option<String>, Option<String>, bool);
+    let left: Vec<Row> = conn
+        .prepare("SELECT guid, title, url, author, excerpt, is_deleted FROM articles ORDER BY guid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(left.len(), 3);
+    for (guid, title, url, author, excerpt, deleted) in &left {
+        if guid == "new-3" {
+            assert!(!deleted && title == "new-3" && url.is_some());
+        } else {
+            assert!(*deleted && title.is_empty() && url.is_none() && author.is_none() && excerpt.is_none(), "{guid}");
+        }
+    }
+    // A deleted article does not come back at the next refresh.
+    store(&mut conn, feed, &[article("secret-1", t, "An excerpt.")]);
+    assert_eq!(titles(&conn, &query(Scope::All, "all", "")), ["new-3"]);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-5: a password in a feed address is not shown as the feed's name.
+#[test]
+fn credentials_are_not_displayed() {
+    use crate::net::without_credentials;
+    assert_eq!(without_credentials("https://me:secret@example.com/feed?x=1"), "https://example.com/feed?x=1");
+    assert_eq!(without_credentials("https://example.com/feed"), "https://example.com/feed");
+    assert_eq!(without_credentials("not a url"), "not a url");
+    let (conn, dir) = temp_db();
+    let id = db::insert_feed(&conn, "https://me:secret@example.com/feed", None, None, None).unwrap();
+    let feed = db::feeds(&conn).unwrap().into_iter().find(|f| f.id == id).unwrap();
+    assert_eq!(feed.title, "https://example.com/feed");
+    // The address itself is kept, for fetching and for the properties dialog.
+    assert_eq!(feed.url, "https://me:secret@example.com/feed");
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-8: special-purpose ranges, and IPv6 addresses that carry an IPv4 address.
+#[test]
+fn special_addresses_are_not_public() {
+    use crate::net::is_public_ip;
+    for private in [
+        "192.0.0.170", "198.18.0.1", "198.19.255.255", "192.88.99.1", "0.0.0.0", "255.255.255.255",
+        "64:ff9b::7f00:1", "64:ff9b::c0a8:101", "64:ff9b:1::1", "2002:7f00:1::1", "2002:c0a8:101::",
+        "2001::1", "fec0::1", "100::1", "2001:db8::1", "::7f00:1", "::ffff:10.0.0.1", "::1", "fe80::1", "fd00::1",
+    ] {
+        assert!(!is_public_ip(private.parse().unwrap()), "{private}");
+    }
+    for public in ["8.8.8.8", "198.17.0.1", "198.20.0.1", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1", "2001:4860:4860::8888"] {
+        assert!(is_public_ip(public.parse().unwrap()), "{public}");
+    }
+}
+
+/// L-3, L-4, L-10: limits on what a feed can make Tidings do.
+#[tokio::test]
+async fn feed_content_limits() {
+    // An SVG is passed through only when it is small.
+    let small = b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec();
+    assert!(crate::images::clean(small, "image/svg+xml", crate::images::Use::Article).await.is_some());
+    let mut large = b"<svg xmlns='http://www.w3.org/2000/svg'>".to_vec();
+    large.resize(1024 * 1024 + 1, b' ');
+    assert!(crate::images::clean(large, "image/svg+xml", crate::images::Use::Article).await.is_none());
+
+    // An image with one side of 0 or 1 pixel is a counting pixel.
+    let base = Url::parse("https://example.com/").unwrap();
+    let html = r#"<p>Text <img src="https://t.example/p.gif" width="1"><img src="https://t.example/q.gif" height="0"><img src="https://example.com/photo.jpg" width="600"></p>"#;
+    let clean = sanitize::clean(html, Some(&base), true);
+    assert!(!clean.contains("t.example") && clean.contains("photo.jpg"), "{clean}");
+
+    // A feed with more items than MAX_ENTRIES: only the first are read.
+    let items: String = (0..feeds::MAX_ENTRIES + 50).map(|i| format!("<item><guid>g{i}</guid><title>T{i}</title></item>")).collect();
+    let rss = format!("<rss version=\"2.0\"><channel><title>Big</title>{items}</channel></rss>");
+    let parsed = feeds::parse_feed(rss.as_bytes(), &base, true).unwrap();
+    assert_eq!(parsed.articles.len(), feeds::MAX_ENTRIES);
 }

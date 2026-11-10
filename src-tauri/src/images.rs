@@ -53,6 +53,8 @@ const MAX_DIMENSION: u32 = 16_384;
 /// With `MAX_PARALLEL` decodes at once, crafted images can hold at most 768 MB for
 /// a moment.
 const MAX_ALLOC: u64 = 192 * 1024 * 1024;
+/// SVG files larger than this are not shown.
+const MAX_SVG_BYTES: usize = 1024 * 1024;
 /// Images decoded at the same time, at most.
 const MAX_PARALLEL: usize = 4;
 /// Animated GIFs: at most this many frames, and this many pixels in all frames together.
@@ -75,7 +77,9 @@ pub async fn clean(bytes: Vec<u8>, mime: &str, usage: Use) -> Option<Clean> {
         Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()).min(MAX_PARALLEL))
     });
     if mime == "image/svg+xml" {
-        return Some(Clean { bytes, mime: "image/svg+xml" });
+        // Passed through, not re-encoded: see the module comment. Real icons and
+        // drawings are small; refuse anything large.
+        return (bytes.len() <= MAX_SVG_BYTES).then_some(Clean { bytes, mime: "image/svg+xml" });
     }
     let mime = mime.to_string();
     let _permit = PERMITS.acquire().await.ok()?;

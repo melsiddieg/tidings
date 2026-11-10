@@ -31,7 +31,9 @@ fn image_response(mime: &str, bytes: Vec<u8>, max_age: u32) -> Response<Vec<u8>>
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, format!("max-age={max_age}"))
         .header("X-Content-Type-Options", "nosniff")
-        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'")
+        // For SVG, which is passed through as it came: if it were ever opened as a
+        // document instead of inside <img>, it could run nothing and load nothing.
+        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'; sandbox")
         .body(bytes)
         .unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
 }
@@ -76,7 +78,8 @@ async fn feed_icon(state: &AppState, rest: &str) -> Response<Vec<u8>> {
 /// Decodes and checks a proxied URL: http(s) only, and no literal private
 /// addresses or local names. This holds with a proxy too: a local proxy would
 /// otherwise forward the request into your network. (Without a proxy, the image
-/// client also checks DNS answers.)
+/// client also checks DNS answers.) `Net::public` checks again where the request
+/// starts, because the media proxy rewrites the URL after this.
 fn decode_target(encoded: &str) -> Result<String, StatusCode> {
     let target = URL_SAFE_NO_PAD
         .decode(encoded.trim_end_matches('/'))
@@ -148,9 +151,10 @@ async fn proxy_image(state: &AppState, encoded: &str) -> Response<Vec<u8>> {
     }
 
     let net = state.net();
-    let response = match net
-        .image
-        .get(target.as_str())
+    let Ok(request) = net.public(target.as_str()) else {
+        return empty(StatusCode::FORBIDDEN);
+    };
+    let response = match request
         // No AVIF: images.rs has no decoder for it, and sites that offer several
         // formats then send one that it can re-encode.
         .header(ACCEPT, "image/webp,image/png,image/jpeg,image/gif,image/svg+xml,image/*;q=0.5")

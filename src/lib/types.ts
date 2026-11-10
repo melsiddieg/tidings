@@ -53,6 +53,8 @@ export interface Feed {
   /** The user's choice, null for automatic. */
   typeOverride: FeedType | null;
   detectedType: FeedType;
+  /** The user allowed Tidings to fetch this feed from the local network. */
+  local: boolean;
 }
 
 export interface Tree {
@@ -115,6 +117,8 @@ export interface Candidate {
   url: string;
   title: string;
   kind: string;
+  /** The feed is on the local network: subscribing needs the user's consent. */
+  local: boolean;
 }
 
 export interface ImportStats {
@@ -216,6 +220,8 @@ export interface FeedPatch {
   paused: boolean;
   /** null for automatic. */
   typeOverride: FeedType | null;
+  /** Allow this feed on the local network. Omitted: keep the current answer. */
+  local?: boolean | null;
 }
 
 export interface ListQuery {

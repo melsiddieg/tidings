@@ -65,15 +65,28 @@ pub struct Component {
     pub link: Option<String>,
 }
 
-/// The offline check. Blocking: it may run `yt-dlp --version`.
-pub fn check_offline(today: NaiveDate) -> Vec<Component> {
-    vec![tidings(today), yt_dlp(today), webkit(today)]
+/// The yt-dlp a check found when it ran it, kept so that startup does not have to
+/// start the program again: its path, when the file last changed, and its version.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct Seen {
+    pub path: String,
+    pub modified: u64,
+    pub version: String,
+}
+
+/// The offline check. With `run`, it runs `yt-dlp --version` (blocking) and returns
+/// what it saw, to remember. Without, it starts no program: it uses `seen` if that
+/// file has not changed since, and says so otherwise.
+pub fn check_offline(today: NaiveDate, run: bool, seen: Option<Seen>) -> (Vec<Component>, Option<Seen>) {
+    let (yt_dlp, seen) = if run { yt_dlp(today) } else { (yt_dlp_remembered(today, seen), None) };
+    (vec![tidings(today), yt_dlp, webkit(today)], seen)
 }
 
 /// The online check: the offline one, then the newest versions and the latest
 /// WebKitGTK advisory. Only on the user's click.
-pub async fn check_online(net: &Net, today: NaiveDate) -> Vec<Component> {
-    let mut list = tokio::task::spawn_blocking(move || check_offline(today)).await.unwrap_or_default();
+pub async fn check_online(net: &Net, today: NaiveDate) -> (Vec<Component>, Option<Seen>) {
+    let (mut list, seen) =
+        tokio::task::spawn_blocking(move || check_offline(today, true, None)).await.unwrap_or_default();
     // On macOS, WebKit comes with the system: there is no advisory to ask for.
     let advisory = async {
         if cfg!(webkitgtk) {
@@ -91,7 +104,7 @@ pub async fn check_online(net: &Net, today: NaiveDate) -> Vec<Component> {
             _ => {}
         }
     }
-    list
+    (list, seen)
 }
 
 // Tidings ------------------------------------------------------------------------
@@ -196,20 +209,26 @@ fn semver(text: &str) -> Option<(u64, u64, u64)> {
 
 // yt-dlp -------------------------------------------------------------------------
 
-fn yt_dlp(today: NaiveDate) -> Component {
-    let Some((path, dirs)) = video::find_yt_dlp() else {
-        return Component {
-            id: "yt-dlp",
-            name: "yt-dlp".into(),
-            version: None,
-            detail: None,
-            status: Status::Missing,
-            message: "Not installed. Listen needs it, and so does mpv for YouTube and similar sites.".into(),
-            command: yt_dlp_install().map(str::to_string),
-            link: None,
-        };
-    };
-    let version = video::yt_dlp_version(&path, &dirs);
+fn modified_secs(path: &Path) -> Option<u64> {
+    let time = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+}
+
+fn yt_dlp_missing() -> Component {
+    Component {
+        id: "yt-dlp",
+        name: "yt-dlp".into(),
+        version: None,
+        detail: None,
+        status: Status::Missing,
+        message: "Not installed. Listen needs it, and so does mpv for YouTube and similar sites.".into(),
+        command: yt_dlp_install().map(str::to_string),
+        link: None,
+    }
+}
+
+/// The state of the yt-dlp at `path` with `version`.
+fn yt_dlp_component(today: NaiveDate, path: &Path, version: Option<NaiveDate>) -> Component {
     let mut c = Component {
         id: "yt-dlp",
         name: "yt-dlp".into(),
@@ -226,7 +245,7 @@ fn yt_dlp(today: NaiveDate) -> Component {
             c.message = "Could not read its version.".into();
         }
         Some(v) if (today - v).num_days() > video::OLD_YT_DLP_DAYS => {
-            let (advice, command) = yt_dlp_update(&path);
+            let (advice, command) = yt_dlp_update(path);
             c.status = Status::Old;
             c.message = format!(
                 "This version is {} months old, and YouTube often breaks older versions. {advice}",
@@ -237,6 +256,40 @@ fn yt_dlp(today: NaiveDate) -> Component {
         Some(_) => {}
     }
     c
+}
+
+/// Finds yt-dlp and runs `yt-dlp --version`.
+fn yt_dlp(today: NaiveDate) -> (Component, Option<Seen>) {
+    let Some((path, dirs)) = video::find_yt_dlp() else { return (yt_dlp_missing(), None) };
+    let version = video::yt_dlp_version(&path, &dirs);
+    let seen = version.zip(modified_secs(&path)).map(|(v, modified)| Seen {
+        path: path.display().to_string(),
+        modified,
+        version: v.format("%Y.%m.%d").to_string(),
+    });
+    (yt_dlp_component(today, &path, version), seen)
+}
+
+/// The same without starting any program, for the check at startup: a program on
+/// PATH should not run just because Tidings was opened. Uses the version an earlier
+/// check saw, as long as that file is unchanged.
+fn yt_dlp_remembered(today: NaiveDate, seen: Option<Seen>) -> Component {
+    if let Some(seen) = seen {
+        let path = Path::new(&seen.path);
+        if modified_secs(path) == Some(seen.modified) {
+            return yt_dlp_component(today, path, video::parse_version(&seen.version));
+        }
+    }
+    Component {
+        id: "yt-dlp",
+        name: "yt-dlp".into(),
+        version: None,
+        detail: None,
+        status: Status::Info,
+        message: "Not checked since it was installed or changed. Open this page to check it.".into(),
+        command: None,
+        link: None,
+    }
 }
 
 fn online_yt_dlp(c: &mut Component, latest: Option<&str>) {
@@ -684,9 +737,21 @@ mod tests {
 
     #[test]
     fn offline_check_runs() {
-        let list = check_offline(date(2026, 11, 9));
+        // Without `run`, no program is started: yt-dlp is "not checked" until a
+        // check that ran it has been remembered.
+        let (list, seen) = check_offline(date(2026, 11, 9), false, None);
         let ids: Vec<&str> = list.iter().map(|c| c.id).collect();
         assert_eq!(ids, ["tidings", "yt-dlp", "webkit"]);
+        assert_eq!((list[1].status, list[1].version.as_deref(), seen), (Status::Info, None, None));
+        // A remembered version is used while the file is unchanged.
+        let file = std::env::temp_dir().join(format!("tidings-yt-dlp-seen-{}", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        let remembered = Seen { path: file.display().to_string(), modified: modified_secs(&file).unwrap(), version: "2026.03.17".into() };
+        let c = yt_dlp_remembered(date(2026, 11, 9), Some(remembered.clone()));
+        assert_eq!((c.status, c.version.as_deref()), (Status::Old, Some("2026.03.17")));
+        let changed = Seen { modified: remembered.modified + 60, ..remembered };
+        assert_eq!(yt_dlp_remembered(date(2026, 11, 9), Some(changed)).status, Status::Info);
+        let _ = std::fs::remove_file(&file);
         assert_eq!(list[0].version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         // Built today: not old.
         let today = NaiveDate::parse_from_str(BUILD_DATE, "%Y-%m-%d").unwrap();
@@ -703,7 +768,7 @@ mod tests {
         let (t, y, w) = tokio::join!(latest_release(&net, TIDINGS_API), latest_release(&net, YT_DLP_API), latest_advisory(&net));
         println!("tidings {t:?}, yt-dlp {y:?}, webkit {w:?}");
         assert!(t.is_some() && y.is_some() && w.is_some());
-        for c in check_online(&net, chrono::Local::now().date_naive()).await {
+        for c in check_online(&net, chrono::Local::now().date_naive()).await.0 {
             println!("{:<10} {:<14} {:?}: {} {:?} {:?}", c.name, c.version.unwrap_or_default(), c.status, c.message, c.command, c.link);
         }
     }

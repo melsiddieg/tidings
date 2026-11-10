@@ -154,7 +154,8 @@ fn preprocess(html: &str, base: Option<&Url>) -> String {
         }
         let tiny = |attr: &str| img.attr(attr).is_some_and(|v| matches!(v.trim(), "0" | "1" | "1px"));
         let current = img.attr("src").map(|s| s.to_string()).unwrap_or_default();
-        if (tiny("width") && tiny("height")) || is_tracker_image(&current) {
+        // One tiny side is enough: counting pixels are 1x1, but also 1 pixel by anything.
+        if tiny("width") || tiny("height") || is_tracker_image(&current) {
             img.remove_from_parent();
         }
     }

@@ -5,6 +5,54 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+Fixes from a second, independent audit of 0.9.1.
+- A feed could make Tidings request an address on this computer or the local network
+  through the podcast and video proxy, by hiding it behind a tracking prefix
+  (`https://op3.dev/e/http://127.0.0.1/...`): the address was checked before the prefix
+  was removed. Every image, audio and video request is now checked where it starts,
+  after any rewriting, and addresses that yt-dlp or a PeerTube site return must be public.
+- A feed on the local network now needs your consent. Before, a website could name
+  `http://192.168.1.1/...` as its feed and have it subscribed in one click, and a
+  public-looking name that resolved to a private address was treated as a local feed.
+  Tidings now asks before it connects to an address on your local network and before it
+  subscribes to a feed there, and DNS no longer decides: a name that points to a private
+  address is refused unless you allowed it. The upgrade keeps existing feeds whose
+  address is itself private (an IP such as 192.168.1.5, or a name such as `nas.local`).
+  For any other feed that should be reached on your network, turn on "Feed on my local
+  network" in its properties; the option appears after a refresh was refused. Feeds from
+  an OPML import start without consent.
+- Consent for a local feed covers only its own host and port. Reader tabs, article
+  links, videos and Listen never reach the local network any more; before, a link in
+  any feed could reach the host of a local feed, on any port.
+- Saved settings that could not be read or no longer validated were replaced by the
+  defaults, which removed the proxy without a word. Invalid fields are now reset one by
+  one, and if the proxy cannot be used or the settings cannot be read, Tidings starts
+  offline and says so.
+- `socks5://` proxies looked names up on this computer, outside the proxy. They are now
+  saved as `socks5h://`, where the proxy does the lookups.
+- OPML import: one tag with tens of thousands of attributes took minutes to parse
+  (quick-xml 0.38). quick-xml is updated to 0.42 and such tags are ignored. `lru` is
+  updated to 0.18 for an advisory that did not affect Tidings.
+- Deleting or archiving an article now also clears its title, link and author, not only
+  its text, and empties the database's write-ahead log.
+- OPML exports are written so that only you can read them (mode 0600).
+- A password in a feed address is no longer shown in the sidebar or in error messages.
+- More address ranges count as not public (NAT64, 6to4, Teredo and other special ranges).
+- SVG images over 1 MB are not shown, and SVG is served with a `sandbox` policy.
+- Images marked as 0 or 1 pixel on one side are dropped as counting pixels.
+- A feed is read up to 5,000 items, and at most two feeds are parsed at once.
+- yt-dlp is no longer started when Tidings opens. Its version is read when you open
+  Settings → Security, and remembered for the notice at startup.
+- Releases: build actions are pinned to commits, jobs have read-only permissions, and a
+  release stops when `cargo audit` or `npm audit` finds a known vulnerability.
+
+### Changed
+- The security table in the docs now says what Tidings really contacts and stores:
+  icons and list thumbnails are fetched without opening an article, external players
+  make their own connections, and tabs, positions and cached images are kept by the
+  web view outside the database.
+
 ## [0.9.1] - 2026-11-09
 
 ### Security

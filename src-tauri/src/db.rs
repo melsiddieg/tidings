@@ -175,6 +175,33 @@ fn migrate(conn: &Connection) -> Result<()> {
             COMMIT;",
         )?;
     }
+    if version < 6 {
+        // v6: `local` now means "the user allowed this feed on the local network", and
+        // DNS no longer decides it. Feeds whose address is itself private (an IP such
+        // as 192.168.1.5, or a local name such as nas.local) keep working: the user
+        // typed that address. A feed with a public-looking name loses the flag, also
+        // when 0.9.1 set it because the name resolved to a private address; the user
+        // can allow it again in the feed's properties.
+        let feeds: Vec<(i64, String)> = conn
+            .prepare("SELECT id, url FROM feeds")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        conn.execute_batch("BEGIN;")?;
+        let update = (|| -> Result<()> {
+            for (id, url) in feeds {
+                let private = url::Url::parse(&url).is_ok_and(|u| !crate::net::host_looks_public(&u));
+                conn.execute("UPDATE feeds SET local = ?2 WHERE id = ?1", params![id, private])?;
+            }
+            Ok(())
+        })();
+        match update {
+            Ok(()) => conn.execute_batch("PRAGMA user_version = 6; COMMIT;")?,
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -268,6 +295,8 @@ pub struct Feed {
     /// The user's choice, `None` for automatic.
     pub type_override: Option<String>,
     pub detected_type: String,
+    /// The user allowed Tidings to fetch this feed from the local network.
+    pub local: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,13 +423,18 @@ const FEED_COLUMNS: &str = "
     f.full_text, f.paused, f.last_fetched, f.last_success, f.last_error,
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0 AND a.is_deleted = 0),
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0),
-    f.pinned, COALESCE(f.type_override, f.detected_type), f.type_override, f.detected_type";
+    f.pinned, COALESCE(f.type_override, f.detected_type), f.type_override, f.detected_type,
+    COALESCE(f.local, 0)";
 
 fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
+    // A feed without a title is shown by its address. A password in the address
+    // (https://user:password@host/feed) must not show up in the sidebar.
+    let (title, url): (String, String) = (r.get(2)?, r.get(5)?);
+    let title = if title == url { crate::net::without_credentials(&url) } else { title };
     Ok(Feed {
         id: r.get(0)?,
         folder_id: r.get(1)?,
-        title: r.get(2)?,
+        title,
         feed_title: r.get(3)?,
         custom_title: r.get(4)?,
         url: r.get(5)?,
@@ -422,6 +456,7 @@ fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         feed_type: r.get(21)?,
         type_override: r.get(22)?,
         detected_type: r.get(23)?,
+        local: r.get(24)?,
     })
 }
 
@@ -626,10 +661,12 @@ pub fn brief_sources(conn: &Connection, q: &ListQuery, limit: u32) -> Result<(Ve
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(args), |r| {
+        let feed: String = r.get(2)?;
         Ok(BriefSource {
             id: r.get(0)?,
             feed_id: r.get(1)?,
-            feed: r.get(2)?,
+            // An untitled feed is named by its address: never with its password.
+            feed: if feed.contains("://") { crate::net::without_credentials(&feed) } else { feed },
             title: r.get(3)?,
             excerpt: r.get(4)?,
             published: r.get(5)?,
@@ -774,8 +811,10 @@ pub fn mark_scope_read(conn: &Connection, scope: &Scope, range: &DateRange, feed
 pub fn delete_articles(conn: &Connection, ids: &[i64]) -> Result<()> {
     for chunk in ids.chunks(500) {
         let sql = format!(
+            // Only the guid stays, so the article is not added again at the next refresh.
             "UPDATE articles SET is_deleted = 1, is_starred = 0, is_read = 1, is_new = 0,
-                content = NULL, full_content = NULL, excerpt = NULL, image_url = NULL
+                content = NULL, full_content = NULL, excerpt = NULL, image_url = NULL,
+                title = '', url = NULL, author = NULL, enclosure_url = NULL, enclosure_type = NULL
              WHERE id IN ({})",
             placeholders(chunk.len())
         );
@@ -797,19 +836,11 @@ pub struct FetchInfo {
     pub icon_checked: Option<i64>,
     pub retention_mode: Option<String>,
     pub retention_value: Option<i64>,
-    /// Whether the feed may be fetched from a private network; None until the first fetch.
-    pub local: Option<bool>,
+    /// The user allowed Tidings to fetch this feed from the local network.
+    pub local: bool,
 }
 
-/// The addresses of the feeds that were on a private network when they were added.
-/// Only links to their hosts may reach a private network.
-pub fn local_feed_urls(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT url FROM feeds WHERE local = 1")?;
-    let rows = stmt.query_map([], |r| r.get(0))?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
-/// Records whether a feed is on a private network. Set once, at its first fetch.
+/// Records that the user allowed (or no longer allows) a feed on the local network.
 pub fn set_feed_local(conn: &Connection, id: i64, local: bool) -> Result<()> {
     conn.execute("UPDATE feeds SET local = ?2 WHERE id = ?1", params![id, local])?;
     Ok(())
@@ -818,7 +849,7 @@ pub fn set_feed_local(conn: &Connection, id: i64, local: bool) -> Result<()> {
 pub fn fetch_info(conn: &Connection, id: i64) -> Result<FetchInfo> {
     conn.query_row(
         "SELECT url, etag, last_modified, site_url, icon IS NOT NULL, icon_checked,
-                retention_mode, retention_value, local
+                retention_mode, retention_value, COALESCE(local, 0)
          FROM feeds WHERE id = ?1",
         [id],
         |r| {
@@ -992,7 +1023,8 @@ pub fn icon(conn: &Connection, id: i64) -> Result<Option<(Vec<u8>, String)>> {
 /// Applies the archive policy to one feed. Starred articles are always kept.
 pub fn apply_retention(conn: &Connection, feed_id: i64, mode: &str, value: i64) -> Result<()> {
     const CLEAR: &str = "is_deleted = 1, is_new = 0, content = NULL, full_content = NULL,
-                         excerpt = NULL, image_url = NULL";
+                         excerpt = NULL, image_url = NULL, title = '', url = NULL, author = NULL,
+                         enclosure_url = NULL, enclosure_type = NULL";
     match mode {
         "count" => {
             conn.execute(
@@ -1017,6 +1049,25 @@ pub fn apply_retention(conn: &Connection, feed_id: i64, mode: &str, value: i64) 
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// Moves everything from the write-ahead log into the database file and empties the
+/// log. Deleted article text can otherwise stay in the log's old pages for a while.
+pub fn checkpoint(conn: &Connection) {
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+}
+
+/// Stored values next to the settings (the `settings` table is key and value).
+pub fn get_value(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional().ok().flatten()
+}
+
+pub fn set_value(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
     Ok(())
 }
 
@@ -1096,6 +1147,10 @@ pub struct FeedPatch {
     /// `None` for automatic.
     #[serde(default)]
     pub type_override: Option<String>,
+    /// Allow this feed on the local network. `None` keeps the current answer, but a
+    /// new address always starts without it.
+    #[serde(default)]
+    pub local: Option<bool>,
 }
 
 pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> {
@@ -1110,11 +1165,11 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
     let old_folder: Option<i64> =
         conn.query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))?;
     conn.execute(
-        // A new address is decided again at its first fetch (`local`). The right-hand
-        // `url` is the old address.
+        // Consent for the local network belongs to one address: a new address starts
+        // without it. The right-hand `url` is the old address.
         "UPDATE feeds SET custom_title = ?2, url = ?3, update_interval = ?4, retention_mode = ?5,
             retention_value = ?6, full_text = ?7, paused = ?8, type_override = ?9,
-            local = CASE WHEN url = ?3 THEN local ELSE NULL END
+            local = CASE WHEN ?10 IS NOT NULL THEN ?10 WHEN url = ?3 THEN COALESCE(local, 0) ELSE 0 END
          WHERE id = ?1",
         params![
             id,
@@ -1125,7 +1180,8 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
             patch.retention_value.map(|v| v.max(1)),
             patch.full_text,
             patch.paused,
-            type_override
+            type_override,
+            patch.local,
         ],
     )?;
     if old_url != patch.url {

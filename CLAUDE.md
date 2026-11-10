@@ -53,13 +53,22 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   a random secret token, and that serves through the same `protocol::proxy_media` code.
   macOS keeps using `tidings://`. Do not extend this to other directives or hosts.
 - Start feed, page and favicon requests with `Net::get(url, trusted)`, never with a client
-  directly. `trusted` is an address the user chose on a private network: a feed whose `local` column
-  is 1 (decided once, at its first fetch; see `feeds::fetch_and_store`), or the address they
-  just typed. Pass `None` for anything else, also for a feed that was public when added: its
-  DNS may point into the local network later. Private addresses are allowed only on
-  the trusted host, and only when that host is itself private. Images and audio use
-  `net.image`, behind `protocol::decode_target`. Do not add DNS lookups of your own: when a
-  proxy is set (Tor), every lookup must go through it, and `Net::is_private_host` skips DNS then.
+  directly. `trusted` is an address on the local network that the user allowed: a feed whose
+  `local` column is 1, or the address they confirmed in the Add Feed dialog
+  (`net::LOCAL_CONSENT`). It covers only that host and port (`net::same_site`). Pass `None`
+  for everything else: reader tabs, article links, videos, and feeds without `local`.
+  DNS must never decide trust: a public-looking name that resolves to a private address is
+  refused unless the user allowed it. `local` is set only by the user's consent (`add_feed`
+  with `allow_local`, or the toggle in the feed's properties), never from a lookup.
+- Start image, audio and video requests with `Net::public(url)`. It refuses private and
+  local addresses where the request starts, after any rewriting (`media::strip_trackers`,
+  cached redirect targets, addresses from yt-dlp or PeerTube). Do not check only in the
+  caller: literal IP addresses never reach the DNS resolver that guards names.
+- Do not add DNS lookups of your own: when a proxy is set (Tor), every lookup must go
+  through it, and `Net::is_private_host` skips DNS then. `socks5://` is stored as
+  `socks5h://` for the same reason.
+- Settings that cannot be read or validated must never fall back to all defaults
+  (`settings::load`): that would drop the proxy. Reset the invalid field, or start offline.
 - Every image the web view shows must come out of `images::clean`: `protocol.rs` serves only
   re-encoded bytes, never the downloaded file. Keep the `image` crate to pure-Rust decoders
   (no `avif-native` or other C libraries).
@@ -88,6 +97,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   numbers, drop citations of articles that were not sent, and show its text as plain text.
 - If the saved proxy cannot be used at startup, `AppState::init` uses `Net::offline()`.
   Never fall back to a direct connection: it would bypass Tor without the user knowing.
+- Do not start other programs at startup. The security check runs `yt-dlp --version` only
+  when Settings → Security is open; at startup it uses the version it saw then.
 - No telemetry, analytics, crash reporting or automatic update checks. The security check
   (`updates.rs`) reads versions on this computer at startup; it contacts GitHub and
   webkitgtk.org only when the user clicks "Check now". Keep it that way, and keep its

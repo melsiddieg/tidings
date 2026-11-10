@@ -16,6 +16,8 @@ pub struct Candidate {
     pub url: String,
     pub title: String,
     pub kind: String,
+    /// The feed is on the local network: the UI asks before it subscribes.
+    pub local: bool,
 }
 
 const FEED_TYPES: &[(&str, &str)] = &[
@@ -28,9 +30,9 @@ const FEED_TYPES: &[(&str, &str)] = &[
 ];
 
 /// Fetches `url` and returns it as a candidate if it parses as a feed.
-/// `typed` is the address the user typed; see `Net::get`.
-async fn try_feed(net: &Net, url: &Url, typed: &Url) -> Option<Candidate> {
-    let request = net.get(url, Some(typed)).await.ok()?;
+/// `trusted` is the address the user allowed on the local network; see `Net::get`.
+async fn try_feed(net: &Net, url: &Url, trusted: Option<&Url>) -> Option<Candidate> {
+    let request = net.get(url, trusted).await.ok()?;
     let response = request.header(ACCEPT, feeds::FEED_ACCEPT).send().await.ok()?;
     if !response.status().is_success() {
         return None;
@@ -39,10 +41,18 @@ async fn try_feed(net: &Net, url: &Url, typed: &Url) -> Option<Candidate> {
     let bytes = net::read_limited(response, net::MAX_FEED_BYTES).await.ok()?;
     let feed = feeds::parse_raw(&bytes, &final_url).ok()?;
     Some(Candidate {
+        local: is_local(&final_url, trusted),
         url: final_url.to_string(),
         title: feed.title.map(|t| t.content.trim().to_string()).unwrap_or_default(),
         kind: kind_of(&feed.feed_type).into(),
     })
+}
+
+/// Whether a feed address needs the user's consent for the local network: its host
+/// is private by its own text, or it is the host the user just allowed (a name
+/// that resolves to a private address).
+fn is_local(url: &Url, trusted: Option<&Url>) -> bool {
+    !net::host_looks_public(url) || trusted.is_some_and(|t| net::same_site(t, url))
 }
 
 fn kind_of(kind: &feed_rs::model::FeedType) -> &'static str {
@@ -53,7 +63,7 @@ fn kind_of(kind: &feed_rs::model::FeedType) -> &'static str {
     }
 }
 
-fn feed_links(html: &str, page: &Url) -> Vec<Candidate> {
+pub(crate) fn feed_links(html: &str, page: &Url) -> Vec<Candidate> {
     let doc = Document::from(html);
     let page_title = doc.select("title").text().trim().to_string();
     let mut out: Vec<Candidate> = Vec::new();
@@ -75,19 +85,33 @@ fn feed_links(html: &str, page: &Url) -> Vec<Candidate> {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| page_title.clone());
-        out.push(Candidate { url: url.to_string(), title, kind: kind.to_string() });
+        out.push(Candidate { local: !net::host_looks_public(&url), url: url.to_string(), title, kind: kind.to_string() });
     }
     out
 }
 
-pub async fn discover(net: &Net, input: &str) -> Result<Vec<Candidate>> {
+/// `allow_local` is the user's answer to "this address is on your local network,
+/// connect to it?". Without it, an address on the local network (by its own text,
+/// or because its name resolves there) is not contacted; the error asks the UI to
+/// put the question (`net::LOCAL_CONSENT`).
+pub async fn discover(net: &Net, input: &str, allow_local: bool) -> Result<Vec<Candidate>> {
     let url = net::parse_web_url(input)?;
-    let response = net
-        .get(&url, Some(&url))
+    if !allow_local && !net::host_looks_public(&url) {
+        return Err(net::needs_consent(&url));
+    }
+    let trusted = allow_local.then_some(&url);
+    let sent = net
+        .get(&url, trusted)
         .await?
         .header(ACCEPT, "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, application/feed+json, application/xml;q=0.9, */*;q=0.5")
         .send()
-        .await?;
+        .await;
+    let response = match sent {
+        Ok(response) => response,
+        // Refused because the name resolves to a private address: ask the user.
+        Err(_) if !allow_local && net.is_private_host(&url).await => return Err(net::needs_consent(&url)),
+        Err(e) => return Err(e.into()),
+    };
     if !response.status().is_success() {
         return Err(Error::msg(format!(
             "The address returned HTTP {}",
@@ -100,6 +124,7 @@ pub async fn discover(net: &Net, input: &str) -> Result<Vec<Candidate>> {
 
     if let Ok(feed) = feeds::parse_raw(&bytes, &final_url) {
         return Ok(vec![Candidate {
+            local: is_local(&final_url, trusted),
             url: final_url.to_string(),
             title: feed.title.map(|t| t.content.trim().to_string()).unwrap_or_default(),
             kind: kind_of(&feed.feed_type).into(),
@@ -111,7 +136,7 @@ pub async fn discover(net: &Net, input: &str) -> Result<Vec<Candidate>> {
     if found.is_empty() {
         for path in ["/feed", "/rss", "/feed.xml", "/rss.xml", "/atom.xml", "/index.xml"] {
             let Ok(guess) = final_url.join(path) else { continue };
-            if let Some(candidate) = try_feed(net, &guess, &url).await {
+            if let Some(candidate) = try_feed(net, &guess, trusted).await {
                 found.push(candidate);
                 break;
             }

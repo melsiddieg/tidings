@@ -30,7 +30,7 @@ function feed(id: number, folderId: number | null, title: string, url: string, e
     description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
     lastError: null, unread: 0, total: 0, pinned: 0, feedType: 'article', typeOverride: null,
-    detectedType: extra.feedType ?? 'article', ...extra,
+    detectedType: extra.feedType ?? 'article', local: false, ...extra,
   };
 }
 
@@ -269,8 +269,16 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'discover_feeds':
       await wait(500);
       if (!String(args.url).includes('.')) throw 'This is not a valid web address';
-      return [{ url: `https://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS' }];
+      {
+        const host = String(args.url).replace(/^https?:\/\//, '').split(/[/:]/)[0];
+        const local = /^(192\.168\.|10\.|127\.)|\.(local|lan)$/.test(host);
+        if (local && !args.allowLocal) throw `local-network:${host}`;
+        // A public page that names a feed on the local network.
+        if (host === 'evil.example') return [{ url: 'http://192.168.1.1/feed', title: 'Router', kind: 'RSS', local: true }];
+        return [{ url: `${local ? 'http' : 'https'}://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS', local }];
+      }
     case 'add_feed': {
+      if (/\/\/(192\.168\.|10\.|127\.)/.test(args.url) && !args.allowLocal) throw `local-network:${new URL(args.url).hostname}`;
       const id = ++nextId;
       feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url));
       setTimeout(() => emit('feed-updated', { feedId: id, newArticles: 0, error: null }), 800);

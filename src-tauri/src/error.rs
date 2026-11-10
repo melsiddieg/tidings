@@ -52,7 +52,12 @@ fn describe_http(err: &reqwest::Error) -> String {
         return format!("Server returned HTTP {status}");
     }
     // Walk the source chain so the user sees the real cause (DNS, TLS, proxy...).
+    // Without the address: a feed address can hold a password, and the text is
+    // stored as the feed's last error.
     let mut msg = err.to_string();
+    if let Some(url) = err.url() {
+        msg = msg.replace(url.as_str(), &crate::net::without_credentials(url.as_str()));
+    }
     let mut source = std::error::Error::source(err);
     while let Some(inner) = source {
         msg = format!("{msg}: {inner}");

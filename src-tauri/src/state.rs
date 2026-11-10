@@ -102,19 +102,20 @@ impl AppState {
         }
         let conn = db::open(&data_dir.join("tidings.db"))?;
         db::clear_new_flags(&conn)?;
-        let settings = settings::load(&conn);
-        // If the saved proxy cannot be used, do not connect directly instead: that
-        // would send everything around the proxy (Tor). Stay offline until the user
-        // saves a working setting.
-        let (net, startup_warning) = match Net::new(&settings) {
-            Ok(net) => (net, None),
-            Err(_) => (
+        // If the saved settings or the proxy in them cannot be used, do not connect
+        // directly instead: that would send everything around the proxy (Tor). Stay
+        // offline until the user saves working settings.
+        let loaded = settings::load(&conn);
+        let settings = loaded.settings;
+        let (net, startup_warning) = match (loaded.offline, Net::new(&settings)) {
+            (None, Ok(net)) => (net, None),
+            (reason, _) => (
                 Net::offline()?,
-                Some(
+                Some(reason.unwrap_or_else(|| {
                     "The saved proxy setting cannot be used, so Tidings is offline. \
                      Fix or remove the proxy in Settings → Privacy & network."
-                        .to_string(),
-                ),
+                        .to_string()
+                })),
             ),
         };
         Ok(AppState {

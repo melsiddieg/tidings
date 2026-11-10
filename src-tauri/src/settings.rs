@@ -101,12 +101,18 @@ impl Settings {
         self.concurrency = self.concurrency.clamp(1, 16);
 
         self.proxy = self.proxy.trim().to_string();
+        // reqwest looks up names on this computer for socks5:// and leaves them to the
+        // proxy only for socks5h://. With Tor, local lookups would show every feed's
+        // name to the network's DNS. Every SOCKS5 proxy can do the lookups itself.
+        if let Some(rest) = self.proxy.strip_prefix("socks5://") {
+            self.proxy = format!("socks5h://{rest}");
+        }
         if !self.proxy.is_empty() {
             let url = url::Url::parse(&self.proxy)
                 .map_err(|_| Error::msg("The proxy address is not a valid URL"))?;
-            if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") {
+            if !matches!(url.scheme(), "http" | "https" | "socks5h") || url.host_str().is_none_or(str::is_empty) {
                 return Err(Error::msg(
-                    "Proxy must start with http://, https://, socks5:// or socks5h://",
+                    "Proxy must start with http://, https:// or socks5h:// and name a host",
                 ));
             }
         }
@@ -156,15 +162,65 @@ impl Settings {
     }
 }
 
-pub fn load(conn: &Connection) -> Settings {
-    let raw: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'app'", [], |r| r.get(0))
-        .optional()
-        .ok()
-        .flatten();
-    raw.and_then(|json| serde_json::from_str::<Settings>(&json).ok())
-        .and_then(|s| s.validated().ok())
-        .unwrap_or_default()
+/// Saved settings, and why Tidings must stay offline if they cannot be trusted.
+pub struct Loaded {
+    pub settings: Settings,
+    /// Set when a proxy may have been configured but cannot be used or read. Going
+    /// on without it would connect directly, around the proxy (Tor).
+    pub offline: Option<String>,
+}
+
+pub fn load(conn: &Connection) -> Loaded {
+    let row: rusqlite::Result<Option<String>> =
+        conn.query_row("SELECT value FROM settings WHERE key = 'app'", [], |r| r.get(0)).optional();
+    let unreadable = || Loaded {
+        settings: Settings::default(),
+        offline: Some(
+            "Your saved settings could not be read, so Tidings is offline: a proxy may have been set. \
+             Check Settings → Privacy & network and save to go online."
+                .into(),
+        ),
+    };
+    match row {
+        // A new installation.
+        Ok(None) => Loaded { settings: Settings::default(), offline: None },
+        Ok(Some(json)) => match serde_json::from_str::<Settings>(&json) {
+            Ok(settings) => settings.repaired(),
+            Err(_) => unreadable(),
+        },
+        Err(_) => unreadable(),
+    }
+}
+
+impl Settings {
+    /// Saved settings that no longer pass `validated` (a rule changed, or the row was
+    /// edited). Never falls back to all defaults: that would drop the proxy. Other
+    /// invalid fields are reset; an invalid proxy stays as text and means offline.
+    fn repaired(self) -> Loaded {
+        if let Ok(settings) = self.clone().validated() {
+            return Loaded { settings, offline: None };
+        }
+        let defaults = Settings::default();
+        let rest = Settings {
+            ai_provider: defaults.ai_provider,
+            ai_endpoint: defaults.ai_endpoint,
+            ai_model: defaults.ai_model,
+            video_player: defaults.video_player,
+            user_agent: defaults.user_agent,
+            ..self
+        };
+        match rest.clone().validated() {
+            Ok(settings) => Loaded { settings, offline: None },
+            Err(_) => Loaded {
+                settings: rest,
+                offline: Some(
+                    "The saved proxy setting cannot be used, so Tidings is offline. \
+                     Fix or remove the proxy in Settings → Privacy & network."
+                        .into(),
+                ),
+            },
+        }
+    }
 }
 
 pub fn save(conn: &Connection, settings: &Settings) -> Result<()> {

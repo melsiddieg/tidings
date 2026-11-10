@@ -30,8 +30,12 @@ pub struct Net {
     /// Used only for a host the user chose (a feed they subscribed to or an address
     /// they typed) when that host is itself on a private network. See `Net::get`.
     pub local: Client,
-    /// Used for images and podcast audio. Same rules as `web`, with a shorter timeout.
-    pub image: Client,
+    /// Used for images, podcast audio and video, through `Net::public`. Same rules as
+    /// `web`, with a shorter timeout.
+    image: Client,
+    /// Tests only: lets `Net::public` reach the test servers on 127.0.0.1.
+    #[cfg(test)]
+    pub unguarded: bool,
     /// Used only for the AI model server of briefs, which must be on this computer
     /// or the local network (`check_local_model`). It never uses the proxy: the
     /// request does not leave the local network, and Tor could not reach it anyway.
@@ -56,7 +60,7 @@ impl Net {
                 let first = attempt.previous().first().cloned();
                 if attempt.previous().len() >= 8 {
                     attempt.error("too many redirects")
-                } else if first.is_some_and(|f| same_host(&f, attempt.url())) {
+                } else if first.is_some_and(|f| same_site(&f, attempt.url())) {
                     attempt.follow()
                 } else {
                     attempt.error(BLOCKED)
@@ -73,7 +77,35 @@ impl Net {
             // on someone else's network, its DNS could point the name anywhere.
             .dns_resolver(Arc::new(PrivateOnlyResolver))
             .build()?;
-        Ok(Net { web, local, image, model, proxied })
+        Ok(Net {
+            web,
+            local,
+            image,
+            model,
+            proxied,
+            #[cfg(test)]
+            unguarded: false,
+        })
+    }
+
+    /// Starts a GET request for an image, audio or video file. This is the one place
+    /// these requests start, and it refuses literal private addresses and local names
+    /// itself: the callers rewrite URLs (tracker removal, cached redirects, addresses
+    /// from yt-dlp and PeerTube), and a literal IP address never reaches the DNS
+    /// resolver that guards names.
+    pub fn public(&self, url: &str) -> Result<RequestBuilder> {
+        let parsed = Url::parse(url).map_err(|_| Error::msg("This is not a valid web address"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::msg("Only http:// and https:// addresses are supported"));
+        }
+        #[cfg(test)]
+        if self.unguarded {
+            return Ok(self.local.get(parsed.as_str()));
+        }
+        if !host_looks_public(&parsed) {
+            return Err(Error::blocked());
+        }
+        Ok(self.image.get(parsed.as_str()))
     }
 
     /// A `Net` that reaches nothing outside this computer, for when the saved proxy
@@ -91,16 +123,16 @@ impl Net {
         Ok(self.model.request(method, url.as_str()))
     }
 
-    /// Starts a GET request for a feed, page or favicon. `trusted` is an address the
-    /// user chose on a private network: a feed that was on a private host when they
-    /// added it (`feeds.local` in the database), or the address they just typed.
-    /// Pass None for every other feed: a public feed whose DNS later points into the
-    /// local network must not be followed there. Private and local addresses are
-    /// allowed only when `url` is on the same host as `trusted` and that host is on
-    /// a private network. Everything else, such as links inside articles or a site
-    /// link a feed points to, must be public.
+    /// Starts a GET request for a feed, page or favicon. `trusted` is an address on
+    /// the local network that the user has allowed by name: a feed whose `local`
+    /// column is 1, or an address they confirmed in the Add Feed dialog. Pass None
+    /// for everything else. Only `url`s on the same host and port as `trusted` use
+    /// the client that may reach private addresses; DNS plays no part in that
+    /// choice, so a name cannot earn local access by resolving to a private address.
+    /// Everything else, such as links inside articles or a site link a feed points
+    /// to, must be public.
     pub async fn get(&self, url: &Url, trusted: Option<&Url>) -> Result<RequestBuilder> {
-        if trusted.is_some_and(|t| same_host(t, url)) && self.is_private_host(url).await {
+        if trusted.is_some_and(|t| same_site(t, url)) {
             return Ok(self.local.get(url.as_str()));
         }
         // Literal IP addresses never reach the DNS resolver, so check them here.
@@ -165,9 +197,35 @@ fn public_only(builder: ClientBuilder, proxied: bool, max_redirects: usize) -> C
     }
 }
 
-/// Same host, ignoring scheme and port (http to https on one machine is common).
-pub fn same_host(a: &Url, b: &Url) -> bool {
-    a.host().is_some() && a.host() == b.host()
+/// Same host and port. The one exception is the usual move between http on port 80
+/// and https on port 443. Another port is another service on that machine, which
+/// the user did not allow.
+pub fn same_site(a: &Url, b: &Url) -> bool {
+    let standard = |u: &Url| matches!((u.scheme(), u.port_or_known_default()), ("http", Some(80)) | ("https", Some(443)));
+    a.host().is_some()
+        && a.host() == b.host()
+        && (a.port_or_known_default() == b.port_or_known_default() || (standard(a) && standard(b)))
+}
+
+/// An address without its user name and password, for display.
+pub fn without_credentials(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_string(),
+    }
+}
+
+/// Start of the error that asks the UI for the user's consent before Tidings
+/// connects to a host on the local network. The host follows the colon.
+pub const LOCAL_CONSENT: &str = "local-network:";
+
+/// The error that asks for consent to connect to `url`'s host.
+pub fn needs_consent(url: &Url) -> Error {
+    Error::msg(format!("{LOCAL_CONSENT}{}", url.host_str().unwrap_or("")))
 }
 
 fn base_builder(settings: &Settings) -> Result<ClientBuilder> {
@@ -233,6 +291,9 @@ pub fn decode_html(bytes: &[u8], content_type: &str) -> String {
     text.into_owned()
 }
 
+/// False for every address that is not an ordinary address on the internet: private,
+/// loopback, link-local and the other special-purpose ranges, and IPv6 addresses
+/// that carry an IPv4 address inside (they can lead to that IPv4 address).
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -245,6 +306,9 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_multicast()
                 || (o[0] == 100 && (o[1] & 0xC0) == 64) // carrier-grade NAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99) // 6to4 relays
+                || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking
                 || o[0] == 0
                 || o[0] >= 240)
         }
@@ -252,12 +316,26 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_ip(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| is_public_ip(IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            // NAT64 (64:ff9b::/96) and IPv4-compatible (::/96): the IPv4 address is at the end.
+            if (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0]) || (s[..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] > 1)) {
+                return embedded(s[6], s[7]);
+            }
+            // 6to4 (2002::/16): the IPv4 address follows the prefix.
+            if s[0] == 0x2002 {
+                return embedded(s[1], s[2]);
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00 // unique local
-                || (first & 0xffc0) == 0xfe80) // link local
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link local
+                || (s[0] & 0xffc0) == 0xfec0 // site local (deprecated)
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // local-use NAT64
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo
+                || (s[0] == 0x2001 && s[1] == 0xdb8) // documentation
+                || (s[0] == 0x100 && s[1..4] == [0, 0, 0])) // discard only
         }
     }
 }

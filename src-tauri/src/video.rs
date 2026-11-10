@@ -667,6 +667,10 @@ fn parse_audio(json: &[u8]) -> Option<AudioStream> {
     if !matches!(url.scheme(), "http" | "https") || !matches!(field("protocol")?, "http" | "https") {
         return None;
     }
+    // yt-dlp follows the page wherever it leads; the stream must be on a public host.
+    if !crate::net::host_looks_public(&url) {
+        return None;
+    }
     if field("acodec").is_some_and(|c| c == "none") {
         return None;
     }
@@ -803,6 +807,9 @@ mod tests {
         assert!(parse_audio(br#"{"url": "https://a.example/x.m3u8", "protocol": "m3u8_native"}"#).is_none());
         assert!(parse_audio(br#"{"url": "https://a.example/x", "protocol": "https", "acodec": "none"}"#).is_none());
         assert!(parse_audio(br#"{"url": "file:///etc/passwd", "protocol": "https"}"#).is_none());
+        // A stream on this computer or the local network is refused.
+        assert!(parse_audio(br#"{"url": "http://127.0.0.1:8080/a.m4a", "protocol": "http", "ext": "m4a"}"#).is_none());
+        assert!(parse_audio(br#"{"url": "http://192.168.1.1/a.m4a", "protocol": "http", "ext": "m4a"}"#).is_none());
         assert!(parse_audio(b"not json").is_none());
     }
 

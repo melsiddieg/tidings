@@ -134,7 +134,11 @@ pub fn strip_trackers(raw: &str) -> String {
             next.push_str(q);
         }
         match Url::parse(&next) {
-            Ok(u) if u.host_str().is_some_and(|h| h.contains('.')) => current = u.to_string(),
+            // Only a public host may come out: the address behind the prefix is the
+            // feed's own text, and `http://127.0.0.1/...` there must not be used.
+            Ok(u) if u.host_str().is_some_and(|h| h.contains('.')) && net::host_looks_public(&u) => {
+                current = u.to_string()
+            }
             _ => break,
         }
     }
@@ -270,9 +274,10 @@ async fn fetch_range(net: &Net, cache: &ResolvedUrls, source: &str, start: u64, 
     let mut retried = false;
     loop {
         let url = cache.get(source).unwrap_or_else(|| source.to_string());
+        // `Net::public` refuses private addresses, also for a redirect target kept
+        // from an earlier request.
         let response = net
-            .image
-            .get(&url)
+            .public(&url)?
             .header(ACCEPT, "audio/*, video/*;q=0.8, */*;q=0.5")
             .header(RANGE, format!("bytes={start}-{end}"))
             .timeout(Duration::from_secs(60))

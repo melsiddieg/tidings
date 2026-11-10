@@ -705,7 +705,9 @@ class Store {
    */
   async checkComponents(notify = false) {
     try {
-      this.components = await api.checkComponents();
+      // At startup no program is started: yt-dlp's version is the one seen at the
+      // last check from Settings.
+      this.components = await api.checkComponents(!notify);
     } catch {
       return;
     }
