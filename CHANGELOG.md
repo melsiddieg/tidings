@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-09
+
 ### Security
 Fixes from a security and privacy audit of the code.
 - A feed can no longer gain access to your local network by changing its DNS. Whether a
@@ -283,7 +285,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/melsiddieg/tidings/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/melsiddieg/tidings/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/melsiddieg/tidings/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/melsiddieg/tidings/compare/v0.7.0...v0.7.1

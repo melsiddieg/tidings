@@ -154,8 +154,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.9.0-freebsd-x86_64.tar.gz
-./tidings-0.9.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.9.1-freebsd-x86_64.tar.gz
+./tidings-0.9.1-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
