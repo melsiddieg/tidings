@@ -391,14 +391,23 @@ static USED: AtomicUsize = AtomicUsize::new(0);
 impl Capped {
     fn take(size: usize) -> bool {
         let cap = CAP.load(Ordering::Relaxed);
-        if cap == 0 {
-            return true;
-        }
-        if USED.fetch_add(size, Ordering::Relaxed).saturating_add(size) > cap {
-            USED.fetch_sub(size, Ordering::Relaxed);
+        cap == 0 || Self::count(&USED, cap, size)
+    }
+
+    /// Adds `size` to `used` unless the total would pass `cap`.
+    fn count(used: &AtomicUsize, cap: usize, size: usize) -> bool {
+        // `fetch_add` returns the value from before the add, so this sum is the
+        // new total.
+        if used.fetch_add(size, Ordering::Relaxed).saturating_add(size) > cap {
+            used.fetch_sub(size, Ordering::Relaxed);
             return false;
         }
         true
+    }
+
+    /// Whether this process is the SVG helper: only `worker_main` sets a limit.
+    fn is_helper() -> bool {
+        CAP.load(Ordering::Relaxed) != 0
     }
 
     fn give(size: usize) {
@@ -479,9 +488,10 @@ fn fonts() -> Arc<fontdb::Database> {
 /// Call this only in the helper process (`worker_main`); the app uses `draw`. A
 /// crafted SVG can end the process that calls this: usvg and resvg follow nested
 /// elements and chains of clip paths, masks and `<tspan>` with recursion, and a
-/// few thousand levels overflow the stack.
-pub fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
-    if bytes.len() > MAX_SVG_BYTES {
+/// few thousand levels overflow the stack. So outside the helper this draws
+/// nothing (the tests call it directly, with drawings that are safe).
+pub(crate) fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
+    if bytes.len() > MAX_SVG_BYTES || !(cfg!(test) || Capped::is_helper()) {
         return None;
     }
     let options = usvg::Options {
@@ -680,6 +690,24 @@ mod tests {
 
     /// Set for the copy of the test program that runs as the SVG helper.
     pub const HELPER_ENV: &str = "TIDINGS_SVG_HELPER";
+
+    /// The limit is on the total in use: one allocation may be larger than half of it.
+    #[test]
+    fn memory_limit_counts_each_allocation_once() {
+        const MB: usize = 1024 * 1024;
+        let used = AtomicUsize::new(0);
+        // One allocation of more than half the limit fits.
+        assert!(Capped::count(&used, 512 * MB, 300 * MB));
+        // The rest fits too, up to the last byte.
+        assert!(Capped::count(&used, 512 * MB, 212 * MB));
+        assert_eq!(used.load(Ordering::Relaxed), 512 * MB);
+        // One byte more does not, and a refused allocation is not counted.
+        assert!(!Capped::count(&used, 512 * MB, 1));
+        assert!(!Capped::count(&used, 512 * MB, usize::MAX));
+        assert_eq!(used.load(Ordering::Relaxed), 512 * MB);
+        // The app process sets no limit, so it is not taken for the helper.
+        assert!(!Capped::is_helper());
+    }
 
     /// Not a test: `worker_command` starts the test program again with this name,
     /// and it then is the SVG helper process. Run in any other way, it does nothing.

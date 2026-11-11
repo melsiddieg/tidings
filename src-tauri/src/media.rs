@@ -110,6 +110,12 @@ pub fn is_playlist_error(err: &Error) -> bool {
 /// (MP3, MP4, Ogg, WebM, FLAC, WAV and AAC all have bytes below 0x20 or invalid
 /// UTF-8 within their first bytes). So the rule is: a file that starts with text
 /// is refused.
+///
+/// AMR is the one audio format with a text marker (`#!AMR\n`). It needs no
+/// exception: the audio frames after the marker are not text, so a real file
+/// passes. Do not add one that goes by the marker alone: GStreamer skips lines
+/// that start with `#` when it looks for a list of addresses, so
+/// `#!AMR\nhttp://192.168.1.1/` is such a list.
 fn is_playlist(head: &[u8]) -> bool {
     let head = &head[..head.len().min(1024)];
     // Text in UTF-16, with or without a byte order mark: `<` or `#EXT` first.
@@ -528,6 +534,15 @@ mod tests {
         for head in media {
             assert!(!is_playlist(head), "{head:?}");
         }
+
+        // AMR starts with a line of text, then audio frames: one byte that names
+        // the frame type (0x3C: 12.2 kbit/s; 0x04: wideband, 6.6 kbit/s), then
+        // the packed bits of the frame.
+        let frame = b"\x3C\x91\x17\x16\xBE\x66\x78\x00\x00\x01\xE7\xAF\x00\x00\x00\x80";
+        assert!(!is_playlist(&[&b"#!AMR\n"[..], frame, frame].concat()));
+        assert!(!is_playlist(b"#!AMR-WB\n\x04\x10\x20\x00\x21\x1C\x14\xD0\x11\x40\x4C\xC1\xA0\x50\x00\x00\x44\x30"));
+        // The marker alone decides nothing: text after it is still a list.
+        assert!(is_playlist(b"#!AMR\nhttp://192.168.1.1/a.mp3\n"));
 
         for playlist in ["application/vnd.apple.mpegurl", "application/x-mpegURL; charset=utf-8", "audio/mpegurl", "application/dash+xml", "application/sdp"] {
             assert!(is_playlist_type(playlist), "{playlist}");

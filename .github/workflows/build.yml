@@ -96,12 +96,11 @@ jobs:
       - run: npm ci
       - run: npm run check
       # --locked: fail if Cargo.lock does not match Cargo.toml, so the build uses
-      # exactly the dependency versions that were reviewed. This also covers the
-      # `tauri build` below: it runs only after this step has passed, with the
-      # same Cargo.lock.
+      # exactly the dependency versions that were reviewed.
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      - run: npx tauri build ${{ matrix.args }}
+      # Arguments after `--` go to `cargo build`.
+      - run: npx tauri build ${{ matrix.args }} -- --locked
 
       - name: Make portable tarball
         if: runner.os == 'Linux'

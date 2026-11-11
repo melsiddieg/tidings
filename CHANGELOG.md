@@ -5,6 +5,20 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+Notes from the review of 0.9.4.
+- A refresh now empties the database's write-ahead log when it is done. A refresh
+  applies the archive rule, which clears the text of old articles; that text could
+  stay in the log until the cleanup that runs every six hours.
+- The SVG drawing code now draws nothing outside the helper process, so a later
+  change cannot call it in the app by mistake.
+- The release build now passes `--locked` to `cargo build` itself, not only to the
+  tests that run before it.
+
+### Fixed
+- The audio server on 127.0.0.1 (Linux and the BSDs) answered a request without
+  `Range` for a file smaller than 2 MB with `206` instead of `200`.
+
 ## [0.9.4] - 2026-11-11
 
 ### Security

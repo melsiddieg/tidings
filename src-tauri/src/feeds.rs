@@ -82,6 +82,9 @@ pub async fn refresh_many(app: &AppHandle, state: &Arc<AppState>, ids: Vec<i64>)
         });
     }
     while tasks.join_next().await.is_some() {}
+    // A refresh applies the archive rule, which clears the text of old articles.
+    // Empty the write-ahead log, so that text does not stay in its old pages.
+    db::checkpoint(&state.db());
 }
 
 pub async fn refresh_one(app: &AppHandle, state: &AppState, id: i64) -> FeedUpdated {

@@ -57,8 +57,10 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - Start feed, page and favicon requests with `Net::get(url, trusted)`, never with a client
   directly. `trusted` is an address on the local network that the user allowed: a feed whose
   `local` column is 1, or the address they confirmed in the Add Feed dialog
-  (`net::LOCAL_CONSENT`). It covers only that host and port (`net::same_site`). Pass `None`
-  for everything else: reader tabs, article links, videos, and feeds without `local`.
+  (`net::LOCAL_CONSENT`). It covers only that host and port (`net::same_site`). Full text
+  (`fetch_full_text`) passes the article's own feed, so a local feed's pages on that host
+  and port load. Pass `None` for everything else: reader tabs, links inside articles,
+  videos, and feeds without `local`.
   DNS must never decide trust: a public-looking name that resolves to a private address is
   refused unless the user allowed it. `local` is set only by the user's consent (`add_feed`
   with `allow_local`, or the toggle in the feed's properties), never from a lookup.
@@ -77,11 +79,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   resolver empty (`images::svg`), or an SVG could read files on this computer.
 - SVG is drawn only in the helper process: the app starts itself with `--svg-worker`
   (`images::worker_main`, called first thing in `main`) and talks to it through
-  `images::draw`. Never call `images::svg` in the app process: usvg and resvg recurse
-  on nested elements and on chains of clip paths, masks and `<tspan>`, and a small
-  crafted SVG overflows the stack, which ends the process and cannot be caught. Keep
-  the helper's time limit and memory limit (`images::Capped`, the global allocator),
-  and keep `worker_main` free of anything but reading stdin and writing stdout.
+  `images::draw`. Never call `images::svg` in the app process (it draws nothing there):
+  usvg and resvg recurse on nested elements and on chains of clip paths, masks and
+  `<tspan>`, and a small crafted SVG overflows the stack, which ends the process and
+  cannot be caught. Keep the helper's time limit and memory limit (`images::Capped`,
+  the global allocator), and keep `worker_main` free of anything but reading stdin and
+  writing stdout.
 - The media proxy gives the player single files only. Keep `media::is_playlist` on the
   first block of every file, and `is_playlist_type` on every answer: a player that
   gets an HLS or DASH playlist fetches the addresses in it by itself, past `net.rs`,

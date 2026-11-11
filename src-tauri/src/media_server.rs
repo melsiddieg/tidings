@@ -165,7 +165,10 @@ fn stream_plan(first: &Response<Vec<u8>>, range: Option<&str>) -> Option<StreamP
     let last = wanted_end.unwrap_or(u64::MAX).min(total.checked_sub(1)?);
     let consistent = first_end >= start && first_end - start + 1 == first.body().len() as u64;
     let whole = range.is_none();
-    (consistent && first_end < last && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
+    // A request without `Range` gets a `200` also when the first slice already
+    // holds the whole file: `206` is not a valid answer to it.
+    let more = first_end < last || (whole && first_end == last);
+    (consistent && more && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
 }
 
 fn head_text<'a>(
@@ -307,6 +310,43 @@ mod tests {
         let r = client.head(&url).send().await.unwrap();
         assert_eq!(r.status().as_u16(), 200);
         assert_eq!(r.headers()["content-length"], "100");
+    }
+
+    /// A file smaller than one slice: the media proxy answers `206` with all of
+    /// it, also to a request without `Range`.
+    #[tokio::test]
+    async fn small_file_without_range_is_a_200() {
+        let small: Handler = Arc::new(|_encoded: String, range: Option<String>| {
+            Box::pin(async move {
+                let (start, _) = crate::media::parse_range(range.as_deref());
+                Response::builder()
+                    .status(206)
+                    .header(header::CONTENT_TYPE, "audio/mpeg")
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-6/7"))
+                    .body(b"ID3\x04abc"[start as usize..].to_vec())
+                    .unwrap()
+            })
+        });
+        let base = start(small).await.unwrap();
+        let url = format!("{base}/media/abc");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let r = client.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-type"], "audio/mpeg");
+        assert_eq!(r.headers()["content-length"], "7");
+        assert!(r.headers().get("content-range").is_none());
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"ID3\x04abc");
+
+        let r = client.head(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-length"], "7");
+
+        // With a Range the answer stays a 206.
+        let r = client.get(&url).header("Range", "bytes=2-").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["content-range"], "bytes 2-6/7");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"3\x04abc");
     }
 
     #[tokio::test]
