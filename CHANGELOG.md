@@ -5,6 +5,36 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+Fixes from a third audit, of 0.9.3 on Linux.
+- A crafted SVG could crash Tidings. A file of a few kilobytes with 1000 nested
+  elements, or with a long chain of clip paths, masks or `<tspan>`, overflowed the
+  stack of the SVG library, and a stack overflow ends the whole program. A feed's icon
+  was enough, so the crash could come back at every start. SVG is now drawn in a
+  separate helper process with a time limit (10 seconds) and a memory limit (512 MB).
+  A crafted SVG ends only the helper, and that image is not shown.
+- A feed could make the media engine connect to any address, also on the local
+  network and without the proxy. If a podcast or video address answered with a
+  streaming playlist (HLS or DASH), the player fetched the addresses in the playlist
+  by itself: on Linux and the BSDs GStreamer does this, past Tidings' network code.
+  The media proxy now refuses playlists, by their content and by their type, before
+  the player gets a byte. Tidings plays single audio and video files only.
+- Deleting a feed, a folder, all subscriptions or a brief now also empties the
+  database's write-ahead log, as deleting articles already did.
+- The upgrade to 0.9.2 kept every feed with a local network address as allowed, also
+  ones from an imported OPML file. A feed from before 0.9.2 that never answered with a
+  feed now loses that: its error says how to allow it again in its properties.
+- The audio server on 127.0.0.1 (Linux and the BSDs) now limits connections that
+  have sent no valid request to 32, and closes one after 10 seconds.
+- A `Range` header with a huge offset can no longer overflow a sum in the media proxy.
+
+### Changed
+- The Linux instructions now say to prefer the `.deb`, `.rpm` or tarball over the
+  AppImage: the AppImage carries its own WebKitGTK, which gets fixes only with a new
+  Tidings release. The docs also list what is not sandboxed on Linux and the BSDs.
+- The release build installs a fixed version of `cargo-audit`, and the BSD build
+  script uses `--locked`.
+
 ## [0.9.3] - 2026-11-10
 
 ### Security

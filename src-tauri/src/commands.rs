@@ -292,7 +292,11 @@ pub fn update_feed(app: AppHandle, state: AppStateRef<'_>, id: i64, mut patch: F
 
 #[tauri::command]
 pub fn delete_feed(state: AppStateRef<'_>, id: i64) -> Result<()> {
-    db::delete_feed(&state.db(), id)
+    let conn = state.db();
+    db::delete_feed(&conn, id)?;
+    // As in `delete_articles`: the feed's articles must not stay in the log.
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 #[tauri::command]
@@ -331,7 +335,10 @@ pub fn rename_folder(state: AppStateRef<'_>, id: i64, title: String) -> Result<(
 
 #[tauri::command]
 pub fn delete_folder(state: AppStateRef<'_>, id: i64) -> Result<()> {
-    db::delete_folder(&state.db(), id)
+    let conn = state.db();
+    db::delete_folder(&conn, id)?;
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 #[tauri::command]
@@ -347,13 +354,19 @@ pub fn move_folder(
 /// Deletes several feeds and folders at once. Returns how many feeds were deleted.
 #[tauri::command]
 pub fn delete_items(state: AppStateRef<'_>, items: Vec<Item>) -> Result<usize> {
-    db::delete_items(&state.db(), &items)
+    let conn = state.db();
+    let deleted = db::delete_items(&conn, &items)?;
+    db::checkpoint(&conn);
+    Ok(deleted)
 }
 
 /// Removes every subscription and article, to start over.
 #[tauri::command]
 pub fn delete_all_subscriptions(state: AppStateRef<'_>) -> Result<()> {
-    db::delete_all_subscriptions(&state.db())
+    let conn = state.db();
+    db::delete_all_subscriptions(&conn)?;
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 /// Opens or closes the given folders, or all folders when `ids` is None.
@@ -600,7 +613,10 @@ pub fn brief(state: AppStateRef<'_>, id: i64) -> Result<Option<BriefView>> {
 
 #[tauri::command]
 pub fn delete_brief(state: AppStateRef<'_>, id: i64) -> Result<()> {
-    db::delete_brief(&state.db(), id)
+    let conn = state.db();
+    db::delete_brief(&conn, id)?;
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 /// What the last check that ran yt-dlp saw, kept in the database.

@@ -28,7 +28,7 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
-  in Rust before the web view sees it), `brief.rs` (AI briefs by a local model), `updates.rs` (security check: versions of Tidings,
+  in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `updates.rs` (security check: versions of Tidings,
   yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
@@ -75,6 +75,18 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   re-encoded bytes, never the downloaded file. Keep the `image` crate to pure-Rust decoders
   (no `avif-native` or other C libraries). SVG is drawn to PNG with resvg; keep its image
   resolver empty (`images::svg`), or an SVG could read files on this computer.
+- SVG is drawn only in the helper process: the app starts itself with `--svg-worker`
+  (`images::worker_main`, called first thing in `main`) and talks to it through
+  `images::draw`. Never call `images::svg` in the app process: usvg and resvg recurse
+  on nested elements and on chains of clip paths, masks and `<tspan>`, and a small
+  crafted SVG overflows the stack, which ends the process and cannot be caught. Keep
+  the helper's time limit and memory limit (`images::Capped`, the global allocator),
+  and keep `worker_main` free of anything but reading stdin and writing stdout.
+- The media proxy gives the player single files only. Keep `media::is_playlist` on the
+  first block of every file, and `is_playlist_type` on every answer: a player that
+  gets an HLS or DASH playlist fetches the addresses in it by itself, past `net.rs`,
+  the proxy and the private-address checks. Do not add HLS or DASH support by letting
+  the player read a playlist.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
   before display.
 - Videos play in an external player (`video.rs`), never in the web view: no iframes, no site
@@ -101,7 +113,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - If the saved proxy cannot be used at startup, `AppState::init` uses `Net::offline()`.
   Never fall back to a direct connection: it would bypass Tor without the user knowing.
 - Do not start other programs at startup. The security check runs `yt-dlp --version` only
-  when Settings → Security is open; at startup it uses the version it saw then.
+  when Settings → Security is open; at startup it uses the version it saw then. (The SVG
+  helper is the app's own binary, started when the first SVG is shown.)
 - No telemetry, analytics, crash reporting or automatic update checks. The security check
   (`updates.rs`) reads versions on this computer at startup; it contacts GitHub and
   webkitgtk.org only when the user clicks "Check now". Keep it that way, and keep its
@@ -119,6 +132,7 @@ WebKitGTK workarounds instead of listing operating systems.
 | Place | What | Notes |
 |---|---|---|
 | `main.rs` `webkitgtk_workarounds` | Sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` with NVIDIA's driver | `cfg(webkitgtk)`. Probes `/proc/driver/nvidia/version` (Linux) and `/dev/nvidiactl` (Linux, FreeBSD). OpenBSD has no NVIDIA driver. |
+| `main.rs` (first lines), `images.rs` `worker_command` | Starts the app again as the SVG helper | All platforms. Uses `std::env::current_exe`; on OpenBSD that is `argv[0]`, so a bare name is looked up in `PATH`. If the helper cannot start, SVG images are not shown. |
 | `main.rs` `start_media_server`, `media_server.rs` | Loopback audio server (GStreamer cannot read custom schemes) | `cfg(webkitgtk)`. Open-ended requests get one response to the end of the file, filled from 2 MB proxy slices: WebKitGTK takes a short 206 as the whole file. |
 | `main.rs` window builder | Overlay title bar and traffic-light position | macOS-only cfg. |
 | `menu.rs` | Native menu bar | macOS only. Other platforms rely on keyboard handling in `src/App.svelte` (`isMac` check). |

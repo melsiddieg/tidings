@@ -36,6 +36,10 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// 10 November 2026, when 0.9.2 came out: since then a feed on the local network
+/// is added only after the user allowed its address.
+const CONSENT_SINCE: i64 = 1_794_268_800;
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
@@ -201,6 +205,20 @@ fn migrate(conn: &Connection) -> Result<()> {
                 return Err(err);
             }
         }
+    }
+    if version < 7 {
+        // v7: v6 kept every feed with a private address as allowed. Tidings cannot
+        // tell which of those the user typed and which came from an imported OPML
+        // file. A feed that works was fetched many times already, and stays. One
+        // that never answered with a feed is only a request into the local network
+        // at every refresh: it loses the flag, and its error then says how to allow
+        // it. Feeds added since 0.9.2 got the flag from the user's own answer.
+        conn.execute_batch(&format!(
+            "BEGIN;
+            UPDATE feeds SET local = 0 WHERE local = 1 AND last_success IS NULL AND created_at < {CONSENT_SINCE};
+            PRAGMA user_version = 7;
+            COMMIT;"
+        ))?;
     }
     Ok(())
 }

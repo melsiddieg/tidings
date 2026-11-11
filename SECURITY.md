@@ -22,6 +22,17 @@ your copy, yt-dlp and WebKitGTK are up to date.
   since the build. It is made by the same workflow, so it does not prove who built
   it. The packages are not signed, and the macOS app is not notarized.
 
+- On Linux, prefer the `.deb`, the `.rpm` or the tarball: they use your system's
+  WebKitGTK, which your distribution keeps up to date. The AppImage carries its own
+  copy, which changes only with a new Tidings release.
+
+## Known limits
+
+- mpv, IINA and yt-dlp are separate programs. After you click "Watch" or "Listen"
+  they make their own connections, which Tidings' local network rule does not cover.
+- On Linux and the BSDs the web view's content process is not sandboxed, and audio
+  and video are decoded by the system's GStreamer.
+
 ## Design
 
 The security design is described in [docs/README.md](docs/README.md#privacy-and-security).

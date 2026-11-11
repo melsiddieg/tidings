@@ -16,11 +16,22 @@
 //!   from the internet either. Images inside an SVG are not loaded: an SVG may name
 //!   any file on this computer. AVIF is refused, since no Rust decoder for it is
 //!   included.
+//! - SVG is drawn in a helper process (the app, started a second time), with a time
+//!   limit and a memory limit. A small crafted SVG can overflow the stack of the SVG
+//!   library, use gigabytes of memory, or draw for minutes. A stack overflow ends
+//!   the whole process and cannot be caught, so the process it ends must not be the
+//!   app. See `draw` and `worker_main`.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::hash::{BuildHasher, RandomState};
 use std::io::Cursor;
 use std::num::NonZeroU64;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
@@ -28,7 +39,9 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 use resvg::usvg::fontdb;
 use resvg::{tiny_skia, usvg};
-use tokio::sync::Semaphore;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{Mutex, Semaphore};
 
 /// How large a re-encoded image may be, and the format it ends up in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +77,20 @@ const MAX_SVG_NODES: usize = 100_000;
 const MAX_SVG_SIDE: f32 = 1600.0;
 /// Images decoded at the same time, at most.
 const MAX_PARALLEL: usize = 4;
+/// The argument that makes the program run as the SVG helper (`worker_main`).
+pub const WORKER_ARG: &str = "--svg-worker";
+/// The helper's first output. The app waits for it before it sends an SVG.
+const WORKER_HELLO: &[u8] = b"tidings-svg-helper 1\n";
+/// How long the helper may take to start, and then to draw one SVG. Real ones are
+/// drawn in milliseconds. (Shorter in tests, which wait for it once.)
+const WORKER_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 10 });
+/// The most memory the helper may hold. Drawing at `MAX_SVG_SIDE` needs about 10 MB
+/// for each layer.
+const WORKER_MEMORY: usize = 512 * 1024 * 1024;
+/// A PNG from the helper is never larger than this.
+const MAX_PNG_BYTES: usize = 64 * 1024 * 1024;
+/// SVG files that stopped the helper are remembered, up to this many.
+const MAX_REFUSED: usize = 256;
 /// Animated GIFs: at most this many frames, and this many pixels in all frames together.
 const MAX_GIF_FRAMES: usize = 1_000;
 const MAX_GIF_PIXELS: u64 = 200_000_000;
@@ -84,11 +111,7 @@ pub async fn clean(bytes: Vec<u8>, mime: &str, usage: Use) -> Option<Clean> {
         Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()).min(MAX_PARALLEL))
     });
     if mime == "image/svg+xml" {
-        // One at a time: a crafted SVG can use far more memory and time than its
-        // size suggests, and real ones are drawn in a few milliseconds.
-        static ONE: Semaphore = Semaphore::const_new(1);
-        let _permit = ONE.acquire().await.ok()?;
-        return tokio::task::spawn_blocking(move || svg(&bytes, usage)).await.ok().flatten();
+        return draw(&bytes, usage).await;
     }
     let mime = mime.to_string();
     let _permit = PERMITS.acquire().await.ok()?;
@@ -154,6 +177,285 @@ fn still(bytes: &[u8], format: ImageFormat, usage: Use, lossy: bool) -> Option<C
     Some(Clean { bytes: out, mime: "image/png" })
 }
 
+// ---------------------------------------------------------------------------
+// SVG: the helper process
+// ---------------------------------------------------------------------------
+
+/// The app's side of the helper process.
+struct Worker {
+    /// Kept so the process is stopped when this is dropped (`kill_on_drop`).
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
+/// Why the helper gave no answer.
+enum Failure {
+    /// It could not be started.
+    NoHelper,
+    /// A helper started for this SVG stopped while it worked on it.
+    Stopped,
+}
+
+#[derive(Default)]
+struct Drawer {
+    worker: Option<Worker>,
+    /// Fingerprints of the SVG files that stopped the helper or took too long. Each
+    /// costs one helper process, not one every time the image is shown.
+    refused: HashSet<u64>,
+}
+
+/// Starts the program again as the SVG helper.
+fn worker_command() -> std::io::Result<Command> {
+    let mut command = Command::new(std::env::current_exe()?);
+    #[cfg(not(test))]
+    command.arg(WORKER_ARG);
+    // Under `cargo test` this program is the test runner. It runs the helper as the
+    // test `svg_helper_process`.
+    #[cfg(test)]
+    command.args(["images::tests::svg_helper_process", "--exact", "--ignored", "--nocapture"]).env(tests::HELPER_ENV, "1");
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    Ok(command)
+}
+
+impl Worker {
+    async fn start() -> std::io::Result<Worker> {
+        let not_helper = || std::io::Error::other("the SVG helper did not start");
+        let mut child = worker_command()?.spawn()?;
+        let stdin = child.stdin.take().ok_or_else(not_helper)?;
+        let mut stdout = child.stdout.take().ok_or_else(not_helper)?;
+        // Wait for the greeting. Another program started by mistake does not send
+        // it, and is stopped when `child` is dropped. (The test runner prints a
+        // line of its own first.)
+        let greeting = async {
+            let mut seen = Vec::new();
+            let mut byte = [0u8; 1];
+            while !seen.ends_with(WORKER_HELLO) {
+                if seen.len() > 4096 {
+                    return Err(not_helper());
+                }
+                stdout.read_exact(&mut byte).await?;
+                seen.push(byte[0]);
+            }
+            Ok(())
+        };
+        tokio::time::timeout(WORKER_TIMEOUT, greeting).await.map_err(|_| not_helper())??;
+        Ok(Worker { _child: child, stdin, stdout })
+    }
+
+    /// Request: one byte for the use, the length in four bytes, the SVG.
+    async fn send(&mut self, bytes: &[u8], usage: Use) -> std::io::Result<()> {
+        let mut head = [u8::from(usage == Use::Icon), 0, 0, 0, 0];
+        head[1..].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        self.stdin.write_all(&head).await?;
+        self.stdin.write_all(bytes).await?;
+        self.stdin.flush().await
+    }
+
+    /// Answer: the length in four bytes, the PNG. Length 0 means the SVG was refused.
+    async fn receive(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        let mut length = [0u8; 4];
+        self.stdout.read_exact(&mut length).await?;
+        let length = u32::from_le_bytes(length) as usize;
+        if length > MAX_PNG_BYTES {
+            return Err(std::io::Error::other("the SVG helper sent too much"));
+        }
+        let mut png = vec![0u8; length];
+        self.stdout.read_exact(&mut png).await?;
+        Ok((length > 0).then_some(png))
+    }
+}
+
+impl Drawer {
+    async fn request(&mut self, bytes: &[u8], usage: Use) -> Result<Option<Vec<u8>>, Failure> {
+        // A helper kept from an earlier image may have stopped since, for a reason
+        // that has nothing to do with this SVG. Then try once more with a new one:
+        // only an SVG that stops a helper started for it is blamed.
+        loop {
+            let new = self.worker.is_none();
+            if new {
+                self.worker = Some(Worker::start().await.map_err(|_| Failure::NoHelper)?);
+            }
+            let Some(worker) = self.worker.as_mut() else { return Err(Failure::NoHelper) };
+            let answer = match worker.send(bytes, usage).await {
+                Ok(()) => worker.receive().await,
+                Err(e) => Err(e),
+            };
+            match answer {
+                Ok(png) => return Ok(png),
+                Err(_) => {
+                    self.worker = None;
+                    if new {
+                        return Err(Failure::Stopped);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draws an SVG to a PNG in the helper process, one at a time. Returns None when
+/// the SVG is refused, when it stops the helper (a crash, or too much memory) and
+/// when it takes too long. The helper is then stopped, and the next SVG starts a
+/// new one.
+async fn draw(bytes: &[u8], usage: Use) -> Option<Clean> {
+    static DRAWER: LazyLock<Mutex<Drawer>> = LazyLock::new(Mutex::default);
+    static KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+    if bytes.len() > MAX_SVG_BYTES {
+        return None;
+    }
+    let fingerprint = KEY.hash_one((usage == Use::Icon, bytes));
+    let mut drawer = DRAWER.lock().await;
+    if drawer.refused.contains(&fingerprint) {
+        return None;
+    }
+    let outcome = tokio::time::timeout(WORKER_TIMEOUT, drawer.request(bytes, usage)).await;
+    match outcome {
+        Ok(Ok(png)) => png.map(|bytes| Clean { bytes, mime: "image/png" }),
+        Ok(Err(Failure::NoHelper)) => {
+            drawer.worker = None;
+            None
+        }
+        // The SVG stopped the helper, or the time is up.
+        Ok(Err(Failure::Stopped)) | Err(_) => {
+            drawer.worker = None;
+            if drawer.refused.len() >= MAX_REFUSED {
+                drawer.refused.clear();
+            }
+            drawer.refused.insert(fingerprint);
+            None
+        }
+    }
+}
+
+/// The SVG helper process: `main` calls this, and nothing else, when the program
+/// is started with `WORKER_ARG`. It reads SVG files from standard input and writes
+/// PNG files to standard output until the app closes the pipe. It opens no window,
+/// no database and no network connection. When an SVG makes it crash or run out of
+/// memory, only this process ends.
+pub fn worker_main() {
+    use std::io::{Read, Write};
+    CAP.store(WORKER_MEMORY, Ordering::Relaxed);
+    // The app stops a helper that takes too long. If the app has quit by then,
+    // nobody would, and the helper could draw for minutes. So it also stops itself.
+    static STARTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let started = |at| *STARTED.lock().unwrap_or_else(|e| e.into_inner()) = at;
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let since = *STARTED.lock().unwrap_or_else(|e| e.into_inner());
+        if since.is_some_and(|at| at.elapsed() > WORKER_TIMEOUT + Duration::from_secs(2)) {
+            std::process::abort();
+        }
+    });
+    let (mut input, mut output) = (std::io::stdin().lock(), std::io::stdout().lock());
+    if output.write_all(WORKER_HELLO).and_then(|()| output.flush()).is_err() {
+        return;
+    }
+    loop {
+        let mut head = [0u8; 5];
+        if input.read_exact(&mut head).is_err() {
+            return;
+        }
+        let usage = if head[0] == 1 { Use::Icon } else { Use::Article };
+        let length = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
+        if length > MAX_SVG_BYTES {
+            return;
+        }
+        let mut bytes = vec![0u8; length];
+        if input.read_exact(&mut bytes).is_err() {
+            return;
+        }
+        started(Some(std::time::Instant::now()));
+        let png = svg(&bytes, usage).map(|clean| clean.bytes).unwrap_or_default();
+        started(None);
+        let sent = output
+            .write_all(&(png.len() as u32).to_le_bytes())
+            .and_then(|()| output.write_all(&png))
+            .and_then(|()| output.flush());
+        if sent.is_err() {
+            return;
+        }
+    }
+}
+
+/// The program's memory allocator: the system's, with an optional limit on the
+/// memory in use. Only the SVG helper sets a limit. Past it an allocation fails,
+/// which ends the helper. (The operating system's own limits do not work for this
+/// everywhere: macOS does not enforce one.)
+pub struct Capped;
+
+/// The limit in bytes. 0 means no limit, and then nothing is counted.
+static CAP: AtomicUsize = AtomicUsize::new(0);
+static USED: AtomicUsize = AtomicUsize::new(0);
+
+impl Capped {
+    fn take(size: usize) -> bool {
+        let cap = CAP.load(Ordering::Relaxed);
+        if cap == 0 {
+            return true;
+        }
+        if USED.fetch_add(size, Ordering::Relaxed).saturating_add(size) > cap {
+            USED.fetch_sub(size, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    fn give(size: usize) {
+        if CAP.load(Ordering::Relaxed) != 0 {
+            // Memory from before the limit was set is freed too: stop at zero.
+            let _ = USED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| Some(used.saturating_sub(size)));
+        }
+    }
+}
+
+// Safety: every call goes to `System` with the same arguments. Refusing an
+// allocation (a null pointer) is allowed by the `GlobalAlloc` contract.
+unsafe impl GlobalAlloc for Capped {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !Self::take(layout.size()) {
+            return std::ptr::null_mut();
+        }
+        let pointer = System.alloc(layout);
+        if pointer.is_null() {
+            Self::give(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if !Self::take(layout.size()) {
+            return std::ptr::null_mut();
+        }
+        let pointer = System.alloc_zeroed(layout);
+        if pointer.is_null() {
+            Self::give(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        System.dealloc(pointer, layout);
+        Self::give(layout.size());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let old = layout.size();
+        if new_size > old && !Self::take(new_size - old) {
+            return std::ptr::null_mut();
+        }
+        let moved = System.realloc(pointer, layout, new_size);
+        if moved.is_null() {
+            if new_size > old {
+                Self::give(new_size - old);
+            }
+        } else if new_size < old {
+            Self::give(old - new_size);
+        }
+        moved
+    }
+}
+
 /// The fonts on this computer, for text in SVG images. Read once.
 fn fonts() -> Arc<fontdb::Database> {
     static FONTS: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| {
@@ -173,6 +475,11 @@ fn fonts() -> Arc<fontdb::Database> {
 
 /// Draws an SVG to a PNG. Drawings are sharp at any size, so one is drawn at up to
 /// twice its own size (for high-density screens), and an icon at the full icon size.
+///
+/// Call this only in the helper process (`worker_main`); the app uses `draw`. A
+/// crafted SVG can end the process that calls this: usvg and resvg follow nested
+/// elements and chains of clip paths, masks and `<tspan>` with recursion, and a
+/// few thousand levels overflow the stack.
 pub fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
     if bytes.len() > MAX_SVG_BYTES {
         return None;
@@ -185,7 +492,8 @@ pub fn svg(bytes: &[u8], usage: Use) -> Option<Clean> {
             resolve_data: Box::new(|_, _, _| None),
             resolve_string: Box::new(|_, _| None),
         },
-        fontdb: fonts(),
+        // Reading the list of fonts can take a second. Most icons have no text.
+        fontdb: if bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"text")) { fonts() } else { Arc::default() },
         ..Default::default()
     };
     // usvg stops at a million elements, which bounds files that multiply themselves
@@ -368,6 +676,71 @@ mod tests {
             }
         }
         !crc
+    }
+
+    /// Set for the copy of the test program that runs as the SVG helper.
+    pub const HELPER_ENV: &str = "TIDINGS_SVG_HELPER";
+
+    /// Not a test: `worker_command` starts the test program again with this name,
+    /// and it then is the SVG helper process. Run in any other way, it does nothing.
+    #[test]
+    #[ignore = "started by the SVG tests as their helper process"]
+    fn svg_helper_process() {
+        if std::env::var_os(HELPER_ENV).is_some() {
+            worker_main();
+        }
+    }
+
+    fn drawing(size: u32, body: &str) -> Vec<u8> {
+        format!("<svg xmlns='http://www.w3.org/2000/svg' width='{size}' height='{size}'>{body}</svg>").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn crafted_svg_stops_only_the_helper() {
+        let draw = |svg: Vec<u8>| clean(svg, "image/svg+xml", Use::Article);
+        let good = drawing(40, "<rect width='20' height='20' fill='red'/>");
+        let out = draw(good.clone()).await.unwrap();
+        assert_eq!((out.mime, decode(&out).width()), ("image/png", 80));
+
+        // Each of these overflows the stack inside usvg, which ends the process
+        // that draws it: 1000 nested groups, chains of 2000 clip paths and masks,
+        // and 1000 nested <tspan>. The helper ends, this process does not, and the
+        // next SVG is drawn by a new helper.
+        let nested = format!("{}<rect width='1' height='1'/>{}", "<g>".repeat(1000), "</g>".repeat(1000));
+        let chain = |tag: &str, attr: &str| {
+            let mut body = String::new();
+            for i in 0..2000 {
+                body.push_str(&format!("<{tag} id='c{i}' {attr}='url(#c{})'><rect width='5' height='5' fill='white'/></{tag}>", i + 1));
+            }
+            body + &format!("<{tag} id='c2000'><rect width='5' height='5' fill='white'/></{tag}><rect {attr}='url(#c0)' width='9' height='9'/>")
+        };
+        let spans = format!("<text>{}x{}</text>", "<tspan>".repeat(1000), "</tspan>".repeat(1000));
+        for body in [nested, chain("clipPath", "clip-path"), chain("mask", "mask"), spans] {
+            let bad = drawing(40, &body);
+            assert!(draw(bad.clone()).await.is_none());
+            assert!(draw(good.clone()).await.is_some());
+            // The second time it is refused from memory.
+            assert!(draw(bad).await.is_none());
+        }
+
+        // Memory: each nested group with its own opacity gets a layer, here up to
+        // 256 MB each. The helper's limit ends it at the second or third.
+        let layers = format!(
+            "{}<rect x='-90000' y='-90000' width='180000' height='180000'/>{}",
+            "<g opacity='0.9'>".repeat(12),
+            "</g>".repeat(12)
+        );
+        assert!(draw(drawing(1600, &layers)).await.is_none());
+        assert!(draw(good.clone()).await.is_some());
+
+        // Time: 400 filter steps over the whole drawing take minutes. The helper is
+        // stopped after `WORKER_TIMEOUT`.
+        let steps = "<feTurbulence baseFrequency='0.9' numOctaves='10'/><feGaussianBlur stdDeviation='40'/>".repeat(200);
+        let slow = format!("<filter id='f' x='-5' y='-5' width='11' height='11'>{steps}</filter><rect filter='url(#f)' width='1600' height='1600'/>");
+        let started = std::time::Instant::now();
+        assert!(draw(drawing(1600, &slow)).await.is_none());
+        assert!(started.elapsed() < WORKER_TIMEOUT + Duration::from_secs(3));
+        assert!(draw(good).await.is_some());
     }
 
     #[test]

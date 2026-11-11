@@ -383,7 +383,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -541,7 +541,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -759,6 +759,81 @@ async fn media_blocks() {
     assert_eq!(c.bytes, expect(size - 10, 10));
     assert_eq!(c.content_range, Some(format!("bytes {}-{}/{size}", size - 10, size - 1)));
     let c = fetch(&net, &media, &url, Some(&format!("bytes={size}-"))).await.unwrap();
+    assert_eq!(c.status, 416);
+}
+
+/// N-1: a playlist (HLS, DASH) lists addresses that the player fetches by itself,
+/// past net.rs. The media proxy gives the player no playlist, whatever the address
+/// or the content type says, and also when the player starts in the middle.
+#[tokio::test]
+async fn media_refuses_playlists() {
+    use crate::media::{fetch, is_playlist_error, Media, CHUNK};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    net.unguarded = true; // the test servers are on 127.0.0.1
+
+    // The address inside the playlist: nothing may ever ask for it.
+    let segments = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let segment_port = segments.local_addr().unwrap().port();
+    let segment_hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = segment_hits.clone();
+    tokio::spawn(async move {
+        while segments.accept().await.is_ok() {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    // A host that calls everything audio/mpeg, like a feed that lies about a file.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let segment = format!("http://127.0.0.1:{segment_port}/segment.ts");
+                let (kind, body) = match path.as_str() {
+                    "/episode.mp3" => (
+                        "audio/mpeg",
+                        format!("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n{segment}\n#EXT-X-ENDLIST\n").into_bytes(),
+                    ),
+                    "/video.mp4" => ("video/mp4", format!("<?xml version=\"1.0\"?><MPD><BaseURL>{segment}</BaseURL></MPD>").into_bytes()),
+                    "/typed.mp3" => ("application/vnd.apple.mpegurl", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
+                    _ => ("audio/mpeg", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
+                };
+                let mut reply =
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                reply.extend(body);
+                let _ = stream.write_all(&reply).await;
+            });
+        }
+    });
+
+    let media = std::sync::Arc::new(Media::default());
+    let late = format!("bytes={}-", CHUNK + 5);
+    for (path, range) in [("episode.mp3", "bytes=0-"), ("video.mp4", "bytes=0-1"), ("typed.mp3", "bytes=0-"), ("episode.mp3", late.as_str())] {
+        let url = format!("http://127.0.0.1:{port}/{path}");
+        let err = fetch(&net, &media, &url, Some(range)).await.err().unwrap_or_else(|| panic!("{path} {range} was played"));
+        assert!(is_playlist_error(&err), "{path}: {err}");
+        assert!(err.to_string().contains("streaming playlist"), "{err}");
+    }
+    // A real file on the same host plays.
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/real.mp3"), Some("bytes=0-")).await.unwrap();
+    assert_eq!((c.status, c.bytes.as_slice()), (206, &b"ID3\x04\x00\x00\x00\x00\x00\x00"[..]));
+    assert_eq!(segment_hits.load(Ordering::SeqCst), 0);
+
+    // Starting in the middle of a real file first reads (and checks) its start.
+    let size = (CHUNK * 3) as usize;
+    let (port, _) = range_server(size, CHUNK as usize).await;
+    let start = 2 * CHUNK as usize + 7;
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/v.mp4"), Some(&format!("bytes={start}-"))).await.unwrap();
+    assert_eq!(c.bytes[..4], [(start % 251) as u8, ((start + 1) % 251) as u8, ((start + 2) % 251) as u8, ((start + 3) % 251) as u8]);
+
+    // A `Range` far past any file is refused before any sum of offsets can overflow.
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/v.mp4"), Some(&format!("bytes={}-", u64::MAX - 1))).await.unwrap();
     assert_eq!(c.status, 416);
 }
 
@@ -994,7 +1069,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -1397,6 +1472,71 @@ fn upgrade_resets_local_feeds_decided_by_dns() {
     let conn = db::open(&path).unwrap();
     let local = |id| db::fetch_info(&conn, id).unwrap().local;
     assert_eq!((local(by_dns), local(by_ip), local(by_name), local(public)), (false, true, true, false));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// N-6: the 0.9.2 upgrade allowed every feed with a private address. One that never
+/// answered with a feed and is older than the consent question loses that.
+#[test]
+fn upgrade_takes_local_consent_from_feeds_that_never_worked() {
+    let (conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let add = |url: &str| db::insert_feed(&conn, url, None, None, None).unwrap();
+    let (works, dead, asked, public) =
+        (add("http://192.168.1.5/feed"), add("http://192.168.1.1/cgi-bin/reboot"), add("http://nas.local/feed"), add("https://example.com/feed"));
+    conn.execute("UPDATE feeds SET local = 1 WHERE id IN (?1, ?2, ?3)", [works, dead, asked]).unwrap();
+    // Two feeds from before 0.9.2, one of which was fetched with success. The
+    // third was added today: the user allowed its address.
+    conn.execute("UPDATE feeds SET created_at = 1700000000 WHERE id IN (?1, ?2)", [works, dead]).unwrap();
+    conn.execute("UPDATE feeds SET last_success = 1700000500 WHERE id = ?1", [works]).unwrap();
+    conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    let local = |id| db::fetch_info(&conn, id).unwrap().local;
+    assert_eq!((local(works), local(dead), local(asked), local(public)), (true, false, true, false));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// N-7: after a feed, a folder, everything or a brief is deleted, the text is in
+/// neither the database file nor its write-ahead log.
+#[test]
+fn deletes_leave_nothing_in_the_log() {
+    let (mut conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let wal = dir.join("test.db-wal");
+    let holds = |needle: &str| {
+        [&path, &wal].iter().any(|file| {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+        })
+    };
+    let folder = db::create_folder(&conn, "Folder", None).unwrap();
+    let alone = db::insert_feed(&conn, "https://one.example/feed", None, Some("One"), None).unwrap();
+    let inside = db::insert_feed(&conn, "https://two.example/feed", Some(folder), Some("Two"), None).unwrap();
+    let other = db::insert_feed(&conn, "https://three.example/feed", None, Some("Three"), None).unwrap();
+    let t = db::now();
+    store(&mut conn, alone, &[article("zebra-quartz-alone", t, "")]);
+    store(&mut conn, inside, &[article("zebra-quartz-inside", t, "")]);
+    store(&mut conn, other, &[article("zebra-quartz-other", t, "")]);
+    let brief = db::insert_brief(&conn, "Morning", "model", "{}", "zebra-quartz-brief").unwrap();
+    assert!(holds("zebra-quartz-alone") && holds("zebra-quartz-inside") && holds("zebra-quartz-other") && holds("zebra-quartz-brief"));
+
+    // What each delete command does: the delete, then the checkpoint.
+    db::delete_feed(&conn, alone).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-alone"));
+    db::delete_items(&conn, &[db::Item::Folder { id: folder }]).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-inside"));
+    db::delete_brief(&conn, brief).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-brief"));
+    db::delete_all_subscriptions(&conn).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-other"));
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -35,8 +35,11 @@ jobs:
       - name: cargo audit
         # Fails on vulnerabilities. "Unmaintained" and "unsound" notices are printed
         # as warnings; they come from Tauri's GTK dependencies.
+        # The tool's version is fixed, like the actions: a new release of it is
+        # not run here before someone has chosen it. The list of advisories it
+        # downloads is always the current one.
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --locked --version 0.22.2
           cargo audit --file src-tauri/Cargo.lock
 
   build:
@@ -93,7 +96,9 @@ jobs:
       - run: npm ci
       - run: npm run check
       # --locked: fail if Cargo.lock does not match Cargo.toml, so the build uses
-      # exactly the dependency versions that were reviewed.
+      # exactly the dependency versions that were reviewed. This also covers the
+      # `tauri build` below: it runs only after this step has passed, with the
+      # same Cargo.lock.
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - run: npx tauri build ${{ matrix.args }}

@@ -28,6 +28,10 @@ mod tests;
 
 use std::sync::Arc;
 
+/// The system allocator. In the SVG helper process it also enforces a memory limit.
+#[global_allocator]
+static ALLOCATOR: images::Capped = images::Capped;
+
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -98,6 +102,13 @@ fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
 }
 
 fn main() {
+    // The SVG helper: the app starts itself a second time to draw SVG images, so
+    // that an SVG which crashes the drawing code ends that process and not the app
+    // (see images.rs). It must do nothing else: no window, no database, no network.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == images::WORKER_ARG) {
+        return images::worker_main();
+    }
+
     #[cfg(webkitgtk)]
     webkitgtk_workarounds();
 

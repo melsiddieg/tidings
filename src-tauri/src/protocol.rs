@@ -136,6 +136,8 @@ async fn proxy_media(state: &AppState, encoded: &str, range: Option<&str>) -> Re
             }
             builder.body(chunk.bytes).unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
         }
+        // A playlist instead of a file: the player gets nothing of it.
+        Err(e) if media::is_playlist_error(&e) => empty(StatusCode::UNSUPPORTED_MEDIA_TYPE),
         Err(_) => empty(StatusCode::BAD_GATEWAY),
     }
 }

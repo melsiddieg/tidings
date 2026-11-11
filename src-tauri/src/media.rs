@@ -4,6 +4,9 @@
 //! header. Rust fetches that byte range from the audio host and returns it, so
 //! the player can seek without downloading the whole file, and the host never
 //! talks to the web view (no cookies, no referrer, proxy setting applies).
+//!
+//! Only single files are played. A playlist (HLS, DASH and the like) is refused:
+//! the player would fetch the addresses in it by itself. See `is_playlist`.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -30,6 +33,14 @@ const READ_AHEAD: u64 = 3;
 const CACHED_BLOCKS: usize = 24;
 /// Upper bound when a server ignores ranges and we must read from the start.
 const MAX_SKIP: u64 = 400 * 1024 * 1024;
+/// No file is this large (a million gigabytes). A `Range` past it is refused, so
+/// that sums of offsets cannot overflow.
+const MAX_OFFSET: u64 = 1 << 50;
+/// Files whose start was checked for a playlist are remembered, up to this many.
+const CHECKED_FILES: usize = 64;
+/// The error for an address that answers with a playlist instead of a file.
+const PLAYLIST: &str = "This is a streaming playlist (HLS or DASH), not an audio or video file. \
+    Tidings plays single files only";
 
 /// Final URLs after redirects, so each slice does not repeat the redirect chain.
 #[derive(Default)]
@@ -42,6 +53,8 @@ type Cell = Arc<OnceCell<Arc<Chunk>>>;
 pub struct Media {
     resolved: ResolvedUrls,
     blocks: Mutex<LruCache<(String, u64), Cell>>,
+    /// Files whose first block was fetched and is not a playlist.
+    checked: Mutex<LruCache<String, ()>>,
 }
 
 impl Default for Media {
@@ -49,6 +62,7 @@ impl Default for Media {
         Media {
             resolved: ResolvedUrls::default(),
             blocks: Mutex::new(LruCache::new(NonZeroUsize::new(CACHED_BLOCKS).unwrap())),
+            checked: Mutex::new(LruCache::new(NonZeroUsize::new(CHECKED_FILES).unwrap())),
         }
     }
 }
@@ -68,6 +82,74 @@ impl Media {
     fn has(&self, source: &str, index: u64) -> bool {
         self.blocks.lock().unwrap_or_else(|e| e.into_inner()).contains(&(source.to_string(), index))
     }
+
+    fn is_checked(&self, source: &str) -> bool {
+        self.checked.lock().unwrap_or_else(|e| e.into_inner()).get(source).is_some()
+    }
+
+    fn set_checked(&self, source: &str) {
+        self.checked.lock().unwrap_or_else(|e| e.into_inner()).put(source.to_string(), ());
+    }
+}
+
+/// Whether `err` says that the address holds a playlist (see `is_playlist`).
+pub fn is_playlist_error(err: &Error) -> bool {
+    matches!(err, Error::Msg(text) if text == PLAYLIST)
+}
+
+/// Whether a file starts like a playlist or a manifest instead of audio or video
+/// data: HLS (`#EXTM3U`), DASH and Smooth Streaming (XML), SDP, PLS, ASX and so on.
+///
+/// A playlist is a list of addresses that the player then fetches by itself.
+/// GStreamer and AVFoundation make those requests directly: not through net.rs,
+/// not through the proxy setting, and without the private-address checks. A feed
+/// could so reach `http://192.168.1.1/...`, or make the player connect without
+/// Tor. So a playlist must never reach the player.
+///
+/// All these formats are text, and no audio or video format starts with text
+/// (MP3, MP4, Ogg, WebM, FLAC, WAV and AAC all have bytes below 0x20 or invalid
+/// UTF-8 within their first bytes). So the rule is: a file that starts with text
+/// is refused.
+fn is_playlist(head: &[u8]) -> bool {
+    let head = &head[..head.len().min(1024)];
+    // Text in UTF-16, with or without a byte order mark: `<` or `#EXT` first.
+    let wide = head.strip_prefix(&[0xFF, 0xFE]).or_else(|| head.strip_prefix(&[0xFE, 0xFF])).unwrap_or(head);
+    for first in [0, 1] {
+        // `first` is where the ASCII byte of each two-byte character sits.
+        let ascii: Vec<u8> = wide
+            .chunks_exact(2)
+            .take(4)
+            .take_while(|pair| pair[1 - first] == 0 && pair[first].is_ascii_graphic())
+            .map(|pair| pair[first])
+            .collect();
+        if ascii.len() == 4 && (ascii[0] == b'<' || ascii.eq_ignore_ascii_case(b"#EXT")) {
+            return true;
+        }
+    }
+    let text = head.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(head).trim_ascii_start();
+    // A playlist followed by other bytes is still a playlist to a player.
+    let starts = |marker: &[u8]| text.len() >= marker.len() && text[..marker.len()].eq_ignore_ascii_case(marker);
+    if starts(b"<") || starts(b"#EXTM3U") || starts(b"[playlist]") || starts(b"v=0\n") || starts(b"v=0\r") {
+        return true;
+    }
+    // Any other text: a plain list of addresses, for example.
+    let control = |b: &u8| *b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C);
+    if text.is_empty() || text.iter().any(control) {
+        return false;
+    }
+    match std::str::from_utf8(text) {
+        Ok(_) => true,
+        // Cut in the middle of a character at the end of `head`.
+        Err(e) => e.error_len().is_none() && e.valid_up_to() > 0,
+    }
+}
+
+/// Content types of playlists. The player may go by the type alone.
+fn is_playlist_type(content_type: &str) -> bool {
+    let t = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    ["mpegurl", "dash+xml", "vnd.ms-sstr+xml", "application/sdp", "x-scpls", "xspf+xml", "smil", "x-ms-asx", "x-ms-wax", "x-ms-wvx"]
+        .iter()
+        .any(|playlist| t.contains(playlist))
 }
 
 impl ResolvedUrls {
@@ -187,8 +269,16 @@ fn media_type(header: &str, url: &str) -> String {
 /// next `READ_AHEAD` blocks are fetched in the background.
 pub async fn fetch(net: &Net, media: &Arc<Media>, source: &str, range: Option<&str>) -> Result<Chunk> {
     let (start, end) = parse_range(range);
+    if start > MAX_OFFSET {
+        return Ok(Chunk { status: 416, mime: "audio/mpeg".into(), bytes: Vec::new(), content_range: None });
+    }
     let wanted = end.unwrap_or(u64::MAX).min(start + CHUNK - 1) - start + 1;
     let first = start / CHUNK;
+    // The start of a file is checked before any part of it is played, also when
+    // the player begins in the middle (see `is_playlist`).
+    if first != 0 && !media.is_checked(source) {
+        block(net, media, source, 0).await?;
+    }
     let head = block(net, media, source, first).await?;
     let total = total_size(&head);
     let offset = (start - first * CHUNK) as usize;
@@ -242,9 +332,16 @@ async fn block(net: &Net, media: &Media, source: &str, index: u64) -> Result<Arc
                 chunk.bytes.extend_from_slice(&more.bytes);
                 chunk.content_range = Some(format!("bytes {start}-{}/{total}", start + chunk.bytes.len() as u64 - 1));
             }
+            // A playlist is not kept, so no block 0 in memory holds one.
+            if index == 0 && is_playlist(&chunk.bytes) {
+                return Err(Error::msg(PLAYLIST));
+            }
             Ok::<_, Error>(Arc::new(chunk))
         })
         .await?;
+    if index == 0 {
+        media.set_checked(source);
+    }
     Ok(block.clone())
 }
 
@@ -306,7 +403,11 @@ async fn fetch_range(net: &Net, cache: &ResolvedUrls, source: &str, start: u64, 
             return Err(Error::msg(format!("The media host returned HTTP {}", status.as_u16())));
         }
         cache.put(source, response.url().as_str());
-        let mime = media_type(&net::content_type(response.headers()), response.url().as_str());
+        let content_type = net::content_type(response.headers());
+        if is_playlist_type(&content_type) {
+            return Err(Error::msg(PLAYLIST));
+        }
+        let mime = media_type(&content_type, response.url().as_str());
 
         if status == StatusCode::PARTIAL_CONTENT {
             let content_range = response
@@ -379,6 +480,61 @@ mod tests {
         );
         let plain = "https://aphid.fireside.fm/d/1437767933/c91b/280e.mp3";
         assert_eq!(strip_trackers(plain), plain);
+    }
+
+    #[test]
+    fn playlists_are_told_from_media() {
+        // Playlists and manifests, in the forms a player accepts.
+        let hls = b"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nhttp://127.0.0.1:8001/segment.ts\n";
+        assert!(is_playlist(hls));
+        assert!(is_playlist(b"\xEF\xBB\xBF\r\n  #extm3u\nhttp://192.168.1.1/a.ts"));
+        assert!(is_playlist(b"<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\"></MPD>"));
+        assert!(is_playlist(b"<MPD><BaseURL>http://10.0.0.1/</BaseURL></MPD>"));
+        assert!(is_playlist(b"<SmoothStreamingMedia MajorVersion=\"2\">"));
+        assert!(is_playlist(b"<asx version=\"3.0\"><entry><ref href=\"http://10.0.0.1/\"/></entry></asx>"));
+        assert!(is_playlist(b"[playlist]\nFile1=http://10.0.0.1/a.mp3\n"));
+        assert!(is_playlist(b"v=0\r\no=- 0 0 IN IP4 10.0.0.1\r\n"));
+        assert!(is_playlist(b"http://10.0.0.1/a.mp3\nhttp://10.0.0.1/b.mp3\n"));
+        // Bytes after the playlist do not hide it.
+        let mut padded = hls.to_vec();
+        padded.extend_from_slice(&[0u8; 64]);
+        assert!(is_playlist(&padded));
+        // UTF-16, with and without a byte order mark.
+        let utf16 = |text: &str, big: bool| -> Vec<u8> {
+            text.encode_utf16().flat_map(|u| if big { u.to_be_bytes() } else { u.to_le_bytes() }).collect()
+        };
+        assert!(is_playlist(&utf16("#EXTM3U\nhttp://10.0.0.1/a.ts", false)));
+        assert!(is_playlist(&utf16("<MPD></MPD>", true)));
+        assert!(is_playlist(&[&[0xFF, 0xFE][..], &utf16("<?xml version='1.0'?><MPD/>", false)].concat()));
+        // Long text that ends inside a character at the 1024-byte limit.
+        assert!(is_playlist(format!("a{}", "é".repeat(600)).as_bytes()));
+
+        // The starts of real audio and video files.
+        let media: [&[u8]; 12] = [
+            b"ID3\x04\x00\x00\x00\x00\x02\x01TIT2\x00\x00\x00\x0c",
+            b"\xFF\xFB\x90\x64\x00\x00\x00\x00",
+            b"\xFF\xF1\x50\x80\x02\x1F\xFC",
+            b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2mp41",
+            // An MP4 whose first box is 60 bytes long: its size is the byte `<`.
+            b"\x00\x00\x00\x3Cftypmp42\x00\x00\x00\x00mp42isom",
+            b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"fLaC\x00\x00\x00\x22\x10\x00\x10\x00",
+            b"RIFF$   WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00",
+            b"\x1A\x45\xDF\xA3\x9F\x42\x86\x81\x01",
+            b"\x47\x40\x00\x10\x00\x00\xB0\x0D",
+            b"\x00\x00\x00\x00\x00\x00\xFF\xFB\x90\x64",
+            b"",
+        ];
+        for head in media {
+            assert!(!is_playlist(head), "{head:?}");
+        }
+
+        for playlist in ["application/vnd.apple.mpegurl", "application/x-mpegURL; charset=utf-8", "audio/mpegurl", "application/dash+xml", "application/sdp"] {
+            assert!(is_playlist_type(playlist), "{playlist}");
+        }
+        for media in ["audio/mpeg", "video/mp4", "application/octet-stream", "text/plain", ""] {
+            assert!(!is_playlist_type(media), "{media}");
+        }
     }
 
     #[test]
