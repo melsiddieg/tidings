@@ -294,6 +294,14 @@ impl Drawer {
     }
 }
 
+/// Tests that draw through the helper hold this, so they run one at a time. Each
+/// test has its own tokio runtime, and a helper's pipes are read by the runtime
+/// that started it. A test that got the helper of another running test would wait
+/// for a runtime that is busy with that test, and then blame its SVG for the wait.
+/// (The app has one runtime.)
+#[cfg(test)]
+pub(crate) static HELPER_TESTS: Mutex<()> = Mutex::const_new(());
+
 /// Draws an SVG to a PNG in the helper process, one at a time. Returns None when
 /// the SVG is refused, when it stops the helper (a crash, or too much memory) and
 /// when it takes too long. The helper is then stopped, and the next SVG starts a
@@ -725,6 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn crafted_svg_stops_only_the_helper() {
+        let _one_at_a_time = HELPER_TESTS.lock().await;
         let draw = |svg: Vec<u8>| clean(svg, "image/svg+xml", Use::Article);
         let good = drawing(40, "<rect width='20' height='20' fill='red'/>");
         let out = draw(good.clone()).await.unwrap();

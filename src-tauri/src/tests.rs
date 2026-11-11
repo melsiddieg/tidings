@@ -1713,6 +1713,7 @@ async fn feed_content_limits() {
 #[tokio::test]
 async fn svg_is_drawn_to_png() {
     use crate::images::{clean, svg, Use};
+    let _one_at_a_time = crate::images::HELPER_TESTS.lock().await;
     let picture = |c: &crate::images::Clean| image::load_from_memory(&c.bytes).unwrap().to_rgba8();
     let red = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
         <script>alert(1)</script>
