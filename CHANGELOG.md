@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-11
+
 ### Security
 Fixes from a third audit, of 0.9.3 on Linux.
 - A crafted SVG could crash Tidings. A file of a few kilobytes with 1000 nested
@@ -378,7 +380,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/melsiddieg/tidings/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/melsiddieg/tidings/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/melsiddieg/tidings/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/melsiddieg/tidings/compare/v0.9.0...v0.9.1
