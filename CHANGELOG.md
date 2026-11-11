@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-11
+
 ### Security
 Notes from the review of 0.9.4.
 - A refresh now empties the database's write-ahead log when it is done. A refresh
@@ -394,7 +396,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/melsiddieg/tidings/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/melsiddieg/tidings/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/melsiddieg/tidings/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/melsiddieg/tidings/compare/v0.9.1...v0.9.2
