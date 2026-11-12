@@ -49,7 +49,7 @@ echo "==> Building the UI"
 npm run build
 
 echo "==> Building the app ($OS $ARCH)"
-(cd src-tauri && cargo build --release --features tauri/custom-protocol)
+(cd src-tauri && cargo build --release --locked --features tauri/custom-protocol)
 
 VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
 NAME="tidings-$VERSION-$OS-$ARCH"

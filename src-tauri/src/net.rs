@@ -30,8 +30,17 @@ pub struct Net {
     /// Used only for a host the user chose (a feed they subscribed to or an address
     /// they typed) when that host is itself on a private network. See `Net::get`.
     pub local: Client,
-    /// Used for images and podcast audio. Same rules as `web`, with a shorter timeout.
-    pub image: Client,
+    /// Used for images, podcast audio and video, through `Net::public`. Same rules as
+    /// `web`, with a shorter timeout.
+    image: Client,
+    /// Tests only: lets `Net::public` reach the test servers on 127.0.0.1.
+    #[cfg(test)]
+    pub unguarded: bool,
+    /// Used only for the AI model server of briefs, which must be on this computer
+    /// or the local network (`check_local_model`). It never uses the proxy: the
+    /// request does not leave the local network, and Tor could not reach it anyway.
+    /// No redirects, so the server cannot send the request anywhere else.
+    model: Client,
     /// A proxy is set. The app then makes no DNS lookups of its own, so that with
     /// Tor every lookup goes through Tor.
     proxied: bool,
@@ -42,32 +51,88 @@ impl Net {
         let proxied = !settings.proxy.is_empty();
         let web = public_only(base_builder(settings)?, proxied, 8).build()?;
         let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 5).build()?;
-        // A private host may redirect within itself (http to https, a moved path)
-        // or out to a public host, but never to another private host.
+        // A private host may redirect within itself (http to https, a moved path),
+        // and nowhere else. This client does not check DNS answers (the host it is
+        // for is private), so a redirect to another name could lead to any other
+        // device on the local network.
         let local = base_builder(settings)?
             .redirect(Policy::custom(|attempt| {
                 let first = attempt.previous().first().cloned();
                 if attempt.previous().len() >= 8 {
                     attempt.error("too many redirects")
-                } else if first.is_some_and(|f| same_host(&f, attempt.url()))
-                    || host_looks_public(attempt.url())
-                {
+                } else if first.is_some_and(|f| same_site(&f, attempt.url())) {
                     attempt.follow()
                 } else {
                     attempt.error(BLOCKED)
                 }
             }))
             .build()?;
-        Ok(Net { web, local, image, proxied })
+        let model = Client::builder()
+            .user_agent(settings.user_agent.clone())
+            .no_proxy()
+            .redirect(Policy::none())
+            .referer(false)
+            .connect_timeout(Duration::from_secs(10))
+            // A local name such as `gpu-box.lan` must also resolve to a local address:
+            // on someone else's network, its DNS could point the name anywhere.
+            .dns_resolver(Arc::new(PrivateOnlyResolver))
+            .build()?;
+        Ok(Net {
+            web,
+            local,
+            image,
+            model,
+            proxied,
+            #[cfg(test)]
+            unguarded: false,
+        })
     }
 
-    /// Starts a GET request for a feed, page or favicon. `trusted` is the address
-    /// the user chose: the feed this request belongs to, or the address they typed.
-    /// Private and local addresses are allowed only when `url` is on the same host
-    /// as `trusted` and that host is on a private network. Everything else, such as
-    /// links inside articles or a site link a feed points to, must be public.
+    /// Starts a GET request for an image, audio or video file. This is the one place
+    /// these requests start, and it refuses literal private addresses and local names
+    /// itself: the callers rewrite URLs (tracker removal, cached redirects, addresses
+    /// from yt-dlp and PeerTube), and a literal IP address never reaches the DNS
+    /// resolver that guards names.
+    pub fn public(&self, url: &str) -> Result<RequestBuilder> {
+        let parsed = Url::parse(url).map_err(|_| Error::msg("This is not a valid web address"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::msg("Only http:// and https:// addresses are supported"));
+        }
+        #[cfg(test)]
+        if self.unguarded {
+            return Ok(self.local.get(parsed.as_str()));
+        }
+        if !host_looks_public(&parsed) {
+            return Err(Error::blocked());
+        }
+        Ok(self.image.get(parsed.as_str()))
+    }
+
+    /// A `Net` that reaches nothing outside this computer, for when the saved proxy
+    /// setting cannot be used at startup. Falling back to a direct connection would
+    /// send everything around the proxy (Tor) without the user knowing. Every client
+    /// gets a proxy address where nothing listens, so requests fail before they leave.
+    pub fn offline() -> Result<Self> {
+        let settings = Settings { proxy: "http://127.0.0.1:1".into(), ..Settings::default() };
+        Net::new(&settings)
+    }
+
+    /// Starts a request to the AI model server for briefs. See `check_local_model`.
+    pub fn local_model(&self, method: reqwest::Method, url: &Url) -> Result<RequestBuilder> {
+        check_local_model(url, self.proxied)?;
+        Ok(self.model.request(method, url.as_str()))
+    }
+
+    /// Starts a GET request for a feed, page or favicon. `trusted` is an address on
+    /// the local network that the user has allowed by name: a feed whose `local`
+    /// column is 1, or an address they confirmed in the Add Feed dialog. Pass None
+    /// for everything else. Only `url`s on the same host and port as `trusted` use
+    /// the client that may reach private addresses; DNS plays no part in that
+    /// choice, so a name cannot earn local access by resolving to a private address.
+    /// Everything else, such as links inside articles or a site link a feed points
+    /// to, must be public.
     pub async fn get(&self, url: &Url, trusted: Option<&Url>) -> Result<RequestBuilder> {
-        if trusted.is_some_and(|t| same_host(t, url)) && self.is_private_host(url).await {
+        if trusted.is_some_and(|t| same_site(t, url)) {
             return Ok(self.local.get(url.as_str()));
         }
         // Literal IP addresses never reach the DNS resolver, so check them here.
@@ -81,25 +146,29 @@ impl Net {
     /// loopback IP, a local name such as `nas` or `printer.local`, or (without a
     /// proxy) a name whose DNS answers are all private.
     pub async fn is_private_host(&self, url: &Url) -> bool {
+        self.private_host(url).await.unwrap_or(false)
+    }
+
+    /// Like `is_private_host`, but None when the answer is not known now: the name
+    /// could not be looked up (offline, for example).
+    pub async fn private_host(&self, url: &Url) -> Option<bool> {
         match url.host() {
-            Some(Host::Ipv4(ip)) => !is_public_ip(IpAddr::V4(ip)),
-            Some(Host::Ipv6(ip)) => !is_public_ip(IpAddr::V6(ip)),
+            Some(Host::Ipv4(ip)) => Some(!is_public_ip(IpAddr::V4(ip))),
+            Some(Host::Ipv6(ip)) => Some(!is_public_ip(IpAddr::V6(ip))),
             Some(Host::Domain(name)) => {
                 if is_local_name(name) {
-                    return true;
+                    return Some(true);
                 }
                 if self.proxied {
-                    return false;
+                    return Some(false);
                 }
-                match tokio::net::lookup_host((name, 0)).await {
-                    Ok(addrs) => {
-                        let addrs: Vec<SocketAddr> = addrs.collect();
-                        !addrs.is_empty() && addrs.iter().all(|a| !is_public_ip(a.ip()))
-                    }
-                    Err(_) => false,
+                let addrs: Vec<SocketAddr> = tokio::net::lookup_host((name, 0)).await.ok()?.collect();
+                if addrs.is_empty() {
+                    return None;
                 }
+                Some(addrs.iter().all(|a| !is_public_ip(a.ip())))
             }
-            None => false,
+            None => Some(false),
         }
     }
 }
@@ -128,9 +197,35 @@ fn public_only(builder: ClientBuilder, proxied: bool, max_redirects: usize) -> C
     }
 }
 
-/// Same host, ignoring scheme and port (http to https on one machine is common).
-pub fn same_host(a: &Url, b: &Url) -> bool {
-    a.host().is_some() && a.host() == b.host()
+/// Same host and port. The one exception is the usual move between http on port 80
+/// and https on port 443. Another port is another service on that machine, which
+/// the user did not allow.
+pub fn same_site(a: &Url, b: &Url) -> bool {
+    let standard = |u: &Url| matches!((u.scheme(), u.port_or_known_default()), ("http", Some(80)) | ("https", Some(443)));
+    a.host().is_some()
+        && a.host() == b.host()
+        && (a.port_or_known_default() == b.port_or_known_default() || (standard(a) && standard(b)))
+}
+
+/// An address without its user name and password, for display.
+pub fn without_credentials(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_string(),
+    }
+}
+
+/// Start of the error that asks the UI for the user's consent before Tidings
+/// connects to a host on the local network. The host follows the colon.
+pub const LOCAL_CONSENT: &str = "local-network:";
+
+/// The error that asks for consent to connect to `url`'s host.
+pub fn needs_consent(url: &Url) -> Error {
+    Error::msg(format!("{LOCAL_CONSENT}{}", url.host_str().unwrap_or("")))
 }
 
 fn base_builder(settings: &Settings) -> Result<ClientBuilder> {
@@ -196,6 +291,9 @@ pub fn decode_html(bytes: &[u8], content_type: &str) -> String {
     text.into_owned()
 }
 
+/// False for every address that is not an ordinary address on the internet: private,
+/// loopback, link-local and the other special-purpose ranges, and IPv6 addresses
+/// that carry an IPv4 address inside (they can lead to that IPv4 address).
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -208,6 +306,9 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_multicast()
                 || (o[0] == 100 && (o[1] & 0xC0) == 64) // carrier-grade NAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99) // 6to4 relays
+                || (o[0] == 198 && (o[1] & 0xFE) == 18) // benchmarking
                 || o[0] == 0
                 || o[0] >= 240)
         }
@@ -215,12 +316,26 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_ip(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| is_public_ip(IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            // NAT64 (64:ff9b::/96) and IPv4-compatible (::/96): the IPv4 address is at the end.
+            if (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0]) || (s[..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] > 1)) {
+                return embedded(s[6], s[7]);
+            }
+            // 6to4 (2002::/16): the IPv4 address follows the prefix.
+            if s[0] == 0x2002 {
+                return embedded(s[1], s[2]);
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00 // unique local
-                || (first & 0xffc0) == 0xfe80) // link local
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link local
+                || (s[0] & 0xffc0) == 0xfec0 // site local (deprecated)
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // local-use NAT64
+                || (s[0] == 0x2001 && s[1] == 0) // Teredo
+                || (s[0] == 0x2001 && s[1] == 0xdb8) // documentation
+                || (s[0] == 0x100 && s[1..4] == [0, 0, 0])) // discard only
         }
     }
 }
@@ -234,6 +349,34 @@ pub fn host_looks_public(url: &Url) -> bool {
         Some(Host::Domain(name)) => !is_local_name(name),
         None => false,
     }
+}
+
+/// The AI model server must be on this computer or the local network: a loopback or
+/// private IP address, `localhost`, or a local name such as `gpu-box.lan`. With a
+/// proxy set, only addresses that need no DNS lookup (IPs and `localhost`), so no
+/// name is looked up outside the proxy.
+pub fn check_local_model(url: &Url, proxied: bool) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::msg("The model server address must start with http:// or https://"));
+    }
+    if host_looks_public(url) {
+        return Err(Error::msg(
+            "Tidings only uses AI models on this computer or your local network. \
+             Use an address like http://127.0.0.1:11434.",
+        ));
+    }
+    if proxied {
+        if let Some(Host::Domain(name)) = url.host() {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            if name != "localhost" && !name.ends_with(".localhost") {
+                return Err(Error::msg(
+                    "With a proxy set, give the model server as an IP address (like 127.0.0.1), \
+                     so its name is not looked up outside the proxy.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Names that only make sense on this computer or a local network:
@@ -259,6 +402,27 @@ pub async fn resolve_public(host: &str) -> std::io::Result<Vec<SocketAddr>> {
     }
     Ok(addrs)
 }
+
+/// Resolves a host name and keeps only private and loopback addresses.
+struct PrivateOnlyResolver;
+
+impl Resolve for PrivateOnlyResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| !is_public_ip(a.ip())).collect();
+            if addrs.is_empty() {
+                let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, NOT_LOCAL);
+                return Err(Box::new(err) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// Text of the error when the model server's name resolves to a public address.
+pub const NOT_LOCAL: &str = "the model server's name does not lead to this computer or the local network";
 
 struct PublicOnlyResolver;
 
@@ -317,7 +481,7 @@ pub fn sniff_image(bytes: &[u8], content_type: &str) -> Option<String> {
         if (content_type.contains("svg") || head.starts_with("<?xml") || head.starts_with("<svg"))
             && head.contains("<svg")
         {
-            // SVG inside <img> cannot run scripts, so it is safe to display.
+            // images.rs draws it to a PNG; the web view never gets the SVG itself.
             "image/svg+xml"
         } else {
             return None;

@@ -62,5 +62,6 @@ fn housekeeping(state: &AppState) {
         }
     }
     let _ = db::purge_tombstones(&conn);
+    db::checkpoint(&conn);
     let _ = conn.execute_batch("PRAGMA optimize;");
 }

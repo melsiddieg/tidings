@@ -9,6 +9,7 @@
   import ReaderTab from './components/ReaderTab.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
   import Toasts from './components/Toasts.svelte';
+  import BriefView from './components/BriefView.svelte';
   import PlayerBar from './components/PlayerBar.svelte';
   import { player } from './lib/player.svelte';
   import AddFeedDialog from './components/AddFeedDialog.svelte';
@@ -129,6 +130,9 @@
       case 'w':
         store.send('watch');
         break;
+      case 'l':
+        store.send('listen');
+        break;
       case 's':
         store.send('star');
         break;
@@ -210,6 +214,8 @@
           <Workspace />
         {:else if tab.kind === 'article'}
           <ArticleView articleId={tab.articleId} mode="tab" tabId={tab.id} active={tab.id === store.activeTabId} />
+        {:else if tab.kind === 'brief'}
+          <BriefView {tab} />
         {:else}
           <ReaderTab {tab} active={tab.id === store.activeTabId} />
         {/if}

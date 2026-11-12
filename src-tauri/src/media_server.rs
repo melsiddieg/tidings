@@ -16,10 +16,12 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::http::{header, Response, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Turns (`<base64url>` path part, `Range` header) into a response.
 pub type Handler = Arc<
@@ -29,6 +31,12 @@ pub type Handler = Arc<
 >;
 
 const MAX_HEAD: usize = 16 * 1024;
+/// Connections that have not yet sent a request with the token, at most. Further
+/// ones are closed at once. Any program on this computer can connect, and without
+/// a limit each connection would hold a task for as long as it stays open.
+const MAX_WAITING: usize = 32;
+/// A connection has this long to send its request.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A random 48-character hex token from the operating system's random source.
 pub fn random_token() -> std::io::Result<String> {
@@ -46,12 +54,15 @@ pub async fn start(handler: Handler) -> std::io::Result<String> {
     let token = random_token()?;
     let base = format!("http://127.0.0.1:{port}/{token}");
     let prefix = format!("/{token}/media/");
+    let waiting = Arc::new(Semaphore::new(MAX_WAITING));
     tauri::async_runtime::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { continue };
+            // Too many connections that have sent nothing useful: drop this one.
+            let Ok(permit) = waiting.clone().try_acquire_owned() else { continue };
             let (handler, prefix) = (handler.clone(), prefix.clone());
             tauri::async_runtime::spawn(async move {
-                let _ = serve(stream, &prefix, handler).await;
+                let _ = serve(stream, &prefix, handler, permit).await;
             });
         }
     });
@@ -63,21 +74,32 @@ fn empty(status: StatusCode) -> Response<Vec<u8>> {
 }
 
 /// Handles one request per connection (`Connection: close`), which is enough for a media player.
-async fn serve(mut stream: TcpStream, prefix: &str, handler: Handler) -> std::io::Result<()> {
+///
+/// `waiting` is this connection's place among those that have not sent a request
+/// with the token. It is given back once the token is seen, so the player's own
+/// connections, which stay open while an episode plays, do not use the places up.
+async fn serve(mut stream: TcpStream, prefix: &str, handler: Handler, waiting: OwnedSemaphorePermit) -> std::io::Result<()> {
     let mut head = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Ok(());
+    let read_head = async {
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(false);
+            }
+            head.extend_from_slice(&chunk[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") || head.len() > MAX_HEAD {
+                return Ok::<bool, std::io::Error>(true);
+            }
         }
-        head.extend_from_slice(&chunk[..n]);
-        if head.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if head.len() > MAX_HEAD {
-            return write(&mut stream, empty(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE), false).await;
-        }
+    };
+    match tokio::time::timeout(HEAD_TIMEOUT, read_head).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) | Err(_) => return Ok(()),
+        Ok(Err(e)) => return Err(e),
+    }
+    if !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        return write(&mut stream, empty(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE), false).await;
     }
     let text = String::from_utf8_lossy(&head);
     let mut lines = text.split("\r\n");
@@ -100,6 +122,7 @@ async fn serve(mut stream: TcpStream, prefix: &str, handler: Handler) -> std::io
         return write(&mut stream, empty(StatusCode::NOT_FOUND), false).await;
     };
     let encoded = encoded.to_string();
+    drop(waiting);
     let first = handler(encoded.clone(), range.clone()).await;
     match stream_plan(&first, range.as_deref()) {
         Some(plan) => write_stream(&mut stream, first, plan, &encoded, &handler, is_head).await,
@@ -142,7 +165,10 @@ fn stream_plan(first: &Response<Vec<u8>>, range: Option<&str>) -> Option<StreamP
     let last = wanted_end.unwrap_or(u64::MAX).min(total.checked_sub(1)?);
     let consistent = first_end >= start && first_end - start + 1 == first.body().len() as u64;
     let whole = range.is_none();
-    (consistent && first_end < last && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
+    // A request without `Range` gets a `200` also when the first slice already
+    // holds the whole file: `206` is not a valid answer to it.
+    let more = first_end < last || (whole && first_end == last);
+    (consistent && more && (!whole || start == 0)).then_some(StreamPlan { whole, start, first_end, last, total })
 }
 
 fn head_text<'a>(
@@ -286,6 +312,43 @@ mod tests {
         assert_eq!(r.headers()["content-length"], "100");
     }
 
+    /// A file smaller than one slice: the media proxy answers `206` with all of
+    /// it, also to a request without `Range`.
+    #[tokio::test]
+    async fn small_file_without_range_is_a_200() {
+        let small: Handler = Arc::new(|_encoded: String, range: Option<String>| {
+            Box::pin(async move {
+                let (start, _) = crate::media::parse_range(range.as_deref());
+                Response::builder()
+                    .status(206)
+                    .header(header::CONTENT_TYPE, "audio/mpeg")
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-6/7"))
+                    .body(b"ID3\x04abc"[start as usize..].to_vec())
+                    .unwrap()
+            })
+        });
+        let base = start(small).await.unwrap();
+        let url = format!("{base}/media/abc");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let r = client.get(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-type"], "audio/mpeg");
+        assert_eq!(r.headers()["content-length"], "7");
+        assert!(r.headers().get("content-range").is_none());
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"ID3\x04abc");
+
+        let r = client.head(&url).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers()["content-length"], "7");
+
+        // With a Range the answer stays a 206.
+        let r = client.get(&url).header("Range", "bytes=2-").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 206);
+        assert_eq!(r.headers()["content-range"], "bytes 2-6/7");
+        assert_eq!(r.bytes().await.unwrap().to_vec(), b"3\x04abc");
+    }
+
     #[tokio::test]
     async fn serves_only_with_the_token() {
         let base = start(sliced_handler()).await.unwrap();
@@ -308,6 +371,47 @@ mod tests {
         }
         let post = client.post(format!("{base}/media/abc")).send().await.unwrap();
         assert_eq!(post.status().as_u16(), 405);
+    }
+
+    #[tokio::test]
+    async fn silent_connections_are_limited() {
+        let base = start(sliced_handler()).await.unwrap();
+        let (address, token) = base.strip_prefix("http://").unwrap().split_once('/').unwrap();
+        let request = format!("GET /{token}/media/abc HTTP/1.1\r\nRange: bytes=5-\r\n\r\n");
+        let ask = || async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let _ = stream.write_all(request.as_bytes()).await;
+            let mut answer = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await;
+            answer
+        };
+        // Every waiting place is taken by a connection that sends nothing. Then a
+        // further connection is closed without an answer, even with the token.
+        let mut silent = Vec::new();
+        for _ in 0..MAX_WAITING {
+            silent.push(TcpStream::connect(address).await.unwrap());
+        }
+        let mut refused = false;
+        for _ in 0..50 {
+            if ask().await.is_empty() {
+                refused = true;
+                break;
+            }
+            // The server has not accepted all the silent ones yet.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(refused);
+        // When the silent ones go away, the player is served again.
+        drop(silent);
+        let mut served = false;
+        for _ in 0..50 {
+            if ask().await.starts_with(b"HTTP/1.1 206") {
+                served = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(served);
     }
 
     #[test]

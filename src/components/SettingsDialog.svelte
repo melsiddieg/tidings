@@ -3,7 +3,8 @@
   import Icon from '../lib/Icon.svelte';
   import Modal from './Modal.svelte';
   import { store } from '../lib/store.svelte';
-  import type { Settings } from '../lib/types';
+  import type { ComponentCheck, Settings } from '../lib/types';
+  import { api, errorText } from '../lib/api';
   import { copyText } from '../lib/util';
 
   let { section = 'general' }: { section?: string } = $props();
@@ -14,6 +15,8 @@
     { id: 'reading', label: 'Reading', icon: 'book' },
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'privacy', label: 'Privacy & network', icon: 'shield' },
+    { id: 'security', label: 'Security', icon: 'lock' },
+    { id: 'ai', label: 'AI briefs', icon: 'sparkles' },
     { id: 'storage', label: 'Archive & data', icon: 'archive' },
     { id: 'about', label: 'About', icon: 'info' },
   ];
@@ -32,6 +35,11 @@
   let proxy = $state(store.settings.proxy);
   let userAgent = $state(store.settings.userAgent);
   let videoPlayer = $state(store.settings.videoPlayer);
+  let aiEndpoint = $state(store.settings.aiEndpoint);
+  let aiModel = $state(store.settings.aiModel);
+  let aiModels = $state<string[] | null>(null);
+  let aiModelsError = $state<string | null>(null);
+  let aiLoading = $state(false);
   let retentionCount = $state(store.settings.retentionCount);
   let retentionDays = $state(store.settings.retentionDays);
 
@@ -41,17 +49,95 @@
 
   async function saveProxy() {
     if (proxy.trim() === s.proxy) return;
-    if (await store.updateSettings({ proxy: proxy.trim() })) store.toast(proxy.trim() ? 'Proxy enabled' : 'Proxy removed', 'success');
-    else proxy = s.proxy;
+    if (await store.updateSettings({ proxy: proxy.trim() })) {
+      // The saved value may differ: socks5:// is stored as socks5h://.
+      proxy = store.settings.proxy;
+      store.toast(proxy ? 'Proxy enabled' : 'Proxy removed', 'success');
+    } else proxy = s.proxy;
   }
 
   // The user may have installed a player since startup.
   store.findVideoPlayer();
 
+  const STATUS: Record<ComponentCheck['status'], string> = {
+    ok: 'Up to date',
+    old: 'Old',
+    update: 'Update available',
+    missing: 'Not installed',
+    unknown: 'Unknown',
+    info: '',
+  };
+  const isMac = $derived(store.info?.platform === 'macos');
+
+  // Fresh offline results each time the section opens, unless "Check now" has run.
+  $effect(() => {
+    if (current === 'security' && !untrack(() => store.componentsCheckedOnline)) store.checkComponents();
+  });
+
   async function saveVideoPlayer() {
     if (videoPlayer.trim() === s.videoPlayer) return;
     if (!(await store.updateSettings({ videoPlayer: videoPlayer.trim() }))) videoPlayer = s.videoPlayer;
   }
+
+  const AI_PROVIDERS: { id: Settings['aiProvider']; label: string; address: string }[] = [
+    { id: '', label: 'Off', address: '' },
+    { id: 'ollama', label: 'Ollama', address: 'http://127.0.0.1:11434' },
+    { id: 'openai', label: 'LM Studio, llama.cpp or another OpenAI-style server', address: 'http://127.0.0.1:1234' },
+  ];
+  const aiDefault = $derived(AI_PROVIDERS.find((p) => p.id === s.aiProvider)?.address ?? '');
+  /** The model server is another machine: what a brief sends crosses the network. */
+  const aiRemote = $derived.by(() => {
+    try {
+      const host = new URL(s.aiEndpoint || aiDefault).hostname.replace(/^\[|\]$/g, '');
+      return !(host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host.startsWith('127.'));
+    } catch {
+      return false;
+    }
+  });
+
+  /** Asks the model server which models it has. Also shows whether it answers. */
+  async function loadAiModels() {
+    if (!s.aiProvider) return;
+    aiLoading = true;
+    aiModelsError = null;
+    try {
+      aiModels = await api.aiModels();
+      if (aiModels.length === 0) aiModelsError = 'The server answered, but it has no models. Download one first (for example: ollama pull qwen3:4b).';
+    } catch (e) {
+      aiModels = null;
+      aiModelsError = errorText(e);
+    } finally {
+      aiLoading = false;
+    }
+  }
+
+  async function setAiProvider(id: Settings['aiProvider']) {
+    if (id === s.aiProvider) return;
+    aiModels = null;
+    aiModelsError = null;
+    if (await store.updateSettings({ aiProvider: id, aiEndpoint: '', aiModel: '' })) {
+      aiEndpoint = '';
+      aiModel = '';
+      loadAiModels();
+    }
+  }
+
+  async function saveAiEndpoint() {
+    if (aiEndpoint.trim() === s.aiEndpoint) return;
+    if (await store.updateSettings({ aiEndpoint: aiEndpoint.trim() })) loadAiModels();
+    else aiEndpoint = s.aiEndpoint;
+  }
+
+  async function saveAiModel(name: string) {
+    aiModel = name.trim();
+    if (aiModel === s.aiModel) return;
+    if (!(await store.updateSettings({ aiModel }))) aiModel = s.aiModel;
+  }
+
+  // Ask the server for its models when the section opens.
+  $effect(() => {
+    if (current === 'ai' && untrack(() => s.aiProvider && aiModels == null && !aiLoading)) loadAiModels();
+  });
 
   async function saveUserAgent() {
     if (userAgent.trim() === s.userAgent) return;
@@ -232,7 +318,7 @@
           <div class="row stack">
             <div class="row-text">
               <span class="row-title">Proxy</span>
-              <span class="hint">Route all traffic through a proxy. For Tor use <code class="selectable">socks5h://127.0.0.1:9050</code>. Leave empty for a direct connection.</span>
+              <span class="hint">Route all traffic through a proxy. For Tor use <code class="selectable">socks5h://127.0.0.1:9050</code>. Leave empty for a direct connection. <code>socks5://</code> is saved as <code>socks5h://</code>, so that names are looked up by the proxy and not on this computer.</span>
             </div>
             <input class="input mono" bind:value={proxy} onblur={saveProxy} onkeydown={onEnter(saveProxy)} placeholder="socks5h://127.0.0.1:9050" spellcheck="false" autocomplete="off" />
           </div>
@@ -246,6 +332,108 @@
               <button class="btn small" onclick={() => { userAgent = ''; saveUserAgent(); }}>Reset</button>
             </div>
           </div>
+        </div>
+      {:else if current === 'security'}
+        <div class="card">
+          {#each store.components ?? [] as c (c.id)}
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">
+                  {c.name}
+                  {#if c.version}<span class="comp-version">{c.version}</span>{/if}
+                  {#if STATUS[c.status]}<span class="comp-status {c.status}">{STATUS[c.status]}</span>{/if}
+                </span>
+                <span class="hint">{c.message}</span>
+                {#if c.detail}<span class="hint comp-detail">{c.detail}</span>{/if}
+              </div>
+              {#if c.command || c.link}
+                <div class="inline">
+                  {#if c.command}
+                    {@const command = c.command}
+                    <code class="path selectable">{command}</code>
+                    <button class="btn small" onclick={() => copyText(command).then(() => store.toast('Command copied'))}><Icon name="copy" size={13} />Copy</button>
+                  {/if}
+                  {#if c.link}
+                    <button class="btn small" onclick={() => store.openExternal(c.link)}><Icon name="external" size={13} />Open page</button>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <div class="row"><span class="hint">Looking at the installed versions…</span></div>
+          {/each}
+        </div>
+        <div class="card">
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Check online</span>
+              <span class="hint">
+                Asks GitHub for the newest Tidings and yt-dlp releases{isMac ? '' : ', and webkitgtk.org for its latest security advisory'},
+                through your proxy. Tidings never does this by itself; without it, the list above only knows how old things are.
+                {#if store.componentsCheckedOnline}Last checked at {new Date(store.componentsCheckedOnline).toLocaleTimeString()}.{/if}
+              </span>
+            </div>
+            <button class="btn small" onclick={() => store.checkComponentsOnline()} disabled={store.checkingComponents}>
+              {#if store.checkingComponents}<span class="spinner"></span>{:else}<Icon name="refresh" size={13} />{/if}Check now
+            </button>
+          </div>
+        </div>
+      {:else if current === 'ai'}
+        <div class="card">
+          <div class="row stack">
+            <div class="row-text">
+              <span class="row-title">Local model</span>
+              <span class="hint">
+                A brief summarizes the articles the list shows (a folder, a type, a date range) in a few topics, with links to
+                its sources. It is written by a language model on this computer or your local network, never in the cloud.
+                Tidings sends that model the titles, feed names, dates and short excerpts of those articles, and nothing else.
+              </span>
+            </div>
+            <div class="ai-providers">
+              {#each AI_PROVIDERS as p (p.id)}
+                <label class="radio"><input type="radio" checked={s.aiProvider === p.id} onchange={() => setAiProvider(p.id)} /> {p.label}</label>
+              {/each}
+            </div>
+          </div>
+          {#if s.aiProvider}
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">Server address</span>
+                <span class="hint">Only this computer or your local network. Leave empty for {aiDefault}{s.aiProvider === 'openai' ? ' (LM Studio; llama.cpp’s llama-server uses port 8080)' : ''}.</span>
+              </div>
+              <input class="input mono" bind:value={aiEndpoint} onblur={saveAiEndpoint} onkeydown={onEnter(saveAiEndpoint)} placeholder={aiDefault} spellcheck="false" autocomplete="off" />
+              {#if aiRemote}
+                <span class="hint">
+                  <Icon name="alert" size={12} /> This server is another machine. Briefs send it article titles and excerpts over your
+                  network{(s.aiEndpoint || aiDefault).startsWith('https:') ? '' : ', unencrypted'}. Use it only on a network you trust.
+                </span>
+              {/if}
+            </div>
+            <div class="row stack">
+              <div class="row-text">
+                <span class="row-title">Model</span>
+                <span class="hint">
+                  {#if aiLoading}Asking the server for its models…
+                  {:else if aiModelsError}{aiModelsError}
+                  {:else if aiModels}The server is running. Small instruction models (3–8B, such as Qwen3 4B Instruct or Llama 3.2 3B) write briefs in about a minute.
+                  {:else}Choose the model that writes briefs.{/if}
+                </span>
+              </div>
+              <div class="inline">
+                {#if aiModels && aiModels.length > 0}
+                  <select class="input" value={aiModel} onchange={(e) => saveAiModel((e.currentTarget as HTMLSelectElement).value)}>
+                    {#if !aiModels.includes(aiModel)}<option value={aiModel}>{aiModel || 'Choose a model…'}</option>{/if}
+                    {#each aiModels as m (m)}<option value={m}>{m}</option>{/each}
+                  </select>
+                {:else}
+                  <input class="input mono" bind:value={aiModel} onblur={() => saveAiModel(aiModel)} onkeydown={onEnter(() => saveAiModel(aiModel))} placeholder="qwen3:4b" spellcheck="false" autocomplete="off" />
+                {/if}
+                <button class="btn small" onclick={loadAiModels} disabled={aiLoading}>
+                  {#if aiLoading}<span class="spinner"></span>{:else}<Icon name="refresh" size={13} />{/if}Check server
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
       {:else if current === 'storage'}
         <div class="card">
@@ -292,7 +480,7 @@
           <div class="row stack">
             <div class="row-text">
               <span class="row-title">Data folder</span>
-              <span class="hint">Everything Tidings stores lives in one SQLite database here, readable only by your user account.</span>
+              <span class="hint">Your feeds, articles, settings and briefs are in one SQLite database here, readable only by your user account. Open tabs, playback positions, the window size and cached images are kept by the system's web view, in its own folders.</span>
             </div>
             <div class="inline">
               <code class="path selectable">{store.info?.dataDir ?? '—'}</code>
@@ -309,7 +497,7 @@
           <ul>
             <li><Icon name="check" size={14} />RSS, Atom and JSON Feed with folders and OPML</li>
             <li><Icon name="check" size={14} />Articles and web pages in tabs, in a script-free reader mode</li>
-            <li><Icon name="check" size={14} />No telemetry, no analytics, no update checks, no accounts</li>
+            <li><Icon name="check" size={14} />No telemetry, no analytics, no automatic update checks, no accounts</li>
             <li><Icon name="check" size={14} />Your data stays in a local database on this computer</li>
           </ul>
         </div>
@@ -319,6 +507,38 @@
 </Modal>
 
 <style>
+  .ai-providers {
+    display: grid;
+    gap: 6px;
+  }
+  .comp-version {
+    margin-left: 4px;
+    font-weight: 400;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .comp-status {
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--bg-hover);
+    color: var(--text-2);
+  }
+  .comp-status.ok {
+    color: var(--success, #2f9e5b);
+  }
+  .comp-status.old,
+  .comp-status.update {
+    background: var(--accent-softer);
+    color: var(--accent);
+  }
+  .comp-detail {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    word-break: break-all;
+  }
   .settings {
     display: grid;
     grid-template-columns: 200px 1fr;

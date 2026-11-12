@@ -15,41 +15,76 @@
   let error = $state<string | null>(null);
   let candidates = $state<Candidate[]>([]);
   let chosen = $state(0);
+  // An address on the local network is only contacted, and a feed there only
+  // subscribed, after the user says so for that host. The backend refuses with
+  // "local-network:<host>" until then.
+  const CONSENT = 'local-network:';
+  let consent = $state<{ host: string; retry: () => void } | null>(null);
+  let allowedHost = $state<string | null>(null);
+
+  function hostname(address: string): string {
+    try {
+      return new URL(address).hostname;
+    } catch {
+      return '';
+    }
+  }
+  const allowed = (c: Candidate) => allowedHost !== null && hostname(c.url) === allowedHost;
+
+  /** Shows the consent question if `e` asks for it. */
+  function asksConsent(e: unknown, retry: () => void): boolean {
+    const text = errorText(e);
+    if (!text.startsWith(CONSENT)) return false;
+    consent = { host: text.slice(CONSENT.length), retry };
+    return true;
+  }
+
+  function allow() {
+    if (!consent) return;
+    const { host, retry } = consent;
+    allowedHost = host;
+    consent = null;
+    retry();
+  }
 
   const folders = $derived(folderOptions(store.root));
 
-  async function find() {
+  async function find(allowLocal = false) {
     if (!url.trim()) return;
     busy = true;
     error = null;
+    consent = null;
     candidates = [];
     try {
-      const found = await api.discover(url.trim());
-      if (found.length === 1) await subscribe(found[0]);
+      const found = await api.discover(url.trim(), allowLocal);
+      // A single feed is subscribed at once, except one on the local network that
+      // the user has not allowed: a web page can name any address as its feed.
+      if (found.length === 1 && (!found[0].local || allowed(found[0]))) await subscribe(found[0]);
       else {
         candidates = found;
         chosen = 0;
       }
     } catch (e) {
-      error = errorText(e);
+      if (!asksConsent(e, () => find(true))) error = errorText(e);
     } finally {
       busy = false;
     }
   }
 
-  async function subscribe(candidate: Candidate) {
+  async function subscribe(candidate: Candidate, allowLocal = allowed(candidate)) {
     busy = true;
     error = null;
+    consent = null;
     try {
       const title = candidate.title.trim() || undefined;
-      const id = await api.addFeed(candidate.url, folderId, title);
+      const id = await api.addFeed(candidate.url, folderId, title, allowLocal);
       store.watchFeed(id);
       await store.reloadTree();
       store.selectScope({ kind: 'feed', id });
       store.dialog = null;
       store.toast(`Subscribed to ${title ?? hostOf(candidate.url)}`, 'success');
     } catch (e) {
-      error = errorText(e);
+      if (!asksConsent(e, () => subscribe(candidate, true))) error = errorText(e);
     } finally {
       busy = false;
     }
@@ -57,7 +92,7 @@
 
   function onsubmit(e: SubmitEvent) {
     e.preventDefault();
-    if (candidates.length > 1) subscribe(candidates[chosen]);
+    if (candidates.length > 0) subscribe(candidates[chosen]);
     else find();
   }
 </script>
@@ -75,6 +110,8 @@
           oninput={() => {
             candidates = [];
             error = null;
+            consent = null;
+            allowedHost = null;
           }}
           placeholder="example.com or https://example.com/feed.xml"
           spellcheck="false"
@@ -85,9 +122,9 @@
       <p class="hint">Paste a website and Tidings will find its feed. RSS, Atom and JSON Feed are supported.</p>
     </div>
 
-    {#if candidates.length > 1}
+    {#if candidates.length > 0}
       <div class="field">
-        <span class="field-label">This site has {candidates.length} feeds</span>
+        <span class="field-label">{candidates.length === 1 ? 'This site names one feed' : `This site has ${candidates.length} feeds`}</span>
         <div class="candidates" role="radiogroup">
           {#each candidates as c, i (c.url)}
             <label class="candidate" class:on={chosen === i}>
@@ -96,7 +133,7 @@
                 <strong>{c.title || hostOf(c.url)}</strong>
                 <span class="selectable">{c.url}</span>
               </span>
-              <span class="kind">{c.kind}</span>
+              <span class="kind">{c.local ? 'Local network · ' : ''}{c.kind}</span>
             </label>
           {/each}
         </div>
@@ -113,6 +150,16 @@
       </select>
     </div>
 
+    {#if consent}
+      <div class="consent">
+        <Icon name="alert" size={16} />
+        <span>
+          <strong class="selectable">{consent.host}</strong> is on your local network. Tidings would send requests to that
+          device, now and at every refresh. Allow this only if you know the address, such as your own NAS or home server.
+        </span>
+        <button class="btn small" type="button" onclick={allow}>Allow</button>
+      </div>
+    {/if}
     {#if error}
       <div class="error"><Icon name="alert" size={14} /><span class="selectable">{error}</span></div>
     {/if}
@@ -122,12 +169,26 @@
     <button class="btn" type="button" onclick={() => (store.dialog = null)}>Cancel</button>
     <button class="btn primary" type="submit" form="add-feed" disabled={busy || !url.trim()}>
       {#if busy}<span class="spinner"></span>{/if}
-      {candidates.length > 1 ? 'Subscribe' : busy ? 'Looking…' : 'Add feed'}
+      {candidates.length > 0 ? 'Subscribe' : busy ? 'Looking…' : 'Add feed'}
     </button>
   {/snippet}
 </Modal>
 
 <style>
+  .consent {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-muted);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .consent span {
+    flex: 1;
+  }
   .form {
     display: grid;
     gap: 18px;

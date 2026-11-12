@@ -109,6 +109,12 @@
             <button class="btn small" onclick={() => store.watchVideo(v)}>
               <Icon name="play" size={12} stroke={0} />Watch
             </button>
+            {#if videoSource(item.url, item.enclosureUrl, item.enclosureType)?.kind === 'site' && v}
+              {@const current = player.isCurrent(v)}
+              <button class="btn small ghost" onclick={() => player.listen(item.id, item.feedId, item.title, v)}>
+                <Icon name={current && player.playing ? 'pause-fill' : 'headphones'} size={12} stroke={current && player.playing ? 0 : undefined} />{current && player.playing ? 'Pause' : 'Listen'}
+              </button>
+            {/if}
           {/if}
           <span class="grow"></span>
           <button class="btn small ghost" onclick={() => store.openArticleTab(item.id)}><Icon name="book" size={13} />Open in tab</button>

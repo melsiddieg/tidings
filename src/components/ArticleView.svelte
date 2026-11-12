@@ -150,6 +150,10 @@
         if (videoUrl) store.watchVideo(videoUrl);
         else store.toast('This article has no video');
         break;
+      case 'listen':
+        if (video?.kind === 'site') player.listen(detail.id, detail.feedId, detail.title, video.url);
+        else store.toast(video ? 'This video plays inside Tidings; there is nothing to listen to separately' : 'This article has no video');
+        break;
       case 'copy-link':
         if (detail.url) copyText(detail.url).then(() => store.toast('Link copied'));
         break;
@@ -190,6 +194,12 @@
             <Icon name="video" size={16} />
           </button>
         {/if}
+        {#if video?.kind === 'site'}
+          {@const v = video}
+          <button class="icon-btn" title="Listen: play only the sound (L)" onclick={() => detail && player.listen(detail.id, detail.feedId, detail.title, v.url)}>
+            <Icon name="headphones" size={16} />
+          </button>
+        {/if}
         <button class="icon-btn" title="Open in browser (V)" onclick={() => store.openExternal(detail?.url)} disabled={!detail.url}>
           <Icon name="globe" size={16} />
         </button>
@@ -218,7 +228,7 @@
 
         {#if video}
           {#key detail.id}
-            <VideoCard source={video} title={detail.title} poster={thumb} />
+            <VideoCard source={video} title={detail.title} poster={thumb} articleId={detail.id} feedId={detail.feedId} />
           {/key}
         {/if}
 

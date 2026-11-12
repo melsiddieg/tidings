@@ -1,12 +1,14 @@
 // Tidings: a private, secure feed reader.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod brief;
 mod commands;
 mod db;
 mod discover;
 mod error;
 mod feed_types;
 mod feeds;
+mod images;
 mod media;
 mod media_server;
 mod menu;
@@ -19,11 +21,16 @@ mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod updates;
 mod video;
 #[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
+
+/// The system allocator. In the SVG helper process it also enforces a memory limit.
+#[global_allocator]
+static ALLOCATOR: images::Capped = images::Capped;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
@@ -95,6 +102,13 @@ fn start_media_server(app: &tauri::AppHandle, state: &Arc<state::AppState>) {
 }
 
 fn main() {
+    // The SVG helper: the app starts itself a second time to draw SVG images, so
+    // that an SVG which crashes the drawing code ends that process and not the app
+    // (see images.rs). It must do nothing else: no window, no database, no network.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == images::WORKER_ARG) {
+        return images::worker_main();
+    }
+
     #[cfg(webkitgtk)]
     webkitgtk_workarounds();
 
@@ -157,6 +171,14 @@ fn main() {
             commands::open_external,
             commands::video_player,
             commands::play_video,
+            commands::audio_stream,
+            commands::check_components,
+            commands::ai_models,
+            commands::make_brief,
+            commands::briefs,
+            commands::brief,
+            commands::delete_brief,
+            commands::check_components_online,
             commands::peertube_video,
             commands::search_peertube,
             commands::set_badge,

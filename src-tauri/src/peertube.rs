@@ -153,7 +153,8 @@ fn pick(json: &[u8]) -> Result<VideoFile> {
         .iter()
         .chain(video.streaming_playlists.iter().flat_map(|p| p.files.iter()))
         .filter_map(|f| {
-            let url = net::parse_web_url(f.file_url.as_deref()?).ok()?;
+            // The instance names the file; it must be on a public host.
+            let url = net::parse_web_url(f.file_url.as_deref()?).ok().filter(net::host_looks_public)?;
             Some((f.resolution.id, f, url.to_string()))
         })
         .collect();
@@ -261,6 +262,9 @@ mod tests {
             file(720, "https://cdn.example/hls-720-fragmented.mp4"),
             file(480, "https://cdn.example/hls-480-fragmented.mp4"),
         );
+        // A file on the local network is never offered.
+        let private = format!(r#"{{"name":"x","files":[{}]}}"#, file(720, "http://192.168.1.1/720.mp4"));
+        assert!(pick(private.as_bytes()).is_err());
         let f = pick(json.as_bytes()).unwrap();
         assert_eq!((f.url.as_str(), f.label.as_str(), f.duration), ("https://cdn.example/hls-720-fragmented.mp4", "720p", 286));
 

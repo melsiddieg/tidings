@@ -1,6 +1,6 @@
 // Fake backend for `npm run dev` in a normal browser (UI work only).
 // It is loaded only in development and never ships in release builds.
-import type { ArticleDetail, ArticleItem, Feed, Folder, ListQuery, Scope, Settings } from './types';
+import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Scope, Settings } from './types';
 
 type Handler = (p: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -30,7 +30,7 @@ function feed(id: number, folderId: number | null, title: string, url: string, e
     description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
     lastError: null, unread: 0, total: 0, pinned: 0, feedType: 'article', typeOverride: null,
-    detectedType: extra.feedType ?? 'article', ...extra,
+    detectedType: extra.feedType ?? 'article', local: false, ...extra,
   };
 }
 
@@ -132,7 +132,7 @@ let settings: Settings = {
   loadImages: true, stripTracking: true, httpsOnly: false, proxy: '',
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
-  concurrency: 6, videoPlayer: '',
+  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b',
 };
 
 function counts() {
@@ -192,6 +192,32 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let nextId = 1000;
 
+/** Briefs written by the fake local model. */
+const briefs: Brief[] = [];
+
+function mockBrief(q: ListQuery, title: string): Brief {
+  const picked = query({ ...q, offset: 0, limit: 300 });
+  if (picked.length === 0) throw 'There are no articles to brief here.';
+  const source = (a: (typeof articles)[number]) => ({
+    id: a.id, feedId: a.feedId, feed: feeds.find((f) => f.id === a.feedId)?.title ?? '', title: a.title, published: a.published,
+  });
+  const ids = picked.map((a) => a.id);
+  const brief: Brief = {
+    id: nextId++, createdAt: Math.floor(Date.now() / 1000), title, model: settings.aiModel || 'qwen3:4b', query: q,
+    sections: [
+      { title: 'The main story', points: [
+        { text: `${picked[0].title}. Several outlets covered it, with more detail expected later today.`, sources: ids.slice(0, 2) },
+        { text: 'Reactions were mixed; the articles disagree on what happens next.', sources: ids.slice(1, 3) },
+      ] },
+      { title: 'Also in the news', points: picked.slice(2, 5).map((a) => ({ text: `${a.title}.`, sources: [a.id] })) },
+    ].filter((s) => s.points.length > 0),
+    sources: picked.slice(0, 5).map(source),
+    articlesUsed: picked.length, articlesTotal: picked.length, seconds: 4.2,
+  };
+  briefs.unshift(brief);
+  return brief;
+}
+
 export async function invoke(cmd: string, args: Record<string, any> = {}): Promise<unknown> {
   await wait(30);
   switch (cmd) {
@@ -243,8 +269,16 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'discover_feeds':
       await wait(500);
       if (!String(args.url).includes('.')) throw 'This is not a valid web address';
-      return [{ url: `https://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS' }];
+      {
+        const host = String(args.url).replace(/^https?:\/\//, '').split(/[/:]/)[0];
+        const local = /^(192\.168\.|10\.|127\.)|\.(local|lan)$/.test(host);
+        if (local && !args.allowLocal) throw `local-network:${host}`;
+        // A public page that names a feed on the local network.
+        if (host === 'evil.example') return [{ url: 'http://192.168.1.1/feed', title: 'Router', kind: 'RSS', local: true }];
+        return [{ url: `${local ? 'http' : 'https'}://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS', local }];
+      }
     case 'add_feed': {
+      if (/\/\/(192\.168\.|10\.|127\.)/.test(args.url) && !args.allowLocal) throw `local-network:${new URL(args.url).hostname}`;
       const id = ++nextId;
       feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url));
       setTimeout(() => emit('feed-updated', { feedId: id, newArticles: 0, error: null }), 800);
@@ -346,6 +380,42 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       return { name: 'mpv', path: '/usr/bin/mpv' };
     case 'play_video':
       return null;
+    case 'check_components':
+    case 'check_components_online': {
+      const online = cmd === 'check_components_online';
+      if (online) await new Promise((r) => setTimeout(r, 900));
+      return [
+        { id: 'tidings', name: 'Tidings', version: '0.8.0', detail: 'built 2026-11-09', status: online ? 'ok' : 'ok', message: online ? 'This is the newest release.' : 'Built recently.', command: null, link: null },
+        {
+          id: 'yt-dlp', name: 'yt-dlp', version: '2026.03.17', detail: '/usr/bin/yt-dlp', status: online ? 'update' : 'old',
+          message: online
+            ? 'yt-dlp 2026.10.26 is out. Update it with your package manager. Distribution packages are often months behind YouTube; a copy from pipx (pipx install yt-dlp) is newer, and Tidings prefers the newest.'
+            : 'This version is 7 months old, and YouTube often breaks older versions. Update it with your package manager.',
+          command: 'sudo apt update && sudo apt upgrade yt-dlp', link: null,
+        },
+        {
+          id: 'webkit', name: 'WebKitGTK', version: '2.52.5', detail: 'from your system', status: online ? 'update' : 'ok',
+          message: online ? 'This version has security holes fixed in 2.54.0 (WSA-2026-0006, 29 SEPTEMBER 2026). Install your system\'s updates:' : 'One series behind the newest. Your system may still be catching up.',
+          command: online ? 'sudo apt update && sudo apt upgrade' : null, link: online ? 'https://webkitgtk.org/security/WSA-2026-0006.html' : null,
+        },
+      ];
+    }
+    case 'ai_models':
+      await wait(300);
+      return settings.aiProvider === 'ollama' ? ['llama3.2:latest', 'qwen3:4b'] : ['qwen3-4b-instruct-2507'];
+    case 'make_brief':
+      await wait(2500);
+      return structuredClone(mockBrief(args.query, args.title));
+    case 'briefs':
+      return briefs.map(({ id, createdAt, title, model }) => ({ id, createdAt, title, model }));
+    case 'brief':
+      return structuredClone(briefs.find((b) => b.id === args.id) ?? null);
+    case 'delete_brief':
+      briefs.splice(briefs.findIndex((b) => b.id === args.id), 1);
+      return null;
+    case 'audio_stream':
+      await new Promise((r) => setTimeout(r, 600));
+      return { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', mime: 'audio/mpeg', duration: 372 };
     case 'peertube_video':
       return { title: 'What is PeerTube?', url: 'https://example.com/what-is-peertube-720.mp4', label: '720p', duration: 114 };
     case 'search_peertube':

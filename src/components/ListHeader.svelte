@@ -108,6 +108,13 @@
       </div>
     </div>
     <div class="actions">
+      <button
+        class="icon-btn"
+        title={store.aiReady ? `Write a brief of these articles with ${store.settings.aiModel}, on this computer` : 'AI briefs: set up a local model'}
+        onclick={() => store.makeBrief()}
+      >
+        <Icon name="sparkles" size={16} />
+      </button>
       <button class="icon-btn" title="Mark all as read (Shift+A)" onclick={() => store.markAllRead()} disabled={store.scopeUnread === 0}>
         <Icon name="check-check" size={17} />
       </button>

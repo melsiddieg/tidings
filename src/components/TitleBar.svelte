@@ -52,6 +52,11 @@
         {:else if tab.kind === 'article'}
           <span class="tab-icon"><FeedIcon feed={tab.feedId != null ? store.feedById.get(tab.feedId) : undefined} size={14} /></span>
           <span class="tab-title">{tab.title}</span>
+        {:else if tab.kind === 'brief'}
+          <span class="tab-icon accent">
+            {#if store.briefsRunning.includes(tab.id)}<span class="spinner tab-spinner"></span>{:else}<Icon name="sparkles" size={14} />{/if}
+          </span>
+          <span class="tab-title">{tab.title}</span>
         {:else}
           <span class="tab-icon"><Icon name="book" size={14} /></span>
           <span class="tab-title">{tab.title}</span>
@@ -221,5 +226,9 @@
     background: var(--accent);
     border-radius: 2px;
     transition: width 0.3s var(--ease);
+  }
+  .tab-spinner {
+    width: 11px;
+    height: 11px;
   }
 </style>

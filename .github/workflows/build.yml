@@ -10,7 +10,38 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Jobs may only read the repository. The release job asks for more itself.
+permissions:
+  contents: read
+
+# Actions are pinned to a commit, not a tag: a tag can be moved to other code.
+# The comment after each hash names the version it was taken from.
+
 jobs:
+  # Known vulnerabilities in dependencies stop a release.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: npm audit (what ships in the app)
+        run: npm audit --omit=dev
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: cargo audit
+        # Fails on vulnerabilities. "Unmaintained" and "unsound" notices are printed
+        # as warnings; they come from Tauri's GTK dependencies.
+        # The tool's version is fixed, like the actions: a new release of it is
+        # not run here before someone has chosen it. The list of advisories it
+        # downloads is always the current one.
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --file src-tauri/Cargo.lock
+
   build:
     strategy:
       fail-fast: false
@@ -25,10 +56,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check version
-        run: scripts/check-version.sh ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        # The tag name goes in through the environment, not into the script text.
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: scripts/check-version.sh "$TAG"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -45,24 +79,28 @@ jobs:
           done
           exit 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: './src-tauri -> target'
 
       - run: npm ci
       - run: npm run check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      # --locked: fail if Cargo.lock does not match Cargo.toml, so the build uses
+      # exactly the dependency versions that were reviewed.
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      - run: npx tauri build ${{ matrix.args }}
+      # Arguments after `--` go to `cargo build`.
+      - run: npx tauri build ${{ matrix.args }} -- --locked
 
       - name: Make portable tarball
         if: runner.os == 'Linux'
@@ -74,7 +112,7 @@ jobs:
           cp src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png "$d/icons/"
           tar -czf "src-tauri/target/release/bundle/$d.tar.gz" "$d"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tidings-${{ runner.os }}
           path: |
@@ -87,14 +125,14 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, audit]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -119,7 +157,7 @@ jobs:
           | Fedora, openSUSE | `.rpm` | `sudo dnf install ./Tidings-*.x86_64.rpm` |
           | CachyOS, Arch, Manjaro | `.tar.gz` | `sudo pacman -S --needed webkit2gtk-4.1 gtk3 xdotool`, then unpack and run `./install.sh` |
           | Any Linux | `.AppImage` | `chmod +x Tidings_*.AppImage` and run it |
-          | macOS 11+ | `.dmg` | Open the disk image and drag Tidings to Applications |
+          | macOS 12.3+ | `.dmg` | Open the disk image and drag Tidings to Applications |
 
           The macOS app is not signed. The first time, right-click it and choose **Open**,
           or run `xattr -dr com.apple.quarantine /Applications/Tidings.app`.

@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::brief;
 use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
 use crate::discover::{self, Candidate};
 use crate::error::{Error, Result};
@@ -17,6 +18,7 @@ use crate::reader;
 use crate::sanitize;
 use crate::settings::Settings;
 use crate::state::AppState;
+use crate::updates;
 use crate::video;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -130,8 +132,10 @@ pub async fn fetch_full_text(
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
-        // The link may reach a private network only if it is on the feed's own host.
-        let feed_url = url::Url::parse(&db::fetch_info(&state.db(), row.feed_id)?.url).ok();
+        // The link may reach the local network only if it is on the host and port of
+        // its own feed, and the user allowed that feed there.
+        let info = db::fetch_info(&state.db(), row.feed_id)?;
+        let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local);
         let extracted =
             reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
         db::save_full_content(&state.db(), id, &extracted.html)?;
@@ -172,12 +176,11 @@ pub async fn read_url(
     let page = match cached {
         Some(page) => page,
         None => {
-            // Reader tabs open links from articles, which feeds control. A link may
-            // reach a private network only if it is on the host of a subscribed feed.
-            let trusted = url::Url::parse(&key).ok().and_then(|t| subscribed_feed_on(&state, &t));
-            let page = Arc::new(
-                reader::extract_url(&state.net(), &key, trusted.as_ref(), settings.strip_tracking).await?,
-            );
+            // Reader tabs open links from articles and web pages, which anyone can
+            // write. They never reach the local network, also when the user has a
+            // feed there: any feed could otherwise link to that host. Local pages
+            // open in the browser.
+            let page = Arc::new(reader::extract_url(&state.net(), &key, None, settings.strip_tracking).await?);
             state.pages.lock().unwrap_or_else(|e| e.into_inner()).put(key, page.clone());
             page
         }
@@ -194,15 +197,6 @@ pub async fn read_url(
         html: rendered.html,
         blocked_images: rendered.blocked_images,
     })
-}
-
-/// A subscribed feed on the same host as `url`, if there is one.
-fn subscribed_feed_on(state: &AppState, url: &url::Url) -> Option<url::Url> {
-    db::feed_urls(&state.db())
-        .ok()?
-        .iter()
-        .filter_map(|u| url::Url::parse(u).ok())
-        .find(|f| net::same_host(f, url))
 }
 
 #[tauri::command]
@@ -228,16 +222,21 @@ pub fn mark_all_read(
 
 #[tauri::command]
 pub fn delete_articles(state: AppStateRef<'_>, ids: Vec<i64>) -> Result<()> {
-    db::delete_articles(&state.db(), &ids)
+    let conn = state.db();
+    db::delete_articles(&conn, &ids)?;
+    // The deleted text is overwritten in the database; empty the log that may still hold it.
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Subscriptions
 // ---------------------------------------------------------------------------
 
+/// `allow_local`: the user agreed to connect to this address on the local network.
 #[tauri::command]
-pub async fn discover_feeds(state: AppStateRef<'_>, url: String) -> Result<Vec<Candidate>> {
-    discover::discover(&state.net(), &url).await
+pub async fn discover_feeds(state: AppStateRef<'_>, url: String, allow_local: Option<bool>) -> Result<Vec<Candidate>> {
+    discover::discover(&state.net(), &url, allow_local.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -247,15 +246,27 @@ pub fn add_feed(
     url: String,
     folder_id: Option<i64>,
     title: Option<String>,
+    allow_local: Option<bool>,
 ) -> Result<i64> {
     let url = net::parse_web_url(&url)?;
+    let allow_local = allow_local.unwrap_or(false);
+    // A feed on the local network needs the user's consent for that address. A web
+    // page could otherwise name `http://192.168.1.1/...` as its feed and have it
+    // subscribed in one click.
+    if !allow_local && !net::host_looks_public(&url) {
+        return Err(net::needs_consent(&url));
+    }
     let id = {
         let conn = state.db();
         if db::feed_id_by_url(&conn, url.as_str())?.is_some() {
             return Err(Error::msg("You are already subscribed to this feed"));
         }
         let title = title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-        db::insert_feed(&conn, url.as_str(), folder_id, title, None)?
+        let id = db::insert_feed(&conn, url.as_str(), folder_id, title, None)?;
+        if allow_local {
+            db::set_feed_local(&conn, id, true)?;
+        }
+        id
     };
     spawn_refresh(&app, state.inner(), vec![id]);
     Ok(id)
@@ -281,7 +292,11 @@ pub fn update_feed(app: AppHandle, state: AppStateRef<'_>, id: i64, mut patch: F
 
 #[tauri::command]
 pub fn delete_feed(state: AppStateRef<'_>, id: i64) -> Result<()> {
-    db::delete_feed(&state.db(), id)
+    let conn = state.db();
+    db::delete_feed(&conn, id)?;
+    // As in `delete_articles`: the feed's articles must not stay in the log.
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 #[tauri::command]
@@ -320,7 +335,10 @@ pub fn rename_folder(state: AppStateRef<'_>, id: i64, title: String) -> Result<(
 
 #[tauri::command]
 pub fn delete_folder(state: AppStateRef<'_>, id: i64) -> Result<()> {
-    db::delete_folder(&state.db(), id)
+    let conn = state.db();
+    db::delete_folder(&conn, id)?;
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 #[tauri::command]
@@ -336,13 +354,19 @@ pub fn move_folder(
 /// Deletes several feeds and folders at once. Returns how many feeds were deleted.
 #[tauri::command]
 pub fn delete_items(state: AppStateRef<'_>, items: Vec<Item>) -> Result<usize> {
-    db::delete_items(&state.db(), &items)
+    let conn = state.db();
+    let deleted = db::delete_items(&conn, &items)?;
+    db::checkpoint(&conn);
+    Ok(deleted)
 }
 
 /// Removes every subscription and article, to start over.
 #[tauri::command]
 pub fn delete_all_subscriptions(state: AppStateRef<'_>) -> Result<()> {
-    db::delete_all_subscriptions(&state.db())
+    let conn = state.db();
+    db::delete_all_subscriptions(&conn)?;
+    db::checkpoint(&conn);
+    Ok(())
 }
 
 /// Opens or closes the given folders, or all folders when `ids` is None.
@@ -401,8 +425,10 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
         return Err(Error::msg("This file is too large to be an OPML subscription list"));
     }
     let bytes = std::fs::read(&path)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let outlines = opml::parse(&text)?;
+    // Parsing is CPU work on a file from anywhere: keep it off the async threads.
+    let outlines = tokio::task::spawn_blocking(move || opml::parse(&String::from_utf8_lossy(&bytes)))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))??;
     let stats = opml::import(&state.db(), &outlines)?;
     spawn_refresh(&app, state.inner(), stats.new_feed_ids.clone());
     Ok(Some(stats))
@@ -426,8 +452,30 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     });
     let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
     let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
-    std::fs::write(&path, xml)?;
+    write_private(&path, xml.as_bytes())?;
     Ok(Some(path.display().to_string()))
+}
+
+/// Writes a file only this user can read. The export lists every feed address, and
+/// an address can hold a password.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    // An existing file keeps its old mode: tighten it too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -472,10 +520,10 @@ pub async fn play_video(app: AppHandle, state: AppStateRef<'_>, url: String) -> 
     if settings.https_only && url.scheme() == "http" {
         return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
     }
-    // Feeds control these links. Like reader tabs, a link may reach a private
-    // network only if it is on the host of a subscribed feed.
-    let trusted = subscribed_feed_on(&state, &url).is_some();
-    if !trusted && state.net().is_private_host(&url).await {
+    // Feeds control these links. Like reader tabs, they never lead to the local
+    // network. This covers the address given to the player; the player then makes
+    // its own connections and follows redirects by itself.
+    if state.net().is_private_host(&url).await {
         return Err(Error::blocked());
     }
     let player = video::find(&settings.video_player).ok_or_else(video::not_found)?;
@@ -483,6 +531,128 @@ pub async fn play_video(app: AppHandle, state: AppStateRef<'_>, url: String) -> 
         let _ = app.emit("video-failed", e.to_string());
     };
     video::play(&player, &url, &settings.proxy, video::STARTUP_WAIT, late).await
+}
+
+/// Finds an audio-only stream of a video page with yt-dlp ("Listen"). The UI plays
+/// it in the podcast player, through the media proxy. Same checks as `play_video`.
+#[tauri::command]
+pub async fn audio_stream(state: AppStateRef<'_>, url: String) -> Result<video::AudioStream> {
+    let settings = state.settings();
+    let url = net::parse_web_url(&url)?;
+    if settings.https_only && url.scheme() == "http" {
+        return Err(Error::msg("HTTPS-only mode is on, and this video address uses plain http"));
+    }
+    if state.net().is_private_host(&url).await {
+        return Err(Error::blocked());
+    }
+    let stream = video::audio_stream(&url, &settings.proxy).await?;
+    if settings.https_only && stream.url.starts_with("http://") {
+        return Err(Error::msg("HTTPS-only mode is on, and this audio stream uses plain http"));
+    }
+    // Read the first bytes through the media proxy, as the player will: a refusal
+    // gets a clear message here instead of "could not be played", and the first
+    // block is then in the proxy's memory when the player asks for it.
+    if let Err(e) = crate::media::fetch(&state.net(), &state.media, &stream.url, Some("bytes=0-1")).await {
+        return Err(Error::msg(format!(
+            "The video site refused the audio stream ({e}). Updating yt-dlp often helps: \
+             see Settings → Security."
+        )));
+    }
+    Ok(stream)
+}
+
+/// A stored brief with its body, for the brief tab.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BriefView {
+    #[serde(flatten)]
+    info: db::BriefInfo,
+    /// The article filter it was written from, to write it again.
+    query: serde_json::Value,
+    #[serde(flatten)]
+    body: brief::Body,
+}
+
+fn brief_view(state: &AppState, id: i64) -> Result<Option<BriefView>> {
+    let Some((info, query, body)) = db::get_brief(&state.db(), id)? else { return Ok(None) };
+    let query = serde_json::from_str(&query).unwrap_or(serde_json::Value::Null);
+    let body = serde_json::from_str(&body).map_err(|_| Error::msg("This brief could not be read"))?;
+    Ok(Some(BriefView { info, query, body }))
+}
+
+/// The models the configured local model server offers (Settings → AI briefs).
+#[tauri::command]
+pub async fn ai_models(state: AppStateRef<'_>) -> Result<Vec<String>> {
+    brief::models(&state.net(), &state.settings()).await
+}
+
+/// Writes a brief of the articles `query` shows, with the local model, and stores it.
+#[tauri::command]
+pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String) -> Result<BriefView> {
+    let settings = state.settings();
+    let (sources, total) = db::brief_sources(&state.db(), &query, brief::MAX_ARTICLES)?;
+    let title: String = title.trim().chars().take(200).collect();
+    let title = if title.is_empty() { "Brief".to_string() } else { title };
+    let (body, model) = brief::write(&state.net(), &settings, &title, &sources, total).await?;
+    let query_json = serde_json::to_string(&query).map_err(|e| Error::msg(e.to_string()))?;
+    let body_json = serde_json::to_string(&body).map_err(|e| Error::msg(e.to_string()))?;
+    let id = db::insert_brief(&state.db(), &title, &model, &query_json, &body_json)?;
+    brief_view(&state, id)?.ok_or_else(|| Error::msg("The brief was not stored"))
+}
+
+/// Past briefs, newest first.
+#[tauri::command]
+pub fn briefs(state: AppStateRef<'_>) -> Result<Vec<db::BriefInfo>> {
+    db::list_briefs(&state.db(), 50)
+}
+
+#[tauri::command]
+pub fn brief(state: AppStateRef<'_>, id: i64) -> Result<Option<BriefView>> {
+    brief_view(&state, id)
+}
+
+#[tauri::command]
+pub fn delete_brief(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    let conn = state.db();
+    db::delete_brief(&conn, id)?;
+    db::checkpoint(&conn);
+    Ok(())
+}
+
+/// What the last check that ran yt-dlp saw, kept in the database.
+const YT_DLP_SEEN: &str = "yt_dlp_seen";
+
+fn yt_dlp_seen(state: &AppState) -> Option<updates::Seen> {
+    db::get_value(&state.db(), YT_DLP_SEEN).and_then(|json| serde_json::from_str(&json).ok())
+}
+
+fn remember_yt_dlp(state: &AppState, seen: Option<updates::Seen>) {
+    if let Some(json) = seen.and_then(|s| serde_json::to_string(&s).ok()) {
+        let _ = db::set_value(&state.db(), YT_DLP_SEEN, &json);
+    }
+}
+
+/// The offline security check (updates.rs): no network. With `run` (the Security
+/// section of Settings is open) it runs `yt-dlp --version`; at startup it does not
+/// start any program and uses the version seen last time.
+#[tauri::command]
+pub async fn check_components(state: AppStateRef<'_>, run: Option<bool>) -> Result<Vec<updates::Component>> {
+    let today = chrono::Local::now().date_naive();
+    let (run, seen) = (run.unwrap_or(false), yt_dlp_seen(&state));
+    let (list, seen) = tokio::task::spawn_blocking(move || updates::check_offline(today, run, seen))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))?;
+    remember_yt_dlp(&state, seen);
+    Ok(list)
+}
+
+/// The online security check. Only when the user clicks "Check now".
+#[tauri::command]
+pub async fn check_components_online(state: AppStateRef<'_>) -> Result<Vec<updates::Component>> {
+    let net = state.net();
+    let (list, seen) = updates::check_online(&net, chrono::Local::now().date_naive()).await;
+    remember_yt_dlp(&state, seen);
+    Ok(list)
 }
 
 /// Finds a playable file for a PeerTube watch page. The UI plays it through the media proxy.
@@ -513,6 +683,8 @@ pub struct AppInfo {
     pub platform: &'static str,
     /// Linux: base URL of the loopback audio server. None elsewhere.
     pub media_base: Option<String>,
+    /// Shown once at startup: the saved proxy could not be used and Tidings is offline.
+    pub startup_warning: Option<String>,
 }
 
 #[tauri::command]
@@ -522,5 +694,6 @@ pub fn app_info(state: AppStateRef<'_>) -> AppInfo {
         data_dir: state.data_dir.display().to_string(),
         platform: std::env::consts::OS,
         media_base: state.media_base.get().cloned(),
+        startup_warning: state.startup_warning.clone(),
     }
 }

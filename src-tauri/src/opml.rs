@@ -1,7 +1,7 @@
 //! OPML import and export. Folders map to nested <outline> elements.
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -30,9 +30,14 @@ pub struct ImportStats {
 fn outline_from(e: &BytesStart<'_>) -> Outline {
     let mut out = Outline::default();
     let mut text = String::new();
-    for attr in e.attributes().flatten() {
-        let key = String::from_utf8_lossy(attr.key.as_ref()).to_ascii_lowercase();
-        let Ok(value) = attr.unescape_value() else { continue };
+    // No check for duplicate attribute names: it compares every pair, so one tag
+    // with a hundred thousand attributes took minutes. A real outline has a handful.
+    if e.attributes_raw().len() > MAX_ATTRIBUTES_BYTES {
+        return out;
+    }
+    for attr in e.attributes().with_checks(false).flatten() {
+        let key = attr.key.as_ref().to_ascii_lowercase();
+        let Ok(value) = attr.normalized_value(XmlVersion::Implicit1_0) else { continue };
         let value = value.trim().to_string();
         match key.as_str() {
             "title" => out.title = value,
@@ -48,6 +53,13 @@ fn outline_from(e: &BytesStart<'_>) -> Outline {
     out
 }
 
+/// The attributes of one outline, at most this many bytes. Longer ones are ignored.
+const MAX_ATTRIBUTES_BYTES: usize = 64 * 1024;
+
+/// Folders inside folders, at most this deep. Real lists are a few levels deep; a
+/// crafted file with thousands of levels would overflow the stack on import.
+const MAX_DEPTH: usize = 32;
+
 pub fn parse(xml: &str) -> Result<Vec<Outline>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -57,12 +69,17 @@ pub fn parse(xml: &str) -> Result<Vec<Outline>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
-                b"opml" => saw_opml = true,
-                b"outline" => stack.push(outline_from(&e)),
+                "opml" => saw_opml = true,
+                "outline" => {
+                    if stack.len() > MAX_DEPTH {
+                        return Err(Error::msg("This OPML file has folders nested too deeply to import"));
+                    }
+                    stack.push(outline_from(&e));
+                }
                 _ => {}
             },
             Ok(Event::Empty(e)) => {
-                if e.local_name().as_ref() == b"outline" {
+                if e.local_name().as_ref() == "outline" {
                     let node = outline_from(&e);
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(node);
@@ -70,7 +87,7 @@ pub fn parse(xml: &str) -> Result<Vec<Outline>> {
                 }
             }
             Ok(Event::End(e)) => {
-                if e.local_name().as_ref() == b"outline" && stack.len() > 1 {
+                if e.local_name().as_ref() == "outline" && stack.len() > 1 {
                     let node = stack.pop().unwrap_or_default();
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(node);

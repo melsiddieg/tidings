@@ -3,6 +3,8 @@ import { api, errorText, on, setMediaBase } from './api';
 import type {
   AppInfo,
   ArticleItem,
+  BriefInfo,
+  ComponentCheck,
   DateRange,
   Dialog,
   Feed,
@@ -22,7 +24,7 @@ import type {
   VideoPlayer,
 } from './types';
 import { buildTree, childRef, flattenFeeds, isVideoLink, sameItem } from './util';
-import { FEED_TYPES, isAnyTime, rangeBounds, typeInfo, validRange, type TypeInfo } from './filters';
+import { FEED_TYPES, isAnyTime, rangeBounds, rangeLabel, typeInfo, validRange, type TypeInfo } from './filters';
 
 const PAGE = 150;
 const MAIN_TAB: Tab = { id: 'main', kind: 'main' };
@@ -48,6 +50,9 @@ export const DEFAULT_SETTINGS: Settings = {
   dockBadge: true,
   concurrency: 6,
   videoPlayer: '',
+  aiProvider: '',
+  aiEndpoint: '',
+  aiModel: '',
 };
 
 // UI preferences that are not worth a database round trip live in localStorage.
@@ -97,6 +102,17 @@ class Store {
   private markAnchor: string | null = null;
   /** The external video player, or null when none is found. */
   videoPlayer = $state<VideoPlayer | null>(null);
+  /** AI briefs are set up: a local model server and a model (Settings → AI briefs). */
+  aiReady = $derived(this.settings.aiProvider !== '' && this.settings.aiModel.trim() !== '');
+  /** Brief tabs whose brief is being written, and the error of each that failed. */
+  briefsRunning = $state<string[]>([]);
+  briefErrors = $state<Record<string, string>>({});
+  /** The security check in Settings (updates.rs), and when it last went online. */
+  components = $state<ComponentCheck[] | null>(null);
+  componentsCheckedOnline = $state<number | null>(null);
+  checkingComponents = $state(false);
+  /** Components that need an update. The Settings button shows a dot then. */
+  componentWarnings = $derived((this.components ?? []).filter((c) => c.status === 'old' || c.status === 'update'));
 
   scope = $state<Scope>(local.get<Scope>('scope', { kind: 'all' }));
   filter = $state<Filter>(local.get<Filter>('filter', 'all'));
@@ -248,10 +264,12 @@ class Store {
       this.tree = tree;
       this.info = info;
       setMediaBase(info.mediaBase);
+      if (info.startupWarning) this.toast(info.startupWarning, 'error');
     } catch (err) {
       this.error(err);
     }
     this.findVideoPlayer();
+    this.checkComponents(true);
     document.documentElement.dataset.platform = this.info?.platform ?? 'web';
     this.applyAppearance();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyAppearance());
@@ -617,7 +635,8 @@ class Store {
   // -------------------------------------------------------------------------
 
   private restoreTabs() {
-    const saved = local.get<Tab[]>('tabs', []).filter((t) => t.kind !== 'main');
+    // A brief that was still being written when the app closed is gone.
+    const saved = local.get<Tab[]>('tabs', []).filter((t) => t.kind !== 'main' && !(t.kind === 'brief' && t.briefId == null));
     this.tabs = [MAIN_TAB, ...saved];
     const active = local.get<string>('activeTab', 'main');
     this.activeTabId = this.tabs.some((t) => t.id === active) ? active : 'main';
@@ -637,7 +656,8 @@ class Store {
     this.persistTabs();
   }
 
-  openArticleTab(id: number, background = false) {
+  /** `known` names an article that may not be in the list, such as a brief's source. */
+  openArticleTab(id: number, background = false, known?: { title: string; feedId: number }) {
     const existing = this.tabs.find((t) => t.kind === 'article' && t.articleId === id);
     if (existing) {
       if (!background) this.activateTab(existing.id);
@@ -645,7 +665,13 @@ class Store {
     }
     const item = this.articles.find((a) => a.id === id);
     this.insertTab(
-      { id: `a${id}-${Date.now().toString(36)}`, kind: 'article', articleId: id, feedId: item?.feedId ?? null, title: item?.title ?? 'Article' },
+      {
+        id: `a${id}-${Date.now().toString(36)}`,
+        kind: 'article',
+        articleId: id,
+        feedId: item?.feedId ?? known?.feedId ?? null,
+        title: item?.title ?? known?.title ?? 'Article',
+      },
       background,
     );
     if (item && !this.isRead(item)) this.markRead([id], true);
@@ -671,6 +697,41 @@ class Store {
       return;
     }
     this.openWebTab(url, mode === 'background');
+  }
+
+  /**
+   * The offline security check: versions on this computer only, no network. At
+   * startup (`notify`), a finding is announced once a week at most.
+   */
+  async checkComponents(notify = false) {
+    try {
+      // At startup no program is started: yt-dlp's version is the one seen at the
+      // last check from Settings.
+      this.components = await api.checkComponents(!notify);
+    } catch {
+      return;
+    }
+    const warnings = this.componentWarnings;
+    if (!notify || warnings.length === 0) return;
+    const key = warnings.map((c) => `${c.id}:${c.version}`).join(',');
+    const last = local.get<{ key: string; at: number } | null>('securityNotice', null);
+    if (last && last.key === key && Date.now() - last.at < 7 * 86_400_000) return;
+    local.set('securityNotice', { key, at: Date.now() });
+    const names = warnings.map((c) => c.name).join(' and ');
+    this.toast(`${names} ${warnings.length > 1 ? 'need' : 'needs'} an update. See Settings → Security.`, 'info');
+  }
+
+  /** The online security check: only on the user's click ("Check now"). */
+  async checkComponentsOnline() {
+    this.checkingComponents = true;
+    try {
+      this.components = await api.checkComponentsOnline();
+      this.componentsCheckedOnline = Date.now();
+    } catch (err) {
+      this.error(err);
+    } finally {
+      this.checkingComponents = false;
+    }
   }
 
   /** Looks for the external video player again (the user may have installed one). */
@@ -715,6 +776,71 @@ class Store {
   activateTab(id: string) {
     this.activeTabId = id;
     this.persistTabs();
+  }
+
+  // -------------------------------------------------------------------------
+  // AI briefs (brief.rs): written by a local model, shown in tabs
+  // -------------------------------------------------------------------------
+
+  /** A name for what the list shows: "Canadian News · Unread · Last 24 hours". */
+  briefTitle(): string {
+    const parts = [this.scopeTitle];
+    if (this.typeFilter) parts.push(typeInfo(this.typeFilter).label);
+    if (this.filter !== 'all') parts.push(this.filter[0].toUpperCase() + this.filter.slice(1));
+    if (!isAnyTime(this.dateRange)) parts.push(rangeLabel(this.dateRange));
+    if (this.query.trim()) parts.push(`“${this.query.trim()}”`);
+    return parts.join(' · ');
+  }
+
+  /** Writes a brief of what the list shows now, in a new tab. */
+  makeBrief() {
+    if (!this.aiReady) {
+      this.dialog = { kind: 'settings', section: 'ai' };
+      return;
+    }
+    const tab: Tab = { id: `b${Date.now().toString(36)}`, kind: 'brief', briefId: null, title: this.briefTitle(), query: this.listQuery(0) };
+    this.insertTab(tab, false);
+    this.runBrief(tab.id);
+  }
+
+  /** Writes the brief of a brief tab (again). */
+  async runBrief(tabId: string) {
+    const tab = this.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind !== 'brief' || !tab.query || this.briefsRunning.includes(tabId)) return;
+    this.briefsRunning = [...this.briefsRunning, tabId];
+    const { [tabId]: _old, ...errors } = this.briefErrors;
+    this.briefErrors = errors;
+    try {
+      const brief = await api.makeBrief($state.snapshot(tab.query), tab.title);
+      this.tabs = this.tabs.map((t) => (t.id === tabId && t.kind === 'brief' ? { ...t, briefId: brief.id } : t));
+      this.persistTabs();
+    } catch (err) {
+      this.briefErrors = { ...this.briefErrors, [tabId]: errorText(err) };
+    } finally {
+      this.briefsRunning = this.briefsRunning.filter((id) => id !== tabId);
+    }
+  }
+
+  /** Writes a stored brief again, from the same articles, in its tab. */
+  rewriteBrief(tabId: string, query: ListQuery) {
+    this.tabs = this.tabs.map((t) => (t.id === tabId && t.kind === 'brief' ? { ...t, briefId: null, query } : t));
+    this.runBrief(tabId);
+  }
+
+  /** Opens a stored brief, or its tab if it is open. */
+  openBrief(info: BriefInfo) {
+    const existing = this.tabs.find((t) => t.kind === 'brief' && t.briefId === info.id);
+    if (existing) return this.activateTab(existing.id);
+    this.insertTab({ id: `b${info.id}-${Date.now().toString(36)}`, kind: 'brief', briefId: info.id, title: info.title }, false);
+  }
+
+  async deleteBrief(tabId: string, id: number) {
+    try {
+      await api.deleteBrief(id);
+      this.closeTab(tabId);
+    } catch (err) {
+      this.error(err);
+    }
   }
 
   closeTab(id: string) {

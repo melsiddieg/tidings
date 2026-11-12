@@ -1,7 +1,8 @@
 <script lang="ts">
   // The video part of an article: plays PeerTube videos and video files inside Tidings,
   // sends other video links (YouTube...) to mpv or IINA, and can look for a PeerTube
-  // copy of those. Files stream through the Rust media proxy, like podcast audio.
+  // copy of those, or play only their sound in the podcast player ("Listen"). Files
+  // stream through the Rust media proxy, like podcast audio.
   import { untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { api, mediaUrl } from '../lib/api';
@@ -10,7 +11,13 @@
   import type { PeerTubeHit } from '../lib/types';
   import { hostOf, type VideoSource } from '../lib/util';
 
-  let { source, title, poster = null }: { source: VideoSource; title: string; poster?: string | null } = $props();
+  let {
+    source,
+    title,
+    poster = null,
+    articleId,
+    feedId,
+  }: { source: VideoSource; title: string; poster?: string | null; articleId: number; feedId: number } = $props();
 
   /** What plays inside Tidings now. `page` is what an external player gets. */
   let current = $state<{ file: string; label: string; host: string; page: string; poster: string | null } | null>(null);
@@ -22,6 +29,8 @@
 
   const playerName = $derived(store.videoPlayer?.name ?? 'your video player');
   const playsHere = $derived(source.kind !== 'site');
+  // The sound of this video in the podcast player.
+  const listening = $derived(player.isCurrent(source.url));
 
   async function playHere(page: string, kind: 'peertube' | 'file', thumb: string | null) {
     failed = false;
@@ -111,6 +120,15 @@
         </span>
       </span>
       {#if source.kind === 'site'}
+        <button
+          class="btn small ghost"
+          title="Play only the sound, in the podcast player (L). Uses yt-dlp."
+          onclick={() => player.listen(articleId, feedId, title, source.url)}
+        >
+          {#if listening && player.loading && !player.error}<span class="spinner"></span>
+          {:else}<Icon name={listening && player.playing ? 'pause-fill' : 'headphones'} size={13} stroke={listening && player.playing ? 0 : undefined} />{/if}
+          {listening && player.playing ? 'Pause' : 'Listen'}
+        </button>
         <button class="btn small ghost" title="Search PeerTube for this title (sends the title to Sepia Search)" onclick={findOnPeerTube} disabled={searching}>
           {#if searching}<span class="spinner"></span>{:else}<Icon name="search" size={13} />{/if}Find on PeerTube
         </button>

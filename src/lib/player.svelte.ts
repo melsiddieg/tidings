@@ -1,13 +1,16 @@
 // Podcast player state. The <audio> element lives in PlayerBar.svelte and registers itself here.
-import { iconUrl, mediaUrl } from './api';
+import { api, errorText, iconUrl, mediaUrl } from './api';
 import { store } from './store.svelte';
 
 export interface Episode {
   articleId: number;
   feedId: number;
   title: string;
+  /** The audio file, or with `listen` the video page. Saved positions use it as the key. */
   url: string;
   type: string | null;
+  /** The audio of a video ("Listen"): yt-dlp finds the stream for `url` at each start. */
+  listen?: boolean;
 }
 
 const POSITIONS_KEY = 'tidings.positions';
@@ -34,6 +37,8 @@ class Player {
 
   private audio: HTMLAudioElement | null = null;
   private lastSaved = 0;
+  /** Where a "Listen" stream failed and was looked up again, or null. */
+  private retriedAt: number | null = null;
 
   attach(el: HTMLAudioElement) {
     this.audio = el;
@@ -56,17 +61,40 @@ class Player {
     this.time = 0;
     this.duration = 0;
     this.loading = true;
-    el.src = mediaUrl(ep.url);
+    this.retriedAt = null;
+    this.updateMediaSession();
+    const source = ep.listen ? await this.findAudio(ep.url) : ep.url;
+    // Another episode may have started while yt-dlp was looking.
+    if (!source || this.episode?.url !== ep.url) return;
+    this.start(el, source, loadPositions()[ep.url] ?? 0);
+  }
+
+  /** Plays the audio of a video page (YouTube, Vimeo...) like a podcast episode. */
+  listen(articleId: number, feedId: number, title: string, page: string) {
+    return this.play({ articleId, feedId, title, url: page, type: null, listen: true });
+  }
+
+  private start(el: HTMLAudioElement, source: string, resume: number) {
+    el.src = mediaUrl(source);
     el.playbackRate = this.rate;
-    const resume = loadPositions()[ep.url] ?? 0;
     if (resume > 5) {
       el.addEventListener('loadedmetadata', () => (el.currentTime = resume), { once: true });
     }
-    this.updateMediaSession();
+    // The error event reports real failures.
+    el.play().catch(() => {});
+  }
+
+  /** The audio stream of a video page, from yt-dlp, or null after an error (shown in the bar). */
+  private async findAudio(page: string): Promise<string | null> {
     try {
-      await el.play();
-    } catch {
-      /* the error event reports real failures */
+      return (await api.audioStream(page)).url;
+    } catch (err) {
+      if (this.episode?.url === page) {
+        this.loading = false;
+        this.playing = false;
+        this.error = errorText(err);
+      }
+      return null;
     }
   }
 
@@ -139,6 +167,8 @@ class Player {
     const step = this.audio.currentTime - this.time;
     if (this.loading && !this.audio.paused && step > 0 && step < 2) this.loading = false;
     this.time = this.audio.currentTime;
+    // Playing well again for a while: a later failure may look the stream up again.
+    if (this.retriedAt != null && this.time > this.retriedAt + 30) this.retriedAt = null;
     if (Date.now() - this.lastSaved > 5000) this.savePosition();
   }
 
@@ -151,10 +181,25 @@ class Player {
   }
 
   onError() {
-    if (!this.episode) return;
+    const ep = this.episode;
+    const el = this.audio;
+    if (!ep || !el) return;
+    // A video's audio address expires after some hours and only works from the IP
+    // address that asked for it; with Tor that address changes every few minutes.
+    // Ask yt-dlp for a new one, once, and go on from the same place.
+    if (ep.listen && this.retriedAt == null && el.getAttribute('src')) {
+      // If the element went back to 0 when it failed, use the last saved position.
+      const at = this.time > 0 ? this.time : (loadPositions()[ep.url] ?? 0);
+      this.retriedAt = at;
+      this.loading = true;
+      this.findAudio(ep.url).then((source) => {
+        if (source && this.episode?.url === ep.url) this.start(el, source, at);
+      });
+      return;
+    }
     this.loading = false;
     this.playing = false;
-    this.error = 'This episode could not be played.';
+    this.error = ep.listen ? 'The audio of this video could not be played.' : 'This episode could not be played.';
   }
 
   savePosition() {

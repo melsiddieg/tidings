@@ -132,9 +132,33 @@ fn full_database_workflow() {
     let rust = db::create_folder(&conn, "Rust", Some(tech)).unwrap();
     let feed_a = db::insert_feed(&conn, url.as_str(), Some(rust), None, None).unwrap();
     let feed_b = db::insert_feed(&conn, "https://other.example/rss", None, Some("Other"), None).unwrap();
-    let mut urls = db::feed_urls(&conn).unwrap();
-    urls.sort();
-    assert_eq!(urls, ["https://example.com/feed.xml", "https://other.example/rss"]);
+    // A feed is allowed on the local network only by the user's consent.
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
+    db::set_feed_local(&conn, feed_b, true).unwrap();
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    assert!(db::feeds(&conn).unwrap().iter().find(|f| f.id == feed_b).unwrap().local);
+    let patch = |url: &str, local: Option<bool>| db::FeedPatch {
+        custom_title: Some("Other".into()),
+        url: url.into(),
+        folder_id: None,
+        update_interval: None,
+        retention_mode: None,
+        retention_value: None,
+        full_text: false,
+        paused: false,
+        type_override: None,
+        local,
+    };
+    // Editing a feed keeps the consent; a new address starts without it.
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss", None)).unwrap();
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss", None)).unwrap();
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
+    // The properties dialog can give and take it.
+    db::update_feed(&conn, feed_b, &patch("https://moved.example/rss", Some(true))).unwrap();
+    assert!(db::fetch_info(&conn, feed_b).unwrap().local);
+    db::update_feed(&conn, feed_b, &patch("https://other.example/rss", Some(false))).unwrap();
+    assert!(!db::fetch_info(&conn, feed_b).unwrap().local);
 
     // Store articles; storing twice must not duplicate.
     for _ in 0..2 {
@@ -236,6 +260,7 @@ fn full_database_workflow() {
             full_text: true,
             paused: false,
             type_override: None,
+            local: None,
         },
     )
     .unwrap();
@@ -358,7 +383,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 7);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -435,6 +460,7 @@ fn feed_types_and_date_ranges() {
         full_text: false,
         paused: false,
         type_override: Some("newsletter".into()),
+        local: None,
     };
     db::update_feed(&conn, blog, &patch).unwrap();
     db::detect_feed_type(&conn, blog).unwrap();
@@ -507,6 +533,7 @@ fn migration_detects_types_of_existing_feeds() {
     conn.execute_batch(
         "ALTER TABLE feeds DROP COLUMN type_override;
          ALTER TABLE feeds DROP COLUMN detected_type;
+         ALTER TABLE feeds DROP COLUMN local;
          PRAGMA user_version = 2;",
     )
     .unwrap();
@@ -514,7 +541,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 7);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -602,7 +629,7 @@ fn image_host_checks() {
 
 #[test]
 fn local_names() {
-    use crate::net::{host_looks_public, is_local_name, same_host};
+    use crate::net::{host_looks_public, is_local_name, same_site};
     for name in ["localhost", "nas", "router.lan", "printer.local", "box.home.arpa", "db.internal", "LOCALHOST."] {
         assert!(is_local_name(name), "{name}");
     }
@@ -615,8 +642,12 @@ fn local_names() {
     assert!(!host_looks_public(&u("http://[fd00::1]/feed")));
     assert!(!host_looks_public(&u("http://100.64.0.1/feed"))); // carrier-grade NAT, Tailscale
     assert!(host_looks_public(&u("https://example.com/feed")));
-    assert!(same_host(&u("http://10.0.0.5/feed"), &u("https://10.0.0.5:8443/story")));
-    assert!(!same_host(&u("http://10.0.0.5/feed"), &u("http://10.0.0.6/feed")));
+    // Trust for a local feed covers its host and port, and the move from http to https.
+    assert!(same_site(&u("http://10.0.0.5:8080/feed"), &u("http://10.0.0.5:8080/story")));
+    assert!(same_site(&u("http://nas.local/feed"), &u("https://nas.local/feed")));
+    assert!(!same_site(&u("http://10.0.0.5/feed"), &u("https://10.0.0.5:8443/story")));
+    assert!(!same_site(&u("http://nas:8080/feed"), &u("http://nas:22/")));
+    assert!(!same_site(&u("http://10.0.0.5/feed"), &u("http://10.0.0.6/feed")));
 }
 
 /// A tiny HTTP server on 127.0.0.1 for the private-network tests.
@@ -687,7 +718,7 @@ async fn media_blocks() {
     use crate::media::{fetch, Media, CHUNK};
     use std::sync::atomic::Ordering;
     let mut net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
-    net.image = net.local.clone(); // the test server is on 127.0.0.1
+    net.unguarded = true; // the test server is on 127.0.0.1
     let size = (CHUNK * 5 + 1234) as usize;
     let (port, hits) = range_server(size, CHUNK as usize / 3).await;
     let url = format!("http://127.0.0.1:{port}/v.mp4");
@@ -731,6 +762,81 @@ async fn media_blocks() {
     assert_eq!(c.status, 416);
 }
 
+/// N-1: a playlist (HLS, DASH) lists addresses that the player fetches by itself,
+/// past net.rs. The media proxy gives the player no playlist, whatever the address
+/// or the content type says, and also when the player starts in the middle.
+#[tokio::test]
+async fn media_refuses_playlists() {
+    use crate::media::{fetch, is_playlist_error, Media, CHUNK};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    net.unguarded = true; // the test servers are on 127.0.0.1
+
+    // The address inside the playlist: nothing may ever ask for it.
+    let segments = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let segment_port = segments.local_addr().unwrap().port();
+    let segment_hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = segment_hits.clone();
+    tokio::spawn(async move {
+        while segments.accept().await.is_ok() {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    // A host that calls everything audio/mpeg, like a feed that lies about a file.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let segment = format!("http://127.0.0.1:{segment_port}/segment.ts");
+                let (kind, body) = match path.as_str() {
+                    "/episode.mp3" => (
+                        "audio/mpeg",
+                        format!("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n{segment}\n#EXT-X-ENDLIST\n").into_bytes(),
+                    ),
+                    "/video.mp4" => ("video/mp4", format!("<?xml version=\"1.0\"?><MPD><BaseURL>{segment}</BaseURL></MPD>").into_bytes()),
+                    "/typed.mp3" => ("application/vnd.apple.mpegurl", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
+                    _ => ("audio/mpeg", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
+                };
+                let mut reply =
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                reply.extend(body);
+                let _ = stream.write_all(&reply).await;
+            });
+        }
+    });
+
+    let media = std::sync::Arc::new(Media::default());
+    let late = format!("bytes={}-", CHUNK + 5);
+    for (path, range) in [("episode.mp3", "bytes=0-"), ("video.mp4", "bytes=0-1"), ("typed.mp3", "bytes=0-"), ("episode.mp3", late.as_str())] {
+        let url = format!("http://127.0.0.1:{port}/{path}");
+        let err = fetch(&net, &media, &url, Some(range)).await.err().unwrap_or_else(|| panic!("{path} {range} was played"));
+        assert!(is_playlist_error(&err), "{path}: {err}");
+        assert!(err.to_string().contains("streaming playlist"), "{err}");
+    }
+    // A real file on the same host plays.
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/real.mp3"), Some("bytes=0-")).await.unwrap();
+    assert_eq!((c.status, c.bytes.as_slice()), (206, &b"ID3\x04\x00\x00\x00\x00\x00\x00"[..]));
+    assert_eq!(segment_hits.load(Ordering::SeqCst), 0);
+
+    // Starting in the middle of a real file first reads (and checks) its start.
+    let size = (CHUNK * 3) as usize;
+    let (port, _) = range_server(size, CHUNK as usize).await;
+    let start = 2 * CHUNK as usize + 7;
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/v.mp4"), Some(&format!("bytes={start}-"))).await.unwrap();
+    assert_eq!(c.bytes[..4], [(start % 251) as u8, ((start + 1) % 251) as u8, ((start + 2) % 251) as u8, ((start + 3) % 251) as u8]);
+
+    // A `Range` far past any file is refused before any sum of offsets can overflow.
+    let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/v.mp4"), Some(&format!("bytes={}-", u64::MAX - 1))).await.unwrap();
+    assert_eq!(c.status, 416);
+}
+
 #[tokio::test]
 async fn private_addresses_need_a_trusted_host() {
     let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
@@ -763,7 +869,81 @@ async fn private_addresses_need_a_trusted_host() {
     let same = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://127.0.0.1:{port}/ok")).unwrap();
     assert_eq!(fetch(same, Some(lan_feed.clone())).await.unwrap(), "ok");
     let other = Url::parse(&format!("http://127.0.0.1:{port}/redirect?http://localhost:{port}/ok")).unwrap();
-    blocked(fetch(other, Some(lan_feed)).await);
+    blocked(fetch(other, Some(lan_feed.clone())).await);
+    // Nor to any other name: this client does not check where names lead, and a
+    // name that looks public could resolve to another device on the local network.
+    let named = Url::parse(&format!("http://127.0.0.1:{port}/redirect?https://example.com/feed.xml")).unwrap();
+    blocked(fetch(named, Some(lan_feed.clone())).await);
+    // Another port on the same machine is another service: not covered by the consent.
+    let port2 = test_server().await;
+    let other_port = Url::parse(&format!("http://127.0.0.1:{port2}/ok")).unwrap();
+    blocked(fetch(other_port, Some(lan_feed)).await);
+
+    // Literal addresses and local names are known without a lookup.
+    let private = |u: &str| { let net = net.clone(); let u = Url::parse(u).unwrap(); async move { net.private_host(&u).await } };
+    assert_eq!(private("http://192.168.1.10/feed").await, Some(true));
+    assert_eq!(private("http://nas.local/feed").await, Some(true));
+    assert_eq!(private("https://8.8.8.8/feed").await, Some(false));
+    // A name that cannot be looked up is not decided.
+    assert_eq!(private("https://no-such-host.invalid/feed").await, None);
+}
+
+#[tokio::test]
+async fn offline_when_the_proxy_is_unusable() {
+    // A proxy value that cannot be used must not become "no proxy".
+    let broken = crate::settings::Settings { proxy: "not a proxy".into(), ..Default::default() };
+    assert!(crate::net::Net::new(&broken).is_err());
+    let net = crate::net::Net::offline().unwrap();
+    let port = test_server().await;
+    // Even a server on this computer is not reached: every client goes to a dead proxy.
+    let url = format!("http://127.0.0.1:{port}/ok");
+    assert!(net.local.get(&url).send().await.is_err());
+    assert!(net.public("http://example.com/a.png").unwrap().send().await.is_err());
+    // No lookups of its own, like any proxied setup.
+    assert!(!net.is_private_host(&Url::parse("https://no-such-host.invalid/").unwrap()).await);
+}
+
+#[test]
+fn image_cache_is_limited_by_size() {
+    use crate::state::{CachedImage, ImageCache};
+    let image = |n: usize| std::sync::Arc::new(CachedImage { mime: "image/png".into(), bytes: vec![0; n] });
+    let mut cache = ImageCache::default();
+    for i in 0..40 {
+        cache.put(format!("https://example.com/{i}.png"), image(3 * 1024 * 1024));
+    }
+    let (count, bytes) = cache.size();
+    assert_eq!((count, bytes), (21, 63 * 1024 * 1024));
+    // The oldest are gone, the newest stay.
+    assert!(cache.get("https://example.com/0.png").is_none());
+    assert!(cache.get("https://example.com/39.png").is_some());
+    // Replacing an entry counts its new size; too large an image is not kept.
+    cache.put("https://example.com/39.png".into(), image(1024));
+    assert_eq!(cache.size(), (21, 60 * 1024 * 1024 + 1024));
+    cache.put("https://example.com/huge.png".into(), image(4 * 1024 * 1024));
+    assert!(cache.get("https://example.com/huge.png").is_none());
+}
+
+#[test]
+fn opml_nesting_is_limited() {
+    let nested = |depth: usize| {
+        format!(
+            "<opml><body>{}<outline text=\"f\" xmlUrl=\"https://example.com/rss\"/>{}</body></opml>",
+            "<outline text=\"a\">".repeat(depth),
+            "</outline>".repeat(depth)
+        )
+    };
+    let (conn, dir) = temp_db();
+    let stats = opml::import(&conn, &opml::parse(&nested(10)).unwrap()).unwrap();
+    // An imported feed gets no consent for the local network, whatever its address.
+    let imported = opml::parse("<opml><body><outline text=\"r\" xmlUrl=\"http://192.168.1.1/feed\"/></body></opml>").unwrap();
+    let ids = opml::import(&conn, &imported).unwrap().new_feed_ids;
+    assert!(!db::fetch_info(&conn, ids[0]).unwrap().local);
+    assert_eq!((stats.feeds, stats.folders), (1, 10));
+    // A crafted file with thousands of levels used to overflow the stack.
+    let err = opml::parse(&nested(5000)).unwrap_err().to_string();
+    assert!(err.contains("nested too deeply"), "{err}");
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -812,7 +992,7 @@ async fn live_network() {
     let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
 
     // Autodiscovery from a home page, then fetch and parse the feed.
-    let found = crate::discover::discover(&net, "blog.rust-lang.org").await.unwrap();
+    let found = crate::discover::discover(&net, "blog.rust-lang.org", false).await.unwrap();
     assert!(!found.is_empty(), "no feed discovered");
     let feed_url = Url::parse(&found[0].url).unwrap();
     let resp = net.web.get(feed_url.as_str()).send().await.unwrap();
@@ -823,7 +1003,7 @@ async fn live_network() {
     println!("feed: {:?}, {} articles", parsed.title, parsed.articles.len());
 
     // Favicon lookup.
-    let icon = feeds::fetch_icon(&net, parsed.site_url.as_deref(), parsed.icon_url.as_deref(), &feed_url).await;
+    let icon = feeds::fetch_icon(&net, parsed.site_url.as_deref(), parsed.icon_url.as_deref(), &feed_url, false).await;
     println!("icon: {:?}", icon.as_ref().map(|(b, m)| (b.len(), m.clone())));
 
     // Reader mode on the newest article.
@@ -889,7 +1069,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 7);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -953,4 +1133,634 @@ async fn live_peertube() {
     assert_eq!(chunk.status, 206);
     assert!(chunk.mime.starts_with("video/"), "{}", chunk.mime);
     println!("media: {} bytes, {}, {:?}", chunk.bytes.len(), chunk.mime, chunk.content_range);
+}
+
+/// "Listen" end to end without the UI: yt-dlp finds the audio of a 19-second YouTube
+/// video, and the media proxy reads it in byte ranges, as the podcast player does.
+/// Needs yt-dlp: `cargo test live_listen_through_proxy -- --ignored`
+#[tokio::test]
+#[ignore]
+async fn live_listen_through_proxy() {
+    let page = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+    let stream = crate::video::audio_stream(&page, "").await.unwrap();
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let cache = std::sync::Arc::new(crate::media::Media::default());
+    let first = crate::media::fetch(&net, &cache, &stream.url, Some("bytes=0-")).await.unwrap();
+    assert_eq!(first.status, 206);
+    assert_eq!(first.mime, "audio/mp4");
+    // A seek into the middle.
+    let middle = crate::media::fetch(&net, &cache, &stream.url, Some("bytes=150000-")).await.unwrap();
+    assert_eq!(middle.status, 206);
+    println!("{} bytes, then {} bytes from the middle, {:?}", first.bytes.len(), middle.bytes.len(), middle.content_range);
+}
+
+fn article(guid: &str, published: i64, excerpt: &str) -> db::NewArticle {
+    db::NewArticle { excerpt: excerpt.into(), ..item(guid, published, None) }
+}
+
+#[test]
+fn brief_sources_and_storage() {
+    let (mut conn, dir) = temp_db();
+    let t0 = db::now() - 3_600;
+    let alpha = db::insert_feed(&conn, "https://alpha.example/rss", None, Some("Alpha"), None).unwrap();
+    let beta = db::insert_feed(&conn, "https://beta.example/rss", None, Some("Beta"), None).unwrap();
+    store(&mut conn, alpha, &[article("a1", t0, "First."), article("a2", t0 + 100, "Second.")]);
+    store(&mut conn, beta, &[article("b1", t0 + 50, "")]);
+    let a1 = db::list_articles(&conn, &query(Scope::All, "all", "a1"), |u| u.to_string()).unwrap()[0].id;
+    db::set_read(&conn, &[a1], true).unwrap();
+
+    // The same filters as the list, newest first, with feed names and excerpts.
+    let (sources, total) = db::brief_sources(&conn, &query(Scope::All, "all", ""), 300).unwrap();
+    assert_eq!(total, 3);
+    let seen: Vec<(&str, &str, &str)> = sources.iter().map(|s| (s.title.as_str(), s.feed.as_str(), s.excerpt.as_str())).collect();
+    assert_eq!(seen, [("a2", "Alpha", "Second."), ("b1", "Beta", ""), ("a1", "Alpha", "First.")]);
+    let (unread, total) = db::brief_sources(&conn, &query(Scope::All, "unread", ""), 300).unwrap();
+    assert_eq!((unread.len(), total), (2, 2));
+    let (newest, total) = db::brief_sources(&conn, &query(Scope::Feed { id: alpha }, "all", ""), 1).unwrap();
+    assert_eq!((newest[0].title.as_str(), total), ("a2", 2));
+
+    // Stored briefs: newest first, read back whole, deleted, and only the newest 100 kept.
+    let first = db::insert_brief(&conn, "Morning", "qwen3:4b", "{\"q\":1}", "{\"b\":1}").unwrap();
+    let second = db::insert_brief(&conn, "Evening", "qwen3:4b", "{}", "{}").unwrap();
+    let list = db::list_briefs(&conn, 10).unwrap();
+    assert_eq!(list.iter().map(|b| b.id).collect::<Vec<_>>(), [second, first]);
+    let (info, q, body) = db::get_brief(&conn, first).unwrap().unwrap();
+    assert_eq!((info.title.as_str(), info.model.as_str(), q.as_str(), body.as_str()), ("Morning", "qwen3:4b", "{\"q\":1}", "{\"b\":1}"));
+    db::delete_brief(&conn, second).unwrap();
+    assert!(db::get_brief(&conn, second).unwrap().is_none());
+    for i in 0..105 {
+        db::insert_brief(&conn, &format!("B{i}"), "m", "{}", "{}").unwrap();
+    }
+    assert_eq!(db::list_briefs(&conn, 500).unwrap().len(), 100);
+    assert!(db::get_brief(&conn, first).unwrap().is_none());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A model server on 127.0.0.1 that answers like Ollama (`openai` false) or like an
+/// OpenAI-style server that refuses JSON schemas. It keeps the request bodies.
+async fn model_server(openai: bool) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                // Read the head, then as much body as Content-Length says.
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= head_end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(body.to_string());
+                let brief = r#"{"sections": [{"title": "Elections", "points": [{"text": "Polls opened and turnout was high.", "sources": [1, 3, 7]}]}]}"#;
+                let (status, reply) = match (openai, path.as_str()) {
+                    (false, "/api/tags") => ("200 OK", r#"{"models": [{"name": "qwen3:4b"}, {"name": "llama3.2:latest"}]}"#.to_string()),
+                    (false, "/api/chat") => ("200 OK", serde_json::json!({"message": {"role": "assistant", "content": brief}, "done": true}).to_string()),
+                    (true, "/v1/models") => ("200 OK", r#"{"data": [{"id": "qwen3-4b-instruct"}]}"#.to_string()),
+                    (true, "/v1/chat/completions") if body.contains("response_format") => {
+                        ("400 Bad Request", r#"{"error": {"message": "response_format is not supported"}}"#.to_string())
+                    }
+                    (true, "/v1/chat/completions") => {
+                        ("200 OK", serde_json::json!({"choices": [{"message": {"content": format!("Sure! {brief}")}}]}).to_string())
+                    }
+                    _ => ("404 Not Found", r#"{"error": "model 'nope' not found"}"#.to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (port, bodies)
+}
+
+#[tokio::test]
+async fn briefs_with_a_local_model() {
+    let sources = vec![
+        db::BriefSource { id: 501, feed_id: 1, feed: "CBC".into(), title: "Polls open".into(), excerpt: "Voters lined up.".into(), published: 1_794_200_000 },
+        db::BriefSource { id: 502, feed_id: 1, feed: "CBC".into(), title: "Snow".into(), excerpt: String::new(), published: 1_794_190_000 },
+        db::BriefSource { id: 503, feed_id: 2, feed: "Globe".into(), title: "Turnout high".into(), excerpt: String::new(), published: 1_794_180_000 },
+    ];
+    for openai in [false, true] {
+        let (port, bodies) = model_server(openai).await;
+        let settings = crate::settings::Settings {
+            ai_provider: if openai { "openai" } else { "ollama" }.into(),
+            ai_endpoint: format!("http://127.0.0.1:{port}"),
+            ai_model: "qwen3:4b".into(),
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        let net = crate::net::Net::new(&settings).unwrap();
+        let models = crate::brief::models(&net, &settings).await.unwrap();
+        assert_eq!(models, if openai { vec!["qwen3-4b-instruct"] } else { vec!["llama3.2:latest", "qwen3:4b"] });
+
+        let (body, model) = crate::brief::write(&net, &settings, "Canadian News", &sources, 40).await.unwrap();
+        assert_eq!(model, "qwen3:4b");
+        assert_eq!((body.articles_used, body.articles_total), (3, 40));
+        assert_eq!(body.sections[0].title, "Elections");
+        // Article 7 was never sent, so its citation is dropped.
+        assert_eq!(body.sections[0].points[0].sources, [501, 503]);
+        assert_eq!(body.sources.iter().map(|s| s.id).collect::<Vec<_>>(), [501, 503]);
+
+        // The model got the titles, feeds and excerpts, and nothing else of the database.
+        let sent = bodies.lock().unwrap().last().unwrap().clone();
+        assert!(sent.contains("Polls open") && sent.contains("Voters lined up.") && sent.contains("[3] Globe"), "{sent}");
+        if openai {
+            // The schema was refused once, then the request went without it.
+            assert!(bodies.lock().unwrap().iter().filter(|b| b.contains("chat")).count() <= 2);
+            assert!(!sent.contains("response_format"));
+        } else {
+            assert!(sent.contains("\"format\"") && sent.contains("num_ctx"));
+        }
+    }
+
+    // By name: `localhost` resolves to this computer, which the resolver accepts.
+    let (port, _) = model_server(false).await;
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: format!("http://localhost:{port}"),
+        ai_model: "qwen3:4b".into(),
+        ..Default::default()
+    };
+    let models = crate::brief::models(&crate::net::Net::new(&settings).unwrap(), &settings).await.unwrap();
+    assert_eq!(models.len(), 2);
+
+    // A model the server does not have: its own words come back.
+    let (port, _) = model_server(false).await;
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: format!("http://127.0.0.1:{port}/nope"),
+        ai_model: "nope".into(),
+        ..Default::default()
+    };
+    let err = crate::brief::write(&crate::net::Net::new(&settings).unwrap(), &settings, "x", &sources, 3).await.unwrap_err();
+    assert!(err.to_string().contains("not found"), "{err}");
+
+    // Nobody listening.
+    let settings = crate::settings::Settings {
+        ai_provider: "ollama".into(),
+        ai_endpoint: "http://127.0.0.1:9".into(),
+        ai_model: "m".into(),
+        ..Default::default()
+    };
+    let err = crate::brief::models(&crate::net::Net::new(&settings).unwrap(), &settings).await.unwrap_err();
+    assert!(err.to_string().starts_with("Could not reach Ollama at http://127.0.0.1:9/"), "{err}");
+}
+
+#[test]
+fn model_server_must_be_local() {
+    let check = |endpoint: &str, proxy: &str| {
+        crate::settings::Settings { ai_provider: "ollama".into(), ai_endpoint: endpoint.into(), proxy: proxy.into(), ..Default::default() }
+            .validated()
+            .map(|s| s.ai_server().unwrap().to_string())
+    };
+    assert_eq!(check("", "").unwrap(), "http://127.0.0.1:11434/");
+    assert!(check("http://192.168.1.20:11434/", "").is_ok());
+    assert!(check("http://gpu-box.lan:11434", "").is_ok());
+    assert!(check("http://localhost:1234", "socks5h://127.0.0.1:9050").is_ok());
+    // A public host would send the articles over the internet.
+    assert!(check("https://api.example.com", "").is_err());
+    assert!(check("http://8.8.8.8:11434", "").is_err());
+    // With a proxy, names would be looked up outside it.
+    assert!(check("http://gpu-box.lan:11434", "socks5h://127.0.0.1:9050").is_err());
+    assert!(check("ftp://127.0.0.1", "").is_err());
+    // Briefs off: no server.
+    let off = crate::settings::Settings::default().validated().unwrap();
+    assert!(off.ai_server().is_none());
+}
+
+/// Writes a brief with a real local model from a copy of a real database, and prints
+/// it. Never point it at the live database: it is migrated in place.
+/// `TIDINGS_DB_COPY=copy.db TIDINGS_BRIEF_FOLDER="Canadian News" TIDINGS_AI_PROVIDER=openai
+///  TIDINGS_AI_ENDPOINT=http://127.0.0.1:8080 TIDINGS_AI_MODEL=qwen3 cargo test live_brief -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn live_brief() {
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
+    let conn = db::open(std::path::Path::new(&var("TIDINGS_DB_COPY"))).unwrap();
+    let folder: i64 = conn.query_row("SELECT id FROM folders WHERE title = ?1", [var("TIDINGS_BRIEF_FOLDER")], |r| r.get(0)).unwrap();
+    let hours: i64 = std::env::var("TIDINGS_BRIEF_HOURS").ok().and_then(|h| h.parse().ok()).unwrap_or(24);
+    let mut q = query(Scope::Folder { id: folder }, "all", "");
+    q.range = db::DateRange { since: Some(db::now() - hours * 3600), until: None };
+    let (sources, total) = db::brief_sources(&conn, &q, crate::brief::MAX_ARTICLES).unwrap();
+    let settings = crate::settings::Settings {
+        ai_provider: var("TIDINGS_AI_PROVIDER"),
+        ai_endpoint: var("TIDINGS_AI_ENDPOINT"),
+        ai_model: var("TIDINGS_AI_MODEL"),
+        ..Default::default()
+    }
+    .validated()
+    .unwrap();
+    let net = crate::net::Net::new(&settings).unwrap();
+    let title = format!("{} · last {hours} hours", var("TIDINGS_BRIEF_FOLDER"));
+    let (body, model) = crate::brief::write(&net, &settings, &title, &sources, total).await.unwrap();
+    println!("\n{title} — {model}, {} of {} articles, {} s\n", body.articles_used, body.articles_total, body.seconds);
+    let by_id: std::collections::HashMap<i64, &crate::brief::SourceRef> = body.sources.iter().map(|s| (s.id, s)).collect();
+    for section in &body.sections {
+        println!("## {}", section.title);
+        for point in &section.points {
+            let cites: Vec<String> = point.sources.iter().filter_map(|id| by_id.get(id)).map(|s| format!("{}: {}", s.feed, s.title)).collect();
+            println!("- {}\n    [{}]", point.text, cites.join(" | "));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for the second audit (0.9.2)
+// ---------------------------------------------------------------------------
+
+/// H-1: every media request is checked where it starts, also after URL rewriting.
+#[tokio::test]
+async fn media_refuses_private_targets() {
+    use crate::media::{fetch, strip_trackers, Media};
+    let port = test_server().await;
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let media = std::sync::Arc::new(Media::default());
+    for target in [
+        format!("http://127.0.0.1:{port}/ok"),
+        format!("http://localhost:{port}/ok"),
+        "http://[::1]/a.mp3".to_string(),
+        "http://192.168.1.1/a.mp3".to_string(),
+        "http://169.254.169.254/latest/meta-data".to_string(),
+        "http://[64:ff9b::7f00:1]/a.mp3".to_string(),
+        "file:///etc/passwd".to_string(),
+    ] {
+        let err = fetch(&net, &media, &target, Some("bytes=0-1")).await.err().expect(&target).to_string();
+        assert!(err.starts_with("Blocked") || err.contains("http://"), "{target}: {err}");
+        assert!(net.public(&target).is_err(), "{target}");
+    }
+    // A tracker prefix cannot smuggle a private address in: the URL stays as it was.
+    for hidden in [
+        format!("https://op3.dev/e/http://127.0.0.1:{port}/ok"),
+        "https://dts.podtrac.com/redirect.mp3/192.168.1.1/x.mp3".to_string(),
+        "https://pdst.fm/e/localhost.localdomain.local/x.mp3".to_string(),
+    ] {
+        assert_eq!(strip_trackers(&hidden), hidden);
+    }
+    assert_eq!(strip_trackers("https://op3.dev/e/https://example.com/a.mp3"), "https://example.com/a.mp3");
+}
+
+/// H-2: an address on the local network needs the user's consent, and a web page
+/// cannot name a local feed and have it subscribed without that.
+#[tokio::test]
+async fn local_addresses_need_consent() {
+    use crate::net::LOCAL_CONSENT;
+    let port = test_server().await;
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let typed = format!("http://127.0.0.1:{port}/ok");
+    // Not contacted without consent; the error names the host for the question.
+    let err = crate::discover::discover(&net, &typed, false).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{LOCAL_CONSENT}127.0.0.1"));
+    let err = crate::discover::discover(&net, "http://nas.local/feed", false).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{LOCAL_CONSENT}nas.local"));
+    // With consent the request is made (this server has no feed).
+    let err = crate::discover::discover(&net, &typed, true).await.unwrap_err().to_string();
+    assert_eq!(err, "No feed was found at this address");
+
+    // A public page that names a feed on the local network: the candidate is marked.
+    let page = Url::parse("https://blog.example/").unwrap();
+    let html = r#"<link rel="alternate" type="application/rss+xml" href="http://192.168.1.1/feed">
+                  <link rel="alternate" type="application/atom+xml" href="/atom.xml">"#;
+    let found = crate::discover::feed_links(html, &page);
+    assert_eq!(found.iter().map(|c| (c.url.as_str(), c.local)).collect::<Vec<_>>(), [("http://192.168.1.1/feed", true), ("https://blog.example/atom.xml", false)]);
+
+    // DNS plays no part: a trusted host covers only itself, whatever resolves where.
+    let other = Url::parse("https://example.com/feed").unwrap();
+    let lan = Url::parse(&typed).unwrap();
+    assert!(net.get(&lan, Some(&other)).await.is_err());
+    assert!(net.get(&lan, None).await.is_err());
+}
+
+/// H-2: 0.9.1 marked feeds as local by DNS. The upgrade keeps that only for
+/// addresses that are private by their own text.
+#[test]
+fn upgrade_resets_local_feeds_decided_by_dns() {
+    let (conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let by_dns = db::insert_feed(&conn, "http://127.0.0.1.nip.io/feed", None, None, None).unwrap();
+    let by_ip = db::insert_feed(&conn, "http://192.168.1.5:8080/feed", None, None, None).unwrap();
+    let by_name = db::insert_feed(&conn, "http://nas.local/feed", None, None, None).unwrap();
+    let public = db::insert_feed(&conn, "https://example.com/feed", None, None, None).unwrap();
+    conn.execute("UPDATE feeds SET local = 1 WHERE id IN (?1, ?2)", [by_dns, by_ip]).unwrap();
+    conn.execute("UPDATE feeds SET local = NULL WHERE id = ?1", [by_name]).unwrap();
+    conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    let local = |id| db::fetch_info(&conn, id).unwrap().local;
+    assert_eq!((local(by_dns), local(by_ip), local(by_name), local(public)), (false, true, true, false));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// N-6: the 0.9.2 upgrade allowed every feed with a private address. One that never
+/// answered with a feed and is older than the consent question loses that.
+#[test]
+fn upgrade_takes_local_consent_from_feeds_that_never_worked() {
+    let (conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let add = |url: &str| db::insert_feed(&conn, url, None, None, None).unwrap();
+    let (works, dead, asked, public) =
+        (add("http://192.168.1.5/feed"), add("http://192.168.1.1/cgi-bin/reboot"), add("http://nas.local/feed"), add("https://example.com/feed"));
+    conn.execute("UPDATE feeds SET local = 1 WHERE id IN (?1, ?2, ?3)", [works, dead, asked]).unwrap();
+    // Two feeds from before 0.9.2, one of which was fetched with success. The
+    // third was added today: the user allowed its address.
+    conn.execute("UPDATE feeds SET created_at = 1700000000 WHERE id IN (?1, ?2)", [works, dead]).unwrap();
+    conn.execute("UPDATE feeds SET last_success = 1700000500 WHERE id = ?1", [works]).unwrap();
+    conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    let local = |id| db::fetch_info(&conn, id).unwrap().local;
+    assert_eq!((local(works), local(dead), local(asked), local(public)), (true, false, true, false));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// N-7: after a feed, a folder, everything or a brief is deleted, the text is in
+/// neither the database file nor its write-ahead log.
+#[test]
+fn deletes_leave_nothing_in_the_log() {
+    let (mut conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let wal = dir.join("test.db-wal");
+    let holds = |needle: &str| {
+        [&path, &wal].iter().any(|file| {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+        })
+    };
+    let folder = db::create_folder(&conn, "Folder", None).unwrap();
+    let alone = db::insert_feed(&conn, "https://one.example/feed", None, Some("One"), None).unwrap();
+    let inside = db::insert_feed(&conn, "https://two.example/feed", Some(folder), Some("Two"), None).unwrap();
+    let other = db::insert_feed(&conn, "https://three.example/feed", None, Some("Three"), None).unwrap();
+    let t = db::now();
+    store(&mut conn, alone, &[article("zebra-quartz-alone", t, "")]);
+    store(&mut conn, inside, &[article("zebra-quartz-inside", t, "")]);
+    store(&mut conn, other, &[article("zebra-quartz-other", t, "")]);
+    let brief = db::insert_brief(&conn, "Morning", "model", "{}", "zebra-quartz-brief").unwrap();
+    assert!(holds("zebra-quartz-alone") && holds("zebra-quartz-inside") && holds("zebra-quartz-other") && holds("zebra-quartz-brief"));
+
+    // What each delete command does: the delete, then the checkpoint.
+    db::delete_feed(&conn, alone).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-alone"));
+    db::delete_items(&conn, &[db::Item::Folder { id: folder }]).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-inside"));
+    db::delete_brief(&conn, brief).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-brief"));
+    db::delete_all_subscriptions(&conn).unwrap();
+    db::checkpoint(&conn);
+    assert!(!holds("zebra-quartz-other"));
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// M-1: unreadable or invalid saved settings never become "no proxy".
+#[test]
+fn settings_load_never_silently_drops_proxy() {
+    use crate::settings::{load, save, Settings};
+    let (conn, dir) = temp_db();
+    // A new installation: defaults, online.
+    let fresh = load(&conn);
+    assert!(fresh.offline.is_none() && fresh.settings.proxy.is_empty());
+
+    // Another field no longer validates: it is reset, the proxy stays.
+    let mut saved = Settings { proxy: "socks5h://127.0.0.1:9050".into(), ..Default::default() };
+    saved.ai_provider = "ollama".into();
+    saved.ai_endpoint = "http://gpu-box.lan:11434".into(); // refused with a proxy
+    saved.theme = "sepia".into();
+    save(&conn, &saved).unwrap();
+    let loaded = load(&conn);
+    assert_eq!(loaded.settings.proxy, "socks5h://127.0.0.1:9050");
+    assert_eq!((loaded.settings.ai_endpoint.as_str(), loaded.settings.theme.as_str()), ("", "sepia"));
+    assert!(loaded.offline.is_none());
+
+    // The proxy itself is invalid: kept as text, and Tidings stays offline.
+    save(&conn, &Settings { proxy: "ftp://nope".into(), ..Default::default() }).unwrap();
+    let loaded = load(&conn);
+    assert_eq!(loaded.settings.proxy, "ftp://nope");
+    assert!(loaded.offline.is_some());
+
+    // The row cannot be read at all: offline, since a proxy may have been set.
+    conn.execute("UPDATE settings SET value = '{\"proxy\": \"socks5h://127.0.0.1:9050\", ' WHERE key = 'app'", []).unwrap();
+    assert!(load(&conn).offline.is_some());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// M-2: socks5:// would look names up on this computer; it becomes socks5h://.
+#[test]
+fn socks5_uses_the_proxy_for_dns() {
+    use crate::settings::Settings;
+    let s = Settings { proxy: " socks5://127.0.0.1:9050 ".into(), ..Default::default() }.validated().unwrap();
+    assert_eq!(s.proxy, "socks5h://127.0.0.1:9050");
+    for ok in ["socks5h://127.0.0.1:9050", "http://proxy:3128", "https://proxy.example:443"] {
+        assert_eq!(Settings { proxy: ok.into(), ..Default::default() }.validated().unwrap().proxy, ok);
+    }
+    for bad in ["socks4://127.0.0.1:9050", "ftp://nope", "socks5h://", "not a proxy"] {
+        assert!(Settings { proxy: bad.into(), ..Default::default() }.validated().is_err(), "{bad}");
+    }
+}
+
+/// M-4: one tag with very many attributes took minutes in quick-xml 0.38.
+#[test]
+fn opml_attribute_bomb_is_bounded() {
+    let attrs: String = (0..80_000).map(|i| format!(" a{i}=\"1\"")).collect();
+    let xml = format!("<opml><body><outline text=\"x\" xmlUrl=\"https://example.com/rss\"{attrs}/></body></opml>");
+    let started = std::time::Instant::now();
+    let outlines = opml::parse(&xml).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    // Such an outline is ignored; a normal one next to it is read.
+    assert!(outlines[0].xml_url.is_none());
+    let normal = opml::parse("<opml><body><outline text=\"A &amp; B\" xmlUrl=\"https://example.com/rss\"/></body></opml>").unwrap();
+    assert_eq!((normal[0].title.as_str(), normal[0].xml_url.as_deref()), ("A & B", Some("https://example.com/rss")));
+}
+
+/// L-1: the export lists every feed address; only this user may read it.
+#[cfg(unix)]
+#[test]
+fn opml_export_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tidings-export-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("subscriptions.opml");
+    // Also when a file readable by everyone is already there.
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    crate::commands::write_private(&path, b"<opml/>").unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&path).unwrap(), b"<opml/>");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-2: a deleted or archived article keeps only what stops it from coming back.
+#[test]
+fn delete_clears_article_metadata() {
+    let (mut conn, dir) = temp_db();
+    let feed = db::insert_feed(&conn, "https://example.com/feed", None, Some("F"), None).unwrap();
+    let t = db::now() - 100;
+    let mut a = article("secret-1", t, "An excerpt.");
+    a.author = Some("Someone".into());
+    store(&mut conn, feed, &[a, article("old-2", t - 10, ""), article("new-3", t + 10, "")]);
+    let id: i64 = conn.query_row("SELECT id FROM articles WHERE guid = 'secret-1'", [], |r| r.get(0)).unwrap();
+    db::delete_articles(&conn, &[id]).unwrap();
+    db::apply_retention(&conn, feed, "count", 1).unwrap();
+    db::checkpoint(&conn);
+    type Row = (String, String, Option<String>, Option<String>, Option<String>, bool);
+    let left: Vec<Row> = conn
+        .prepare("SELECT guid, title, url, author, excerpt, is_deleted FROM articles ORDER BY guid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(left.len(), 3);
+    for (guid, title, url, author, excerpt, deleted) in &left {
+        if guid == "new-3" {
+            assert!(!deleted && title == "new-3" && url.is_some());
+        } else {
+            assert!(*deleted && title.is_empty() && url.is_none() && author.is_none() && excerpt.is_none(), "{guid}");
+        }
+    }
+    // A deleted article does not come back at the next refresh.
+    store(&mut conn, feed, &[article("secret-1", t, "An excerpt.")]);
+    assert_eq!(titles(&conn, &query(Scope::All, "all", "")), ["new-3"]);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-5: a password in a feed address is not shown as the feed's name.
+#[test]
+fn credentials_are_not_displayed() {
+    use crate::net::without_credentials;
+    assert_eq!(without_credentials("https://me:secret@example.com/feed?x=1"), "https://example.com/feed?x=1");
+    assert_eq!(without_credentials("https://example.com/feed"), "https://example.com/feed");
+    assert_eq!(without_credentials("not a url"), "not a url");
+    let (conn, dir) = temp_db();
+    let id = db::insert_feed(&conn, "https://me:secret@example.com/feed", None, None, None).unwrap();
+    let feed = db::feeds(&conn).unwrap().into_iter().find(|f| f.id == id).unwrap();
+    assert_eq!(feed.title, "https://example.com/feed");
+    // The address itself is kept, for fetching and for the properties dialog.
+    assert_eq!(feed.url, "https://me:secret@example.com/feed");
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// L-8: special-purpose ranges, and IPv6 addresses that carry an IPv4 address.
+#[test]
+fn special_addresses_are_not_public() {
+    use crate::net::is_public_ip;
+    for private in [
+        "192.0.0.170", "198.18.0.1", "198.19.255.255", "192.88.99.1", "0.0.0.0", "255.255.255.255",
+        "64:ff9b::7f00:1", "64:ff9b::c0a8:101", "64:ff9b:1::1", "2002:7f00:1::1", "2002:c0a8:101::",
+        "2001::1", "fec0::1", "100::1", "2001:db8::1", "::7f00:1", "::ffff:10.0.0.1", "::1", "fe80::1", "fd00::1",
+    ] {
+        assert!(!is_public_ip(private.parse().unwrap()), "{private}");
+    }
+    for public in ["8.8.8.8", "198.17.0.1", "198.20.0.1", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1", "2001:4860:4860::8888"] {
+        assert!(is_public_ip(public.parse().unwrap()), "{public}");
+    }
+}
+
+/// L-3, L-4, L-10: limits on what a feed can make Tidings do.
+#[tokio::test]
+async fn feed_content_limits() {
+    // An SVG over 1 MB is not drawn.
+    let mut large = b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'>".to_vec();
+    large.resize(1024 * 1024 + 1, b' ');
+    assert!(crate::images::clean(large, "image/svg+xml", crate::images::Use::Article).await.is_none());
+
+    // An image with one side of 0 or 1 pixel is a counting pixel.
+    let base = Url::parse("https://example.com/").unwrap();
+    let html = r#"<p>Text <img src="https://t.example/p.gif" width="1"><img src="https://t.example/q.gif" height="0"><img src="https://example.com/photo.jpg" width="600"></p>"#;
+    let clean = sanitize::clean(html, Some(&base), true);
+    assert!(!clean.contains("t.example") && clean.contains("photo.jpg"), "{clean}");
+
+    // A feed with more items than MAX_ENTRIES: only the first are read.
+    let items: String = (0..feeds::MAX_ENTRIES + 50).map(|i| format!("<item><guid>g{i}</guid><title>T{i}</title></item>")).collect();
+    let rss = format!("<rss version=\"2.0\"><channel><title>Big</title>{items}</channel></rss>");
+    let parsed = feeds::parse_feed(rss.as_bytes(), &base, true).unwrap();
+    assert_eq!(parsed.articles.len(), feeds::MAX_ENTRIES);
+}
+
+/// L-3: SVG is drawn to a PNG in Rust; the web view never gets the SVG.
+#[tokio::test]
+async fn svg_is_drawn_to_png() {
+    use crate::images::{clean, svg, Use};
+    let _one_at_a_time = crate::images::HELPER_TESTS.lock().await;
+    let picture = |c: &crate::images::Clean| image::load_from_memory(&c.bytes).unwrap().to_rgba8();
+    let red = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+        <script>alert(1)</script>
+        <rect width="40" height="20" fill="#ff0000" onclick="alert(2)"/>
+        <foreignObject width="40" height="20"><body xmlns="http://www.w3.org/1999/xhtml"><script>alert(3)</script></body></foreignObject>
+    </svg>"##;
+    let out = clean(red.as_bytes().to_vec(), "image/svg+xml", Use::Article).await.unwrap();
+    assert_eq!(out.mime, "image/png");
+    let img = picture(&out);
+    // Drawn at twice its size, for high-density screens.
+    assert_eq!((img.width(), img.height()), (80, 40));
+    assert_eq!(img.get_pixel(40, 20).0, [255, 0, 0, 255]);
+    // Nothing of the SVG's text is in what the web view gets.
+    assert!(!out.bytes.windows(6).any(|w| w == b"script" || w == b"alert("));
+
+    // An icon fills the icon size; a huge drawing is scaled down.
+    assert_eq!(picture(&svg(red.as_bytes(), Use::Icon).unwrap()).width(), 128);
+    let wide = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="50000"><rect width="100000" height="50000" fill="blue"/></svg>"#;
+    let img = picture(&svg(wide.as_bytes(), Use::Article).unwrap());
+    assert_eq!((img.width(), img.height()), (1600, 800));
+
+    // An SVG may name any file as an image. It is not read: the picture stays empty.
+    let dir = std::env::temp_dir().join(format!("tidings-svg-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret = dir.join("secret.png");
+    image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 255, 0, 255])).save(&secret).unwrap();
+    let thief = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <image width="10" height="10" href="{0}"/><image width="10" height="10" xlink:href="file://{0}"/></svg>"#,
+        secret.display()
+    );
+    let img = picture(&svg(thief.as_bytes(), Use::Article).unwrap());
+    assert!(img.pixels().all(|p| p.0 == [0, 0, 0, 0]), "a local file was drawn");
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Broken files, and files without a size, are refused.
+    assert!(svg(b"<svg", Use::Article).is_none());
+    assert!(svg(b"not svg at all", Use::Article).is_none());
+
+    // A file that multiplies itself with nested <use> (3^13 shapes from 1 KB) is
+    // refused quickly instead of filling the memory.
+    let mut bomb = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><defs><rect id="g0" width="1" height="1"/>"#);
+    for level in 1..=13 {
+        bomb.push_str(&format!(r##"<g id="g{level}"><use xlink:href="#g{0}"/><use xlink:href="#g{0}"/><use xlink:href="#g{0}"/></g>"##, level - 1));
+    }
+    bomb.push_str(r##"</defs><use xlink:href="#g13"/></svg>"##);
+    let started = std::time::Instant::now();
+    assert!(svg(bomb.as_bytes(), Use::Article).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }

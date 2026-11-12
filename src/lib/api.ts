@@ -14,6 +14,10 @@ import type {
   ListQuery,
   PeerTubeHit,
   PeerTubeVideo,
+  AudioStream,
+  Brief,
+  BriefInfo,
+  ComponentCheck,
   ReaderPage,
   Scope,
   Settings,
@@ -59,9 +63,10 @@ export const api = {
   markAllRead: (scope: Scope, since: number | null = null, until: number | null = null, feedType: FeedType | null = null) =>
     call<number>('mark_all_read', { scope, since, until, feedType }),
   deleteArticles: (ids: number[]) => call<void>('delete_articles', { ids }),
-  discover: (url: string) => call<Candidate[]>('discover_feeds', { url }),
-  addFeed: (url: string, folderId: number | null, title?: string) =>
-    call<number>('add_feed', { url, folderId, title }),
+  /** `allowLocal`: the user agreed to connect to this address on the local network. */
+  discover: (url: string, allowLocal = false) => call<Candidate[]>('discover_feeds', { url, allowLocal }),
+  addFeed: (url: string, folderId: number | null, title?: string, allowLocal = false) =>
+    call<number>('add_feed', { url, folderId, title, allowLocal }),
   updateFeed: (id: number, patch: FeedPatch) => call<void>('update_feed', { id, patch }),
   deleteFeed: (id: number) => call<void>('delete_feed', { id }),
   moveFeed: (id: number, folderId: number | null, before: ItemRef | null) =>
@@ -89,6 +94,15 @@ export const api = {
   videoPlayer: () => call<VideoPlayer | null>('video_player'),
   playVideo: (url: string) => call<void>('play_video', { url }),
   peertubeVideo: (url: string) => call<PeerTubeVideo>('peertube_video', { url }),
+  audioStream: (url: string) => call<AudioStream>('audio_stream', { url }),
+  aiModels: () => call<string[]>('ai_models'),
+  makeBrief: (query: ListQuery, title: string) => call<Brief>('make_brief', { query, title }),
+  briefs: () => call<BriefInfo[]>('briefs'),
+  brief: (id: number) => call<Brief | null>('brief', { id }),
+  deleteBrief: (id: number) => call<void>('delete_brief', { id }),
+  /** `run`: may start `yt-dlp --version`. Not at startup. */
+  checkComponents: (run: boolean) => call<ComponentCheck[]>('check_components', { run }),
+  checkComponentsOnline: () => call<ComponentCheck[]>('check_components_online'),
   searchPeertube: (query: string) => call<PeerTubeHit[]>('search_peertube', { query }),
   setBadge: (count: number) => call<void>('set_badge', { count }),
   info: () => call<AppInfo>('app_info'),

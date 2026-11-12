@@ -24,6 +24,10 @@
   );
   let fullText = $state(feed?.fullText ?? false);
   let paused = $state(feed?.paused ?? false);
+  let local = $state(feed?.local ?? false);
+  // Offered when it is on, or when a refresh was refused because the address is on
+  // the local network.
+  const showLocal = feed?.local || (feed?.lastError ?? '').includes('local network');
   let feedType = $state<FeedType | 'auto'>(feed?.typeOverride ?? 'auto');
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -58,6 +62,7 @@
         fullText,
         paused,
         typeOverride: feedType === 'auto' ? null : feedType,
+        local: showLocal ? local : null,
       });
       await store.reloadTree();
       store.dialog = null;
@@ -163,6 +168,15 @@
           </span>
           <button type="button" class="switch" class:on={paused} aria-pressed={paused} onclick={() => (paused = !paused)} aria-label="Pause automatic updates"></button>
         </label>
+        {#if showLocal}
+          <label class="toggle">
+            <span>
+              <strong>Feed on my local network</strong>
+              <span class="hint">Lets Tidings fetch this feed from a device on your own network, such as a NAS or home server. Leave it off for feeds on the internet.</span>
+            </span>
+            <button type="button" class="switch" class:on={local} aria-pressed={local} onclick={() => (local = !local)} aria-label="Feed on my local network"></button>
+          </label>
+        {/if}
       </div>
 
       {#if error}

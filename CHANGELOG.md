@@ -7,7 +7,209 @@ All notable changes to Tidings are listed here. Versions follow
 
 ### Added
 - A GitHub Actions workflow (`BSD`) that builds and tests Tidings in FreeBSD 15 and
-  OpenBSD 8.0 virtual machines and keeps the tarballs as workflow artifacts.
+  OpenBSD 8.0 virtual machines and keeps the tarballs as workflow artifacts. A run takes
+  about 15 minutes.
+
+## [0.9.5] - 2026-11-11
+
+### Security
+Notes from the review of 0.9.4.
+- A refresh now empties the database's write-ahead log when it is done. A refresh
+  applies the archive rule, which clears the text of old articles; that text could
+  stay in the log until the cleanup that runs every six hours.
+- The SVG drawing code now draws nothing outside the helper process, so a later
+  change cannot call it in the app by mistake.
+- The release build now passes `--locked` to `cargo build` itself, not only to the
+  tests that run before it.
+
+### Fixed
+- The audio server on 127.0.0.1 (Linux and the BSDs) answered a request without
+  `Range` for a file smaller than 2 MB with `206` instead of `200`.
+
+## [0.9.4] - 2026-11-11
+
+### Security
+Fixes from a third audit, of 0.9.3 on Linux.
+- A crafted SVG could crash Tidings. A file of a few kilobytes with 1000 nested
+  elements, or with a long chain of clip paths, masks or `<tspan>`, overflowed the
+  stack of the SVG library, and a stack overflow ends the whole program. A feed's icon
+  was enough, so the crash could come back at every start. SVG is now drawn in a
+  separate helper process with a time limit (10 seconds) and a memory limit (512 MB).
+  A crafted SVG ends only the helper, and that image is not shown.
+- A feed could make the media engine connect to any address, also on the local
+  network and without the proxy. If a podcast or video address answered with a
+  streaming playlist (HLS or DASH), the player fetched the addresses in the playlist
+  by itself: on Linux and the BSDs GStreamer does this, past Tidings' network code.
+  The media proxy now refuses playlists, by their content and by their type, before
+  the player gets a byte. Tidings plays single audio and video files only.
+- Deleting a feed, a folder, all subscriptions or a brief now also empties the
+  database's write-ahead log, as deleting articles already did.
+- The upgrade to 0.9.2 kept every feed with a local network address as allowed, also
+  ones from an imported OPML file. A feed from before 0.9.2 that never answered with a
+  feed now loses that: its error says how to allow it again in its properties.
+- The audio server on 127.0.0.1 (Linux and the BSDs) now limits connections that
+  have sent no valid request to 32, and closes one after 10 seconds.
+- A `Range` header with a huge offset can no longer overflow a sum in the media proxy.
+
+### Changed
+- The Linux instructions now say to prefer the `.deb`, `.rpm` or tarball over the
+  AppImage: the AppImage carries its own WebKitGTK, which gets fixes only with a new
+  Tidings release. The docs also list what is not sandboxed on Linux and the BSDs.
+- The release build installs a fixed version of `cargo-audit`, and the BSD build
+  script uses `--locked`.
+
+## [0.9.3] - 2026-11-10
+
+### Security
+- SVG images are now drawn to a PNG in Rust, like every other image. Before, an SVG was
+  passed to the web view as it came. Images that an SVG refers to are not loaded, and
+  an SVG that is too complex to draw is not shown.
+- The Content Security Policy no longer allows inline `<style>` elements, only `style`
+  attributes. If a hole were ever found in the HTML cleaner, injected CSS would not apply.
+
+### Changed
+- macOS 12.3 or newer is now required (the stricter policy needs its WebKit). On Linux
+  and the BSDs it needs WebKitGTK 2.36 or newer, which Ubuntu 22.04 and Debian 12 have.
+
+## [0.9.2] - 2026-11-10
+
+### Security
+Fixes from a second, independent audit of 0.9.1.
+- A feed could make Tidings request an address on this computer or the local network
+  through the podcast and video proxy, by hiding it behind a tracking prefix
+  (`https://op3.dev/e/http://127.0.0.1/...`): the address was checked before the prefix
+  was removed. Every image, audio and video request is now checked where it starts,
+  after any rewriting, and addresses that yt-dlp or a PeerTube site return must be public.
+- A feed on the local network now needs your consent. Before, a website could name
+  `http://192.168.1.1/...` as its feed and have it subscribed in one click, and a
+  public-looking name that resolved to a private address was treated as a local feed.
+  Tidings now asks before it connects to an address on your local network and before it
+  subscribes to a feed there, and DNS no longer decides: a name that points to a private
+  address is refused unless you allowed it. The upgrade keeps existing feeds whose
+  address is itself private (an IP such as 192.168.1.5, or a name such as `nas.local`).
+  For any other feed that should be reached on your network, turn on "Feed on my local
+  network" in its properties; the option appears after a refresh was refused. Feeds from
+  an OPML import start without consent.
+- Consent for a local feed covers only its own host and port. Reader tabs, article
+  links, videos and Listen never reach the local network any more; before, a link in
+  any feed could reach the host of a local feed, on any port.
+- Saved settings that could not be read or no longer validated were replaced by the
+  defaults, which removed the proxy without a word. Invalid fields are now reset one by
+  one, and if the proxy cannot be used or the settings cannot be read, Tidings starts
+  offline and says so.
+- `socks5://` proxies looked names up on this computer, outside the proxy. They are now
+  saved as `socks5h://`, where the proxy does the lookups.
+- OPML import: one tag with tens of thousands of attributes took minutes to parse
+  (quick-xml 0.38). quick-xml is updated to 0.42 and such tags are ignored. `lru` is
+  updated to 0.18 for an advisory that did not affect Tidings.
+- Deleting or archiving an article now also clears its title, link and author, not only
+  its text, and empties the database's write-ahead log.
+- OPML exports are written so that only you can read them (mode 0600).
+- A password in a feed address is no longer shown in the sidebar or in error messages.
+- More address ranges count as not public (NAT64, 6to4, Teredo and other special ranges).
+- SVG images over 1 MB are not shown, and SVG is served with a `sandbox` policy.
+- Images marked as 0 or 1 pixel on one side are dropped as counting pixels.
+- A feed is read up to 5,000 items, and at most two feeds are parsed at once.
+- yt-dlp is no longer started when Tidings opens. Its version is read when you open
+  Settings → Security, and remembered for the notice at startup.
+- Releases: build actions are pinned to commits, jobs have read-only permissions, and a
+  release stops when `cargo audit` or `npm audit` finds a known vulnerability.
+
+### Changed
+- The security table in the docs now says what Tidings really contacts and stores:
+  icons and list thumbnails are fetched without opening an article, external players
+  make their own connections, and tabs, positions and cached images are kept by the
+  web view outside the database.
+
+## [0.9.1] - 2026-11-09
+
+### Security
+Fixes from a security and privacy audit of the code.
+- A feed can no longer gain access to your local network by changing its DNS. Whether a
+  feed is on a private network is now recorded once, at its first fetch after you add it
+  (for existing feeds: at the first fetch after this update). Before, any feed whose
+  address resolved to a private address at the time of a request was fetched there, so
+  the owner of a public feed could point its name at a device on your network. A feed
+  on a private host can also no longer redirect to another host. If a feed really moves
+  into your local network, remove it and add it again.
+- AI briefs: a model server given by name (such as `gpu-box.lan`) must now resolve to
+  this computer or the local network. On someone else's network, the name could have
+  led to a server on the internet. Settings also warns when the server is another machine.
+- An OPML file with thousands of nested folders crashed Tidings on import. Folders
+  nested deeper than 32 levels are now refused.
+- Crafted images in a feed could use several gigabytes of memory. Images are now decoded
+  at most four at a time with 192 MB each, and the image cache holds at most 64 MB.
+- If the saved proxy setting cannot be used at startup, Tidings now stays offline and
+  says so, instead of connecting without the proxy.
+
+## [0.9.0] - 2026-11-09
+
+### Added
+- AI briefs with a local model. The sparkles button above the article list writes a short
+  brief of what the list shows (a folder, a feed type, unread, a date range): a few
+  topics, each with points that link to their source articles. It opens in a tab;
+  earlier briefs stay available. The model runs on this computer or your local network,
+  never in the cloud: Ollama, or LM Studio, llama.cpp's llama-server or another server
+  with an OpenAI-style API (Settings → AI briefs). Tidings sends it only the titles,
+  feed names, dates and short excerpts of those articles. Off by default.
+- Settings → Security shows whether Tidings and the programs it relies on are up to
+  date: Tidings itself, yt-dlp, and WebKitGTK on Linux and the BSDs (on macOS, WebKit
+  comes with macOS updates). Each finding says what to do, matched to how the program
+  was installed: `brew upgrade yt-dlp`, `uv tool upgrade yt-dlp`, `pipx upgrade
+  yt-dlp`, your distribution's update command, or the releases page.
+  - Without going online, Tidings checks how old each one is, at every start. When
+    something needs an update, a notice appears (at most once a week) and the Settings
+    button shows a dot.
+  - "Check now" asks GitHub for the newest Tidings and yt-dlp releases and webkitgtk.org
+    for its latest security advisory, so it can say when a version has known security
+    holes. It goes through your proxy and runs only when you click it; Tidings still
+    makes no automatic update checks.
+
+### Fixed
+- Listen failed with "The audio of this video could not be played" for most regular
+  YouTube videos, while Shorts worked. YouTube now gives a new stream address a start
+  time a few seconds ahead (`available_at` in yt-dlp's output) and refuses requests
+  before it with HTTP 403; yt-dlp waits for it when it downloads, Tidings did not. It
+  affected videos with several audio tracks (YouTube's automatic dubbing), which most
+  Shorts lack. Tidings now waits for that time (Listen takes a few seconds longer to
+  start), then reads the first bytes before playing, so a stream YouTube still refuses
+  gets a clear message instead.
+
+## [0.8.0] - 2026-11-09
+
+### Added
+- Listen to a video: the Listen button (or `L`) plays only the sound of a YouTube, Vimeo
+  or similar video in Tidings' podcast player, with its speed control, saved position and
+  media keys. yt-dlp finds the audio stream, and Tidings streams it through its own media
+  proxy, like a podcast; the web view never contacts the video site. It uses much less
+### Fixed
+- Listen failed with "The audio of this video could not be played" for most regular
+  YouTube videos, while Shorts worked. YouTube now gives a new stream address a start
+  time a few seconds ahead (`available_at` in yt-dlp's output) and refuses requests
+  before it with HTTP 403; yt-dlp waits for it when it downloads, Tidings did not. It
+  affected videos with several audio tracks (YouTube's automatic dubbing), which most
+  Shorts lack. Tidings now waits for that time (Listen takes a few seconds longer to
+  start), then reads the first bytes before playing, so a stream YouTube still refuses
+  gets a clear message instead.
+
+  data than the video (about 60 MB for an hour). It works with any proxy setting,
+  Tor (`socks5h://`) included, and when a stream address expires or Tor changes its
+  exit, Tidings asks yt-dlp for a new one and goes on from the same place. Needs
+  yt-dlp; on macOS, the copy inside IINA is used when no other is installed.
+
+### Security
+- Every image is re-encoded in Rust before the web view shows it. Tidings decodes
+  article images, thumbnails, video posters and feed icons with pure-Rust decoders and
+  memory limits, then writes a new JPEG, PNG or GIF. WebKit's own image libraries
+  (libwebp, libjpeg-turbo, libpng and others) never parse a file from the internet,
+  so a crafted image cannot reach a bug in them, like the libwebp bug exploited in 2023.
+  - Photos stay JPEG; PNG, icons, lossless WebP and images with transparency become PNG.
+    Animated GIFs keep all their frames.
+  - Images larger than 2400 pixels are scaled down. EXIF rotation is applied, and
+    metadata and color profiles are dropped.
+  - AVIF images are no longer shown, and animated WebP and PNG show only their first
+    frame. Tidings no longer asks image hosts for AVIF, so sites that offer several
+    formats send one it can re-encode.
 
 ## [0.7.1] - 2026-11-08
 
@@ -199,7 +401,14 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/melsiddieg/tidings/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/melsiddieg/tidings/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/melsiddieg/tidings/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/melsiddieg/tidings/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/melsiddieg/tidings/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/melsiddieg/tidings/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/melsiddieg/tidings/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/melsiddieg/tidings/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/melsiddieg/tidings/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/melsiddieg/tidings/compare/v0.5.0...v0.6.0

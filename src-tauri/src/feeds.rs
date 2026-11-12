@@ -18,6 +18,9 @@ use crate::sanitize;
 use crate::settings::Settings;
 use crate::state::AppState;
 
+/// The most items read from one fetch of a feed.
+pub const MAX_ENTRIES: usize = 5_000;
+
 pub const FEED_ACCEPT: &str = "application/rss+xml, application/atom+xml, application/feed+json, \
     application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5";
 
@@ -79,6 +82,9 @@ pub async fn refresh_many(app: &AppHandle, state: &Arc<AppState>, ids: Vec<i64>)
         });
     }
     while tasks.join_next().await.is_some() {}
+    // A refresh applies the archive rule, which clears the text of old articles.
+    // Empty the write-ahead log, so that text does not stay in its old pages.
+    db::checkpoint(&state.db());
 }
 
 pub async fn refresh_one(app: &AppHandle, state: &AppState, id: i64) -> FeedUpdated {
@@ -132,14 +138,34 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let net = state.net();
 
     let feed_url = Url::parse(&info.url).map_err(|_| Error::msg("The feed address is not valid"))?;
-    let mut request = net.get(&feed_url, Some(&feed_url)).await?.header(ACCEPT, FEED_ACCEPT);
+    // Only a feed the user allowed on the local network (`local`) may be fetched
+    // from a private address. Where the name resolves plays no part in that.
+    let local = info.local;
+    let trusted = local.then_some(&feed_url);
+    let blocked = "This feed's address is on your local network, or points there, and you have not \
+        allowed that, so Tidings did not connect. To allow it, open the feed's properties and turn on \
+        “Feed on my local network”.";
+    let request = match net.get(&feed_url, trusted).await {
+        Ok(request) => request,
+        Err(_) if !local => return Err(Error::msg(blocked)),
+        Err(e) => return Err(e),
+    };
+    let mut request = request.header(ACCEPT, FEED_ACCEPT);
     if let Some(etag) = &info.etag {
         request = request.header(IF_NONE_MATCH, etag);
     }
     if let Some(modified) = &info.last_modified {
         request = request.header(IF_MODIFIED_SINCE, modified);
     }
-    let response = request.send().await?;
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            if !local && net.is_private_host(&feed_url).await {
+                return Err(Error::msg(blocked));
+            }
+            return Err(e.into());
+        }
+    };
     let status = response.status();
     if status == StatusCode::NOT_MODIFIED {
         db::set_not_modified(&state.db(), id)?;
@@ -156,9 +182,15 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let last_modified = header(LAST_MODIFIED);
     let bytes = net::read_limited(response, net::MAX_FEED_BYTES).await?;
     let (parse_url, strip) = (final_url.clone(), settings.strip_tracking);
-    let parsed = tokio::task::spawn_blocking(move || parse_feed(&bytes, &parse_url, strip))
-        .await
-        .map_err(|e| Error::msg(e.to_string()))??;
+    // A feed can be 50 MB. Parse at most two at a time, so several huge feeds in one
+    // refresh do not hold a few gigabytes of parsed text together.
+    static PARSING: Semaphore = Semaphore::const_new(2);
+    let parsed = {
+        let _permit = PARSING.acquire().await.map_err(|e| Error::msg(e.to_string()))?;
+        tokio::task::spawn_blocking(move || parse_feed(&bytes, &parse_url, strip))
+            .await
+            .map_err(|e| Error::msg(e.to_string()))??
+    };
 
     let (mode, value) =
         retention_for(info.retention_mode.as_deref(), info.retention_value, &settings);
@@ -187,7 +219,7 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
     let icon_due = info.icon_checked.is_none_or(|t| db::now() - t > 7 * 86_400);
     if !info.has_icon && icon_due {
         let site = parsed.site_url.as_deref().or(info.site_url.as_deref());
-        let icon = fetch_icon(&net, site, parsed.icon_url.as_deref(), &final_url).await;
+        let icon = fetch_icon(&net, site, parsed.icon_url.as_deref(), &final_url, local).await;
         let _ = db::set_icon(&state.db(), id, icon.as_ref().map(|(b, m)| (b.as_slice(), m.as_str())));
     }
     Ok(added)
@@ -234,7 +266,9 @@ pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<Parse
         .filter(|d| !d.is_empty())
         .map(|d| sanitize::truncate(&d, 500));
     let icon_url = feed.icon.as_ref().map(|i| i.uri.clone());
-    let articles = feed.entries.iter().map(|e| entry_to_article(e, url, strip_tracking)).collect();
+    // Feeds list the newest items first. A feed with more items than this is either
+    // a huge archive or built to waste time and memory.
+    let articles = feed.entries.iter().take(MAX_ENTRIES).map(|e| entry_to_article(e, url, strip_tracking)).collect();
     Ok(ParsedFeed { title, site_url, description, icon_url, articles })
 }
 
@@ -424,8 +458,8 @@ fn icon_links(html: &str, page: &Url) -> Vec<Url> {
     scored.into_iter().map(|(_, u)| u).collect()
 }
 
-async fn download_icon(net: &Net, url: &Url, feed_url: &Url) -> Option<(Vec<u8>, String)> {
-    let response = net.get(url, Some(feed_url)).await.ok()?.header(ACCEPT, "image/*").send().await.ok()?;
+async fn download_icon(net: &Net, url: &Url, trusted: Option<&Url>) -> Option<(Vec<u8>, String)> {
+    let response = net.get(url, trusted).await.ok()?.header(ACCEPT, "image/*").send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -440,18 +474,21 @@ pub async fn fetch_icon(
     site_url: Option<&str>,
     feed_icon: Option<&str>,
     feed_url: &Url,
+    local: bool,
 ) -> Option<(Vec<u8>, String)> {
     // A feed controls its site link and icon URLs. Only follow them to public hosts,
-    // or to the feed's own host (for feeds on a private network). `Net::get`
-    // also checks DNS answers.
-    let allowed = |u: &Url| net::host_looks_public(u) || net::same_host(u, feed_url);
+    // or to the feed's own host and port when the user allowed the feed on the
+    // local network (`local`).
+    // `Net::get` also checks DNS answers.
+    let trusted = local.then_some(feed_url);
+    let allowed = |u: &Url| net::host_looks_public(u) || (local && net::same_site(u, feed_url));
     let site = site_url
         .and_then(|s| Url::parse(s).ok())
         .filter(|u| allowed(u))
         .unwrap_or_else(|| feed_url.clone());
     let mut candidates: Vec<Url> = Vec::new();
 
-    let request = net.get(&site, Some(feed_url)).await;
+    let request = net.get(&site, trusted).await;
     if let Ok(response) = async { request?.header(ACCEPT, "text/html").send().await.map_err(Error::from) }.await {
         if response.status().is_success() {
             let page = response.url().clone();
@@ -481,7 +518,7 @@ pub async fn fetch_icon(
         if seen.len() > 6 {
             break;
         }
-        if let Some(icon) = download_icon(net, &candidate, feed_url).await {
+        if let Some(icon) = download_icon(net, &candidate, trusted).await {
             return Some(icon);
         }
     }
