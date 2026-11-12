@@ -7,7 +7,7 @@
 # the OpenBSD release they were built on, and FreeBSD ones need the same major version.
 #
 # Runs for release tags, by hand from the Actions tab, and on branch pushes that
-# change the BSD build itself. A run takes one to two hours (release LTO link).
+# change the BSD build itself. A run takes about 15 minutes.
 name: BSD
 
 on:
@@ -50,7 +50,9 @@ jobs:
             set -e
             freebsd-version
             scripts/build-bsd.sh
-            cargo test --manifest-path src-tauri/Cargo.toml
+            # One test at a time: in a slow VM, parallel tests overrun the time limits of
+            # the SVG helper and player tests (5 s) and fail at random.
+            cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
             # Keep the copy back to the runner small.
             rm -rf src-tauri/target node_modules
 
@@ -82,7 +84,7 @@ jobs:
             scripts/build-bsd.sh
             # build-bsd.sh raises the data size limit for itself; the tests need it too.
             ulimit -d "$(ulimit -Hd)"
-            cargo test --manifest-path src-tauri/Cargo.toml
+            cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
             rm -rf src-tauri/target node_modules
 
       - uses: actions/upload-artifact@v4

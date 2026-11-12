@@ -184,7 +184,7 @@ For podcasts and videos inside Tidings, install the GStreamer plugins listed in 
 section; without them episodes fail with "This episode could not be played", and videos
 offer to open in your video player instead.
 
-For "Watch video" (YouTube and other sites in mpv), install mpv and yt-dlp:
+For "Watch video" and "Listen" (YouTube and other sites), install mpv and yt-dlp:
 
 ```sh
 sudo pkg install mpv yt-dlp     # FreeBSD
@@ -275,10 +275,10 @@ makes it much faster.
 
 **CI:** `.github/workflows/bsd.yml` runs the same script plus `cargo test` inside
 FreeBSD 15 and OpenBSD 8.0 virtual machines on GitHub's Linux runners
-([vmactions](https://github.com/vmactions)). It runs for release tags, from the Actions
-tab, and for branch pushes that change the BSD build. The tarballs stay workflow
-artifacts; they are not attached to releases, because OpenBSD binaries only run on the
-release they were built on.
+([vmactions](https://github.com/vmactions)), in about 15 minutes. It runs for release
+tags, from the Actions tab, and for branch pushes that change the BSD build. The
+tarballs stay workflow artifacts; they are not attached to releases, because OpenBSD
+binaries only run on the release they were built on.
 
 The output is in `src-tauri/target/release/bundle/`:
 - macOS: `macos/Tidings.app` and `dmg/Tidings_0.1.0_*.dmg`
