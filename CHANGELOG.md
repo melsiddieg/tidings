@@ -5,6 +5,35 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Security
+Fixes from a fourth audit, of 0.9.5.
+- A podcast or video address could still make the media engine fetch addresses by
+  itself, also on the local network and without the proxy. A streaming playlist (HLS)
+  placed after an ID3 tag passed the playlist check, because the file started with
+  binary bytes; GStreamer removes the tag and then plays the playlist. The check now
+  skips ID3v2 and APEv2 tags at the start of a file, fetching further when a tag holds
+  megabytes of cover art, and checks what follows. A file with more than 16 MB or 16
+  tags at its start is refused.
+- A tiny animated GIF could make the web view allocate 1 GB: the limits covered the
+  frames, not the picture they are drawn on. An animated GIF now keeps its frames
+  only up to 2400 pixels on a side, and frames times picture size are limited.
+- Deeply nested HTML in a feed could keep Tidings busy for many seconds (50,000
+  nested elements: 19 seconds) and stop the window. HTML that nests more than 200
+  deep is now shown as plain text, HTML is cut at 2 MB, and titles at 500 characters.
+  Reader mode, feed discovery and favicon lookup skip such pages. Articles are now
+  cleaned for display outside the main thread.
+- With no proxy set, Tidings used the system's proxy (`HTTP_PROXY` and the macOS
+  proxy settings). Such a proxy could also reach private addresses behind a public
+  name. An empty proxy setting now always means a direct connection, and mpv, IINA
+  and yt-dlp no longer get proxy variables from the environment either.
+- Exporting OPML to a name that is a symbolic link overwrote the file it pointed to.
+  The export now writes a new file and moves it over the name.
+- yt-dlp's output is read up to 16 MB ("Listen"); its error output keeps only the end.
+- Reader pages kept in memory hold at most 16 MB of HTML together.
+- ammonia 4.2.5 (RUSTSEC-2026-0533, mutation XSS with SVG and MathML). Tidings'
+  allowed tags were not affected: they include neither SVG, MathML nor the raw text
+  elements the attack needs.
+
 ## [0.9.5] - 2026-11-11
 
 ### Security

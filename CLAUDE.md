@@ -44,7 +44,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 
 ## Rules that keep the app private and safe
 
-- All network traffic goes through `net.rs` clients. The web view must never load remote
+- All network traffic goes through `net.rs` clients, which start from `base_builder`. Keep its
+  `no_proxy()`: without it reqwest reads `HTTP_PROXY` and the system's proxy settings, and
+  an empty proxy setting would not mean a direct connection. The web view must never load remote
   resources: images use `tidings://localhost/img/<base64url>`; the CSP in `tauri.conf.json`
   blocks everything else. Do not loosen the CSP or add remote URLs to it. `style-src` is
   `'self'` only; inline `style` attributes are allowed through `style-src-attr`, but a
@@ -85,18 +87,24 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   cannot be caught. Keep the helper's time limit and memory limit (`images::Capped`,
   the global allocator), and keep `worker_main` free of anything but reading stdin and
   writing stdout.
-- The media proxy gives the player single files only. Keep `media::is_playlist` on the
-  first block of every file, and `is_playlist_type` on every answer: a player that
-  gets an HLS or DASH playlist fetches the addresses in it by itself, past `net.rs`,
-  the proxy and the private-address checks. Do not add HLS or DASH support by letting
-  the player read a playlist.
+- The media proxy gives the player single files only. Keep `media::check_start` before the
+  player gets any byte of a file: it skips ID3v2 and APEv2 tags at the start (GStreamer
+  removes them before it looks at the rest) and runs `is_playlist` on what follows. Keep
+  `is_playlist_type` on every answer. A player that gets an HLS or DASH playlist fetches the
+  addresses in it by itself, past `net.rs`, the proxy and the private-address checks. Do
+  not add HLS or DASH support by letting the player read a playlist.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
-  before display.
+  before display. Both cut it to 2 MB and show it as text when its elements nest too deep
+  (`sanitize::bounded`). Any other parse of untrusted HTML (`dom_query`, readability) must
+  check `sanitize::too_deep` first: HTML parsers take time that grows with the square of
+  the nesting depth. Keep `too_deep` one pass that reads tags exactly like the HTML
+  tokenizer, and let it count too deep rather than too shallow.
 - Videos play in an external player (`video.rs`), never in the web view: no iframes, no site
   players. The player is a separate program with its own connections, like "Open in
   browser". Keep `video::args` refusing to start when the player cannot use the proxy
   setting (mpv ignores anything but `http://` proxies), so videos never bypass Tor. Start
-  the player with an argument list, never through a shell.
+  the player with an argument list, never through a shell. Remove `video::PROXY_VARIABLES`
+  from the environment of every tool that connects (mpv, IINA, yt-dlp).
 - "Listen" (`video::audio_stream`) runs yt-dlp only to find a video's audio stream; the audio
   itself streams through `mediaUrl(...)` like a podcast. Keep `--ignore-config` (the user's
   yt-dlp config may hold `--cookies-from-browser`), keep passing the proxy, and keep the

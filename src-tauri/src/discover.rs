@@ -64,6 +64,10 @@ fn kind_of(kind: &feed_rs::model::FeedType) -> &'static str {
 }
 
 pub(crate) fn feed_links(html: &str, page: &Url) -> Vec<Candidate> {
+    // Deeply nested elements make the parser slow (`sanitize::too_deep`).
+    if crate::sanitize::too_deep(html) {
+        return Vec::new();
+    }
     let doc = Document::from(html);
     let page_title = doc.select("title").text().trim().to_string();
     let mut out: Vec<Candidate> = Vec::new();

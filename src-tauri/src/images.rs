@@ -91,7 +91,9 @@ const WORKER_MEMORY: usize = 512 * 1024 * 1024;
 const MAX_PNG_BYTES: usize = 64 * 1024 * 1024;
 /// SVG files that stopped the helper are remembered, up to this many.
 const MAX_REFUSED: usize = 256;
-/// Animated GIFs: at most this many frames, and this many pixels in all frames together.
+/// Animated GIFs: at most this many frames, and this many pixels drawn for all
+/// frames together. The web view draws each frame onto a buffer of the whole
+/// picture, so a frame counts as large as the picture, however small it is.
 const MAX_GIF_FRAMES: usize = 1_000;
 const MAX_GIF_PIXELS: u64 = 200_000_000;
 const JPEG_QUALITY: u8 = 88;
@@ -562,7 +564,11 @@ fn lossy_webp(bytes: &[u8]) -> bool {
 
 /// Rewrites a GIF frame by frame: the same palettes, positions, delays and
 /// disposal, without loss. Nothing is scaled. Returns None for files that break the
-/// limits; `reencode` then keeps only a still picture.
+/// limits; `reencode` then keeps only a still picture, scaled down.
+///
+/// The picture's own size (the "logical screen") is what the web view allocates,
+/// 4 bytes per pixel, before it draws even a 1x1 frame. So it is limited like a
+/// still picture's: no side longer than `Use::Article.max_side()`.
 fn gif(bytes: &[u8]) -> Option<Clean> {
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::Indexed);
@@ -571,9 +577,11 @@ fn gif(bytes: &[u8]) -> Option<Clean> {
     options.check_frame_consistency(true);
     let mut decoder = options.read_info(Cursor::new(bytes)).ok()?;
     let (width, height) = (decoder.width(), decoder.height());
-    if width == 0 || height == 0 || u32::from(width) > MAX_DIMENSION || u32::from(height) > MAX_DIMENSION {
+    let max = Use::Article.max_side();
+    if width == 0 || height == 0 || u32::from(width) > max || u32::from(height) > max {
         return None;
     }
+    let canvas = u64::from(width) * u64::from(height);
     let global = decoder.global_palette().map(<[u8]>::to_vec).unwrap_or_default();
     let repeat = decoder.repeat();
     let mut out = Vec::new();
@@ -583,7 +591,7 @@ fn gif(bytes: &[u8]) -> Option<Clean> {
         let (mut frames, mut pixels) = (0usize, 0u64);
         while let Some(frame) = decoder.read_next_frame().ok()? {
             frames += 1;
-            pixels += u64::from(frame.width) * u64::from(frame.height);
+            pixels += canvas;
             if frames > MAX_GIF_FRAMES || pixels > MAX_GIF_PIXELS {
                 return None;
             }
@@ -778,6 +786,44 @@ mod tests {
         assert!(draw(drawing(1600, &slow)).await.is_none());
         assert!(started.elapsed() < WORKER_TIMEOUT + Duration::from_secs(3));
         assert!(draw(good).await.is_some());
+    }
+
+    /// The report on 0.9.5: a 42-byte GIF with a 16384 x 16384 picture and one
+    /// 1 x 1 frame made the web view allocate 1 GB.
+    #[test]
+    fn animated_gif_is_limited_by_its_whole_picture() {
+        let gif_file = |width: u16, height: u16, frames: usize| {
+            let mut source = Vec::new();
+            {
+                let mut encoder = gif::Encoder::new(&mut source, width, height, &[0, 0, 0, 255, 0, 0]).unwrap();
+                for n in 0..frames {
+                    let mut frame = gif::Frame::from_indexed_pixels(1, 1, vec![(n % 2) as u8], None);
+                    frame.delay = 10;
+                    encoder.write_frame(&frame).unwrap();
+                }
+            }
+            source
+        };
+        let shown = |source: &[u8]| reencode(source, "image/gif", Use::Article);
+
+        // Too large a picture: not passed on as a GIF. A still is at most
+        // `max_side` (here the decoder refuses the 1 GB picture: nothing is shown).
+        for (width, height) in [(16_384, 16_384), (2_401, 10), (10, 2_401)] {
+            let source = gif_file(width, height, 2);
+            if let Some(out) = shown(&source) {
+                assert_ne!(out.mime, "image/gif", "{width} x {height}");
+                let still = decode(&out);
+                assert!(still.width() <= 2400 && still.height() <= 2400);
+            }
+        }
+        // Many small frames on a large picture count as large frames.
+        let out = shown(&gif_file(600, 600, 600)).unwrap();
+        assert_ne!(out.mime, "image/gif");
+        // An ordinary animation stays animated.
+        let out = shown(&gif_file(480, 270, 100)).unwrap();
+        assert_eq!(out.mime, "image/gif");
+        let decoder = gif::DecodeOptions::new().read_info(Cursor::new(&out.bytes)).unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (480, 270));
     }
 
     #[test]

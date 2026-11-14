@@ -20,6 +20,10 @@ use crate::state::AppState;
 
 /// The most items read from one fetch of a feed.
 pub const MAX_ENTRIES: usize = 5_000;
+/// Titles of feeds and articles are cut at this many characters, and author names
+/// at `MAX_AUTHOR_CHARS`. A feed could otherwise fill the article list with one title.
+const MAX_TITLE_CHARS: usize = 500;
+const MAX_AUTHOR_CHARS: usize = 200;
 
 pub const FEED_ACCEPT: &str = "application/rss+xml, application/atom+xml, application/feed+json, \
     application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5";
@@ -250,7 +254,12 @@ pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
 
 pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<ParsedFeed> {
     let feed = parse_raw(bytes, url)?;
-    let title = feed.title.as_ref().map(text_plain).filter(|t| !t.is_empty());
+    let title = feed
+        .title
+        .as_ref()
+        .map(text_plain)
+        .filter(|t| !t.is_empty())
+        .map(|t| sanitize::truncate(&t, MAX_TITLE_CHARS));
     let site_url = feed
         .links
         .iter()
@@ -396,13 +405,14 @@ fn entry_to_article(entry: &model::Entry, feed_url: &Url, strip_tracking: bool) 
         .as_ref()
         .map(text_plain)
         .filter(|t| !t.is_empty())
+        .map(|t| sanitize::truncate(&t, MAX_TITLE_CHARS))
         .unwrap_or_else(|| if text.is_empty() { "Untitled".into() } else { sanitize::truncate(&text, 90) });
     let authors: Vec<String> = entry
         .authors
         .iter()
         .filter_map(|p| p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string))
         .collect();
-    let author = (!authors.is_empty()).then(|| authors.join(", "));
+    let author = (!authors.is_empty()).then(|| sanitize::truncate(&authors.join(", "), MAX_AUTHOR_CHARS));
 
     let image_url = media_image(entry)
         .and_then(|u| web_url(&u, &base))
@@ -436,6 +446,10 @@ fn entry_to_article(entry: &model::Entry, feed_url: &Url, strip_tracking: bool) 
 // ---------------------------------------------------------------------------
 
 fn icon_links(html: &str, page: &Url) -> Vec<Url> {
+    // Deeply nested elements make the parser slow (`sanitize::too_deep`).
+    if sanitize::too_deep(html) {
+        return Vec::new();
+    }
     let doc = Document::from(html);
     let mut scored: Vec<(i32, Url)> = Vec::new();
     for link in doc.select("link[rel][href]").iter() {

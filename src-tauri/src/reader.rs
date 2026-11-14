@@ -58,6 +58,10 @@ pub async fn extract_url(
 }
 
 pub fn extract_html(html: &str, url: &url::Url, strip_tracking: bool) -> Result<Extracted> {
+    // Deeply nested elements make the parser slow (`sanitize::too_deep`).
+    if sanitize::too_deep(html) {
+        return Err(Error::msg("This page is nested too deeply to show in reader mode. Open it in your browser"));
+    }
     let mut readability = dom_smoothie::Readability::new(html, Some(url.as_str()), None)
         .map_err(|e| Error::msg(format!("Could not read this page: {e}")))?;
     let article = readability

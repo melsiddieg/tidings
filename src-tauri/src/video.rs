@@ -297,6 +297,14 @@ pub async fn play(
     }
 }
 
+/// Proxy settings that mpv, IINA and yt-dlp would read from the environment. They
+/// are removed: the tools use the proxy set in Tidings (`args`, `audio_args`), or
+/// connect directly when none is set, like Tidings itself.
+const PROXY_VARIABLES: &[&str] = &[
+    "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY",
+    "ftp_proxy", "FTP_PROXY",
+];
+
 /// Runs the player until it exits. Blocks.
 fn run(player: &Player, args: &[String]) -> Result<()> {
     // Let mpv find yt-dlp, and yt-dlp find its JavaScript runtime, even when Tidings
@@ -310,6 +318,9 @@ fn run(player: &Player, args: &[String]) -> Result<()> {
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log.try_clone()?);
     if let Ok(path) = std::env::join_paths(&dirs) {
         command.env("PATH", path);
+    }
+    for name in PROXY_VARIABLES {
+        command.env_remove(name);
     }
     let spawned = command.spawn();
     // The player writes to its own handle and Tidings reads through `log`, so the
@@ -613,10 +624,23 @@ pub async fn audio_stream(page: &Url, proxy: &str) -> Result<AudioStream> {
     if let Ok(env) = std::env::join_paths(&dirs) {
         command.env("PATH", env);
     }
-    let output = tokio::time::timeout(LOOKUP_WAIT, command.output())
+    for name in PROXY_VARIABLES {
+        command.env_remove(name);
+    }
+    let mut child = command.spawn().map_err(|e| Error::msg(format!("Could not start yt-dlp: {e}")))?;
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(Error::msg("Could not start yt-dlp."));
+    };
+    // `child` is stopped when it is dropped (`kill_on_drop`): after the time limit,
+    // or when it sends too much.
+    let run = async {
+        let (out, err) = tokio::join!(read_capped(&mut stdout, MAX_YT_DLP_OUTPUT), read_tail(&mut stderr, MAX_YT_DLP_ERRORS));
+        Ok::<_, std::io::Error>(std::process::Output { status: child.wait().await?, stdout: out?, stderr: err? })
+    };
+    let output = tokio::time::timeout(LOOKUP_WAIT, run)
         .await
         .map_err(|_| Error::msg("yt-dlp took too long to find the audio of this video."))?
-        .map_err(|e| Error::msg(format!("Could not start yt-dlp: {e}")))?;
+        .map_err(|e| Error::msg(format!("yt-dlp could not find the audio: {e}.")))?;
     if output.status.success() {
         if let Some(stream) = parse_audio(&output.stdout) {
             // YouTube now gives a new address a start time a few seconds ahead (yt-dlp
@@ -655,6 +679,48 @@ pub async fn audio_stream(page: &Url, proxy: &str) -> Result<AudioStream> {
         message.push_str(&hint);
     }
     Err(Error::msg(message))
+}
+
+/// yt-dlp's JSON for one video is at most a few megabytes. More is refused.
+const MAX_YT_DLP_OUTPUT: usize = 16 * 1024 * 1024;
+/// Only the end of yt-dlp's error output is kept: the error is on its last lines.
+const MAX_YT_DLP_ERRORS: usize = 64 * 1024;
+
+/// Reads `from` to its end, or fails once it has sent more than `max` bytes.
+async fn read_capped(from: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = from.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(out);
+        }
+        if out.len() + n > max {
+            return Err(std::io::Error::other("it sent too much data"));
+        }
+        out.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Reads `from` to its end and keeps the last `max` bytes.
+async fn read_tail(from: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = from.read(&mut chunk).await?;
+        if n == 0 {
+            let cut = out.len().saturating_sub(max);
+            out.drain(..cut);
+            return Ok(out);
+        }
+        out.extend_from_slice(&chunk[..n]);
+        if out.len() > 2 * max {
+            let cut = out.len() - max;
+            out.drain(..cut);
+        }
+    }
 }
 
 /// Reads yt-dlp's JSON. Only a single file over http(s) with sound is accepted.
@@ -772,6 +838,17 @@ mod tests {
         eprintln!("playing in {} ({})", p.name, p.path.display());
         let url = Url::parse("https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
         play(&p, &url, "", Duration::from_secs(15), |e| eprintln!("failed late: {e}")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn yt_dlp_output_is_limited() {
+        let json = vec![b'x'; 100_000];
+        assert_eq!(read_capped(&mut &json[..], 100_000).await.unwrap().len(), 100_000);
+        assert!(read_capped(&mut &json[..], 99_999).await.is_err());
+        // Errors: only the last lines are kept, however much comes before them.
+        let errors: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(read_tail(&mut &errors[..], 1000).await.unwrap(), errors[errors.len() - 1000..]);
+        assert_eq!(read_tail(&mut &errors[..10], 1000).await.unwrap(), errors[..10]);
     }
 
     #[test]

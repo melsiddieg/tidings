@@ -95,7 +95,9 @@ pub fn list_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<Vec<Art
     })
 }
 
-#[tauri::command]
+// Commands that show article HTML run on the async runtime, not on the main
+// thread: a long article must not stop the window while it is cleaned.
+#[tauri::command(async)]
 pub fn list_articles_full(
     state: AppStateRef<'_>,
     query: ListQuery,
@@ -109,7 +111,7 @@ pub fn list_articles_full(
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_article(
     state: AppStateRef<'_>,
     id: i64,
@@ -143,6 +145,9 @@ pub async fn fetch_full_text(
     let row = db::article(&state.db(), id)?;
     Ok(detail(row, load_images.unwrap_or(settings.load_images), true))
 }
+
+/// Reader pages kept in memory hold at most this much HTML together.
+const PAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +186,12 @@ pub async fn read_url(
             // feed there: any feed could otherwise link to that host. Local pages
             // open in the browser.
             let page = Arc::new(reader::extract_url(&state.net(), &key, None, settings.strip_tracking).await?);
-            state.pages.lock().unwrap_or_else(|e| e.into_inner()).put(key, page.clone());
+            let mut pages = state.pages.lock().unwrap_or_else(|e| e.into_inner());
+            pages.put(key, page.clone());
+            // The cache holds up to 40 pages, and at most `PAGE_CACHE_BYTES` of HTML.
+            while pages.len() > 1 && pages.iter().map(|(_, p)| p.html.len()).sum::<usize>() > PAGE_CACHE_BYTES {
+                pages.pop_lru();
+            }
             page
         }
     };
@@ -458,23 +468,38 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
 
 /// Writes a file only this user can read. The export lists every feed address, and
 /// an address can hold a password.
+///
+/// The bytes go to a new file next to `path`, which then replaces `path`. Opening
+/// `path` itself would follow a symbolic link there and overwrite the file it
+/// points to; a rename replaces the link. An existing file at `path` so also gets
+/// the private mode, and is never left half written.
 pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let name = path.file_name().ok_or_else(|| Error::msg("This is not a file name"))?.to_string_lossy();
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    // `create_new` fails on any existing name, also a symbolic link.
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    // An existing file keeps its old mode: tighten it too.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let mut attempt = 0;
+    let (temp, mut file) = loop {
+        let temp = dir.join(format!(".{name}.{}-{nanos}-{attempt}.tmp", std::process::id()));
+        match options.open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => attempt += 1,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let written = file.write_all(bytes).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.into());
     }
-    file.write_all(bytes)?;
     Ok(())
 }
 

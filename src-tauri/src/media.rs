@@ -38,6 +38,11 @@ const MAX_SKIP: u64 = 400 * 1024 * 1024;
 const MAX_OFFSET: u64 = 1 << 50;
 /// Files whose start was checked for a playlist are remembered, up to this many.
 const CHECKED_FILES: usize = 64;
+/// Tags at the start of a file (`tag_len`) are skipped up to this many bytes in
+/// all, and up to this many tags. Tags with cover art reach a few megabytes. A
+/// file with more is refused like a playlist: what follows cannot be checked.
+const MAX_TAG_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TAGS: usize = 16;
 /// The error for an address that answers with a playlist instead of a file.
 const PLAYLIST: &str = "This is a streaming playlist (HLS or DASH), not an audio or video file. \
     Tidings plays single files only";
@@ -53,7 +58,7 @@ type Cell = Arc<OnceCell<Arc<Chunk>>>;
 pub struct Media {
     resolved: ResolvedUrls,
     blocks: Mutex<LruCache<(String, u64), Cell>>,
-    /// Files whose first block was fetched and is not a playlist.
+    /// Files whose start was checked and is not a playlist (`check_start`).
     checked: Mutex<LruCache<String, ()>>,
 }
 
@@ -109,7 +114,8 @@ pub fn is_playlist_error(err: &Error) -> bool {
 /// All these formats are text, and no audio or video format starts with text
 /// (MP3, MP4, Ogg, WebM, FLAC, WAV and AAC all have bytes below 0x20 or invalid
 /// UTF-8 within their first bytes). So the rule is: a file that starts with text
-/// is refused.
+/// is refused. `head` is what follows the tags at the start of the file
+/// (`check_start`).
 ///
 /// AMR is the one audio format with a text marker (`#!AMR\n`). It needs no
 /// exception: the audio frames after the marker are not text, so a real file
@@ -148,6 +154,74 @@ fn is_playlist(head: &[u8]) -> bool {
         // Cut in the middle of a character at the end of `head`.
         Err(e) => e.error_len().is_none() && e.valid_up_to() > 0,
     }
+}
+
+/// The length of the ID3v2 or APEv2 tag that starts `bytes`, if one does.
+///
+/// GStreamer takes these tags off before it looks at what a file is (id3demux,
+/// apedemux), so a playlist behind a tag is still a playlist to it. This reads the
+/// length the same way, so the check looks at the bytes that GStreamer looks at.
+fn tag_len(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() >= 10 && bytes.starts_with(b"ID3") {
+        // "ID3", version (2 bytes), flags, then the size in four 7-bit bytes. The
+        // size counts neither this header nor the footer that the flags may add.
+        let size = bytes[6..10].iter().fold(0u64, |n, b| n << 7 | u64::from(b & 0x7F));
+        let footer = if bytes[5] & 0x10 != 0 { 10 } else { 0 };
+        return Some(10 + size + footer);
+    }
+    if bytes.len() >= 32 && bytes.starts_with(b"APETAGEX") {
+        // "APETAGEX", version, then the size of the tag without this 32-byte header.
+        let size = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        return Some(32 + u64::from(size));
+    }
+    None
+}
+
+/// Checks the start of a file before the player gets any part of it, also when
+/// the player begins in the middle: the bytes after any tags at the start must not
+/// be a playlist. A tag can be megabytes long (cover art), so this may fetch the
+/// block where the audio or video data begins.
+async fn check_start(net: &Net, media: &Media, source: &str) -> Result<()> {
+    if media.is_checked(source) {
+        return Ok(());
+    }
+    let (mut offset, mut tags) = (0u64, 0usize);
+    loop {
+        let head = bytes_at(net, media, source, offset).await?;
+        match tag_len(&head) {
+            Some(len) => {
+                offset += len;
+                tags += 1;
+                if offset > MAX_TAG_BYTES || tags > MAX_TAGS {
+                    return Err(Error::msg(PLAYLIST));
+                }
+            }
+            None if is_playlist(&head) => return Err(Error::msg(PLAYLIST)),
+            None => break,
+        }
+    }
+    media.set_checked(source);
+    Ok(())
+}
+
+/// Up to 1024 bytes of a file from `offset`, from cached blocks. Empty past the end.
+async fn bytes_at(net: &Net, media: &Media, source: &str, offset: u64) -> Result<Vec<u8>> {
+    const WANTED: usize = 1024;
+    let index = offset / CHUNK;
+    let first = block(net, media, source, index).await?;
+    if first.status == 416 {
+        return Ok(Vec::new());
+    }
+    let start = (offset - index * CHUNK) as usize;
+    let mut out: Vec<u8> = first.bytes.iter().skip(start).take(WANTED).copied().collect();
+    // Only a full block can have a next one.
+    if out.len() < WANTED && first.bytes.len() as u64 == CHUNK {
+        let next = block(net, media, source, index + 1).await?;
+        if next.status != 416 {
+            out.extend(next.bytes.iter().take(WANTED - out.len()));
+        }
+    }
+    Ok(out)
 }
 
 /// Content types of playlists. The player may go by the type alone.
@@ -280,11 +354,7 @@ pub async fn fetch(net: &Net, media: &Arc<Media>, source: &str, range: Option<&s
     }
     let wanted = end.unwrap_or(u64::MAX).min(start + CHUNK - 1) - start + 1;
     let first = start / CHUNK;
-    // The start of a file is checked before any part of it is played, also when
-    // the player begins in the middle (see `is_playlist`).
-    if first != 0 && !media.is_checked(source) {
-        block(net, media, source, 0).await?;
-    }
+    check_start(net, media, source).await?;
     let head = block(net, media, source, first).await?;
     let total = total_size(&head);
     let offset = (start - first * CHUNK) as usize;
@@ -338,16 +408,9 @@ async fn block(net: &Net, media: &Media, source: &str, index: u64) -> Result<Arc
                 chunk.bytes.extend_from_slice(&more.bytes);
                 chunk.content_range = Some(format!("bytes {start}-{}/{total}", start + chunk.bytes.len() as u64 - 1));
             }
-            // A playlist is not kept, so no block 0 in memory holds one.
-            if index == 0 && is_playlist(&chunk.bytes) {
-                return Err(Error::msg(PLAYLIST));
-            }
             Ok::<_, Error>(Arc::new(chunk))
         })
         .await?;
-    if index == 0 {
-        media.set_checked(source);
-    }
     Ok(block.clone())
 }
 
@@ -486,6 +549,23 @@ mod tests {
         );
         let plain = "https://aphid.fireside.fm/d/1437767933/c91b/280e.mp3";
         assert_eq!(strip_trackers(plain), plain);
+    }
+
+    #[test]
+    fn tags_are_measured_like_gstreamer_does() {
+        // ID3v2: a ten-byte header, the size in four 7-bit bytes (here 0x81 = 129).
+        assert_eq!(tag_len(b"ID3\x04\x00\x00\x00\x00\x01\x01rest"), Some(10 + 129));
+        // The largest size, with a footer.
+        assert_eq!(tag_len(b"ID3\x04\x00\x10\x7F\x7F\x7F\x7F"), Some(10 + (1 << 28) - 1 + 10));
+        // The high bit of each size byte is not part of the size.
+        assert_eq!(tag_len(b"ID3\x03\x00\x00\x80\x80\x80\x85"), Some(15));
+        // APEv2: a 32-byte header, then the size of the rest.
+        let ape = [&b"APETAGEX\xD0\x07\x00\x00"[..], &300u32.to_le_bytes(), &[0u8; 16]].concat();
+        assert_eq!(tag_len(&ape), Some(32 + 300));
+        // Too short to hold a header, or no tag at all.
+        for bytes in [&b"ID3\x04\x00"[..], b"APETAGEX", b"\xFF\xFB\x90\x64", b"#EXTM3U\n", b""] {
+            assert_eq!(tag_len(bytes), None, "{bytes:?}");
+        }
     }
 
     #[test]

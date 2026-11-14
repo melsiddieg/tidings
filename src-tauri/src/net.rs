@@ -230,6 +230,10 @@ pub fn needs_consent(url: &Url) -> Error {
 
 fn base_builder(settings: &Settings) -> Result<ClientBuilder> {
     let mut builder = Client::builder()
+        // Only the proxy set in Tidings, never the system's: without `no_proxy`,
+        // reqwest reads `HTTP_PROXY` and the macOS proxy settings. An empty
+        // setting means a direct connection. (An explicit proxy ignores `NO_PROXY`.)
+        .no_proxy()
         .user_agent(settings.user_agent.clone())
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15))

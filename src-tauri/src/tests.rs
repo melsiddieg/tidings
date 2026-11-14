@@ -784,6 +784,26 @@ async fn media_refuses_playlists() {
         }
     });
 
+    // Tags at the start of a file: ID3v2 (size in four 7-bit bytes, `footer` adds
+    // ten bytes) and APEv2.
+    fn id3(size: u32, footer: bool) -> Vec<u8> {
+        let size = [(size >> 21) as u8 & 0x7F, (size >> 14) as u8 & 0x7F, (size >> 7) as u8 & 0x7F, size as u8 & 0x7F];
+        let mut tag = vec![b'I', b'D', b'3', 4, 0, if footer { 0x10 } else { 0 }];
+        tag.extend(size);
+        tag
+    }
+    fn ape(size: u32) -> Vec<u8> {
+        [&b"APETAGEX\xD0\x07\x00\x00"[..], &size.to_le_bytes(), &[0u8; 16]].concat()
+    }
+    fn mp3() -> Vec<u8> {
+        b"\xFF\xFB\x90\x64\x00\x00\x00\x00\x00\x00\x00\x00".repeat(100)
+    }
+    // A tag with 3 MB of cover art: what follows it is in the second block.
+    const ART: u32 = 3 * 1024 * 1024;
+    fn big(after: &[u8]) -> Vec<u8> {
+        [id3(ART, false), vec![0u8; ART as usize], after.to_vec()].concat()
+    }
+
     // A host that calls everything audio/mpeg, like a feed that lies about a file.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -795,11 +815,16 @@ async fn media_refuses_playlists() {
                 let head = String::from_utf8_lossy(&buf[..n]).to_string();
                 let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let segment = format!("http://127.0.0.1:{segment_port}/segment.ts");
+                let hls = format!("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n{segment}\n#EXT-X-ENDLIST\n").into_bytes();
                 let (kind, body) = match path.as_str() {
-                    "/episode.mp3" => (
-                        "audio/mpeg",
-                        format!("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n{segment}\n#EXT-X-ENDLIST\n").into_bytes(),
-                    ),
+                    "/episode.mp3" => ("audio/mpeg", hls),
+                    // The report on 0.9.5: GStreamer takes the empty ID3 tag off, then
+                    // plays the playlist and fetches the segment by itself.
+                    "/id3.mp3" => ("audio/mpeg", [id3(0, false), hls].concat()),
+                    "/tags.mp3" => ("audio/mpeg", [id3(0, false), ape(0), id3(0, true), vec![0; 10], hls].concat()),
+                    "/art.mp3" => ("audio/mpeg", big(&hls)),
+                    "/art-real.mp3" => ("audio/mpeg", big(&mp3())),
+                    "/many-tags.mp3" => ("audio/mpeg", [id3(0, false).repeat(17), mp3()].concat()),
                     "/video.mp4" => ("video/mp4", format!("<?xml version=\"1.0\"?><MPD><BaseURL>{segment}</BaseURL></MPD>").into_bytes()),
                     "/typed.mp3" => ("application/vnd.apple.mpegurl", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
                     _ => ("audio/mpeg", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
@@ -814,7 +839,19 @@ async fn media_refuses_playlists() {
 
     let media = std::sync::Arc::new(Media::default());
     let late = format!("bytes={}-", CHUNK + 5);
-    for (path, range) in [("episode.mp3", "bytes=0-"), ("video.mp4", "bytes=0-1"), ("typed.mp3", "bytes=0-"), ("episode.mp3", late.as_str())] {
+    let cases = [
+        ("episode.mp3", "bytes=0-"),
+        ("video.mp4", "bytes=0-1"),
+        ("typed.mp3", "bytes=0-"),
+        ("episode.mp3", late.as_str()),
+        ("id3.mp3", "bytes=0-"),
+        ("tags.mp3", "bytes=0-"),
+        ("art.mp3", "bytes=0-"),
+        ("art.mp3", late.as_str()),
+        // Too many tags to look behind: refused, though only audio follows.
+        ("many-tags.mp3", "bytes=0-"),
+    ];
+    for (path, range) in cases {
         let url = format!("http://127.0.0.1:{port}/{path}");
         let err = fetch(&net, &media, &url, Some(range)).await.err().unwrap_or_else(|| panic!("{path} {range} was played"));
         assert!(is_playlist_error(&err), "{path}: {err}");
@@ -823,6 +860,12 @@ async fn media_refuses_playlists() {
     // A real file on the same host plays.
     let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/real.mp3"), Some("bytes=0-")).await.unwrap();
     assert_eq!((c.status, c.bytes.as_slice()), (206, &b"ID3\x04\x00\x00\x00\x00\x00\x00"[..]));
+    // So does one with cover art, also when the player starts after the tag.
+    let real = format!("http://127.0.0.1:{port}/art-real.mp3");
+    let c = fetch(&net, &media, &real, Some("bytes=0-")).await.unwrap();
+    assert_eq!((c.status, &c.bytes[..3]), (206, &b"ID3"[..]));
+    let c = fetch(&net, &media, &real, Some(&format!("bytes={}-", ART + 10))).await.unwrap();
+    assert_eq!(&c.bytes[..4], b"\xFF\xFB\x90\x64");
     assert_eq!(segment_hits.load(Ordering::SeqCst), 0);
 
     // Starting in the middle of a real file first reads (and checks) its start.
@@ -835,6 +878,65 @@ async fn media_refuses_playlists() {
     // A `Range` far past any file is refused before any sum of offsets can overflow.
     let c = fetch(&net, &media, &format!("http://127.0.0.1:{port}/v.mp4"), Some(&format!("bytes={}-", u64::MAX - 1))).await.unwrap();
     assert_eq!(c.status, 416);
+}
+
+/// The report on 0.9.5: with no proxy set, Tidings used the system's proxy
+/// (`HTTP_PROXY` and the like), which can reach private addresses behind a public
+/// name. The proxy variables are set in a process of its own, so no other test sees them.
+#[test]
+fn proxy_variables_are_ignored() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["tests::proxy_variables_child", "--exact", "--ignored", "--nocapture"])
+        .env("TIDINGS_PROXY_CHILD", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && text.contains("1 passed"), "{text}{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[tokio::test]
+#[ignore = "started by proxy_variables_are_ignored in a process of its own"]
+async fn proxy_variables_child() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if std::env::var_os("TIDINGS_PROXY_CHILD").is_none() {
+        return;
+    }
+    // A proxy that answers every request itself, and counts them.
+    let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_url = format!("http://127.0.0.1:{}", proxy.local_addr().unwrap().port());
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = proxy.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy").await;
+        }
+    });
+    let port = test_server().await;
+    let feed = Url::parse(&format!("http://127.0.0.1:{port}/ok")).unwrap();
+    let get = |settings: crate::settings::Settings| {
+        let feed = feed.clone();
+        async move {
+            let net = crate::net::Net::new(&settings).unwrap();
+            net.get(&feed, Some(&feed)).await.unwrap().send().await.unwrap().text().await.unwrap()
+        }
+    };
+    for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        std::env::set_var(name, &proxy_url);
+    }
+    // No proxy set in Tidings: a direct connection.
+    assert_eq!(get(crate::settings::Settings::default()).await, "ok");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    // A proxy set in Tidings is used, whatever `NO_PROXY` says.
+    std::env::set_var("NO_PROXY", "*");
+    std::env::set_var("no_proxy", "*");
+    let settings = crate::settings::Settings { proxy: proxy_url.clone(), ..Default::default() };
+    assert_eq!(get(settings).await, "proxy");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1616,6 +1718,25 @@ fn opml_export_is_private() {
     crate::commands::write_private(&path, b"<opml/>").unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(std::fs::read(&path).unwrap(), b"<opml/>");
+
+    // The report on 0.9.5: a symbolic link at the chosen name made the export
+    // overwrite the file it points to. The link is replaced; that file stays.
+    let other = dir.join("other.txt");
+    std::fs::write(&other, "ORIGINAL").unwrap();
+    let link = dir.join("export.opml");
+    std::os::unix::fs::symlink(&other, &link).unwrap();
+    crate::commands::write_private(&link, b"<opml/>").unwrap();
+    assert_eq!(std::fs::read(&other).unwrap(), b"ORIGINAL");
+    let written = std::fs::symlink_metadata(&link).unwrap();
+    assert!(written.file_type().is_file());
+    assert_eq!(written.permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&link).unwrap(), b"<opml/>");
+
+    // A failed export leaves nothing behind.
+    assert!(crate::commands::write_private(&dir, b"<opml/>").is_err());
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["export.opml", "other.txt", "subscriptions.opml"]);
     let _ = std::fs::remove_dir_all(dir);
 }
 
