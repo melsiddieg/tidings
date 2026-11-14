@@ -1,6 +1,6 @@
 [package]
 name = "tidings"
-version = "0.9.5"
+version = "0.9.6"
 description = "A private, secure RSS and Atom feed reader"
 repository = "https://github.com/melsiddieg/tidings"
 homepage = "https://github.com/melsiddieg/tidings"
