@@ -36,6 +36,12 @@ Fixes from a fourth audit, of 0.9.5.
   allowed tags were not affected: they include neither SVG, MathML nor the raw text
   elements the attack needs.
 
+### Fixed
+- The audio server on 127.0.0.1 (Linux and the BSDs) retried a failed accept at
+  once, without waiting. An error that keeps coming back, such as too many open
+  files, kept one processor core busy. It now waits 100 ms between tries. (This also
+  made the macOS build of the tests hang.)
+
 ## [0.9.5] - 2026-11-11
 
 ### Security
