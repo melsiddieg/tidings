@@ -425,6 +425,35 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       return { feeds: 0, folders: 0, skipped: 0 };
     case 'export_opml':
       return null;
+    case 'backup':
+      await wait(600);
+      return '~/Documents/tidings-backup.tidings';
+    case 'choose_backup': {
+      const live = articles;
+      return {
+        fileName: 'tidings-backup-2026-11-20.tidings',
+        createdAt: now - 86_400,
+        version: '0.10.0',
+        folders: folders.length,
+        feeds: feeds.length,
+        articles: live.length,
+        unread: live.filter((a) => !a.isRead).length,
+        starred: live.filter((a) => a.isStarred).length,
+        rules: rules.length,
+        searches: searches.length,
+        localFeeds: ['nas.local:8080'],
+        proxyNow: settings.proxy,
+        proxyAfter: settings.proxy || 'socks5h://127.0.0.1:9050',
+        offline: null,
+      };
+    }
+    case 'restore_backup':
+      await wait(1500);
+      return { previous: '~/Library/Application Support/org.tidings.reader/tidings-before-restore.db', offline: null };
+    case 'export_starred':
+      if (!articles.some((a) => a.isStarred)) throw 'There are no starred articles to export';
+      await wait(400);
+      return `~/Documents/tidings-starred.${args.format === 'markdown' ? 'md' : 'html'}`;
     case 'get_settings':
       return { ...settings };
     case 'save_settings':

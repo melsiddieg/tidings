@@ -329,6 +329,19 @@ pub fn render(html: &str, load_images: bool) -> Rendered {
     }
 }
 
+/// Prepares stored HTML for a file the user saves (export.rs). It is cleaned again
+/// like for display, but without the image proxy, which works only inside Tidings:
+/// images keep their web address, or are removed when `images` is false.
+pub fn export(html: &str, images: bool) -> String {
+    let html = bounded(html);
+    let mut b = builder();
+    b.url_relative(UrlRelative::Deny);
+    if !images {
+        b.rm_tags(["img"]);
+    }
+    b.clean(&html).to_string()
+}
+
 /// Stable 64-bit FNV-1a hash, used to detect changed articles.
 pub fn hash(parts: &[&str]) -> i64 {
     let mut h: u64 = 0xcbf29ce484222325;

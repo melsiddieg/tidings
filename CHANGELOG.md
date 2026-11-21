@@ -5,6 +5,18 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Backup and restore (Settings → Archive & data, the `…` menu, or File on macOS): one
+  file with your feeds, folders, articles with their read and starred state, settings,
+  rules, saved searches, briefs and translations. Before a restore, Tidings shows what
+  the backup holds and copies the current data to `tidings-before-restore.db` in the
+  data folder. A restore never turns off a proxy, "HTTPS only" or tracker removal that
+  is on now, and keeps this computer's video player. Restoring reads the file like one
+  from the internet: only the rows of the tables Tidings knows are copied, each value
+  checked, never the file's own tables, triggers or views.
+- Export starred articles to one HTML or Markdown file, with the full text where it was
+  loaded. Images are left out unless you ask for them.
+
 ## [0.10.0] - 2026-11-21
 
 ### Added

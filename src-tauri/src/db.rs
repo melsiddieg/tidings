@@ -34,8 +34,18 @@ pub fn open(path: &Path) -> Result<Connection> {
          PRAGMA secure_delete = ON;",
     )?;
     migrate(&conn)?;
+    // Marks the file as Tidings' database, so a copy of it can be restored (backup.rs).
+    let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    if id != crate::backup::APPLICATION_ID {
+        conn.pragma_update(None, "application_id", crate::backup::APPLICATION_ID)?;
+    }
     Ok(conn)
 }
+
+/// The version the last migration in `migrate` sets. A backup of a newer version is
+/// refused (backup.rs). A migration that changes what stored values mean, rather
+/// than adding tables or columns, must also raise `backup::OLDEST_VERSION`.
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 10 November 2026, when 0.9.2 came out: since then a feed on the local network
 /// is added only after the user allowed its address.
@@ -829,6 +839,25 @@ pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Every starred article, newest first, with the name of its feed (export.rs).
+pub fn starred_articles(conn: &Connection) -> Result<Vec<(ArticleRow, String)>> {
+    let mut args = Vec::new();
+    let clause = where_clause(&Scope::Starred, "all", "", &DateRange::default(), None, &mut args);
+    let sql = format!("SELECT a.id FROM articles a WHERE {clause} ORDER BY a.published DESC, a.id DESC");
+    let ids: Vec<i64> = conn
+        .prepare(&sql)?
+        .query_map(params_from_iter(args), |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let names: std::collections::HashMap<i64, String> = feeds(conn)?.into_iter().map(|f| (f.id, f.title)).collect();
+    ids.into_iter()
+        .map(|id| {
+            let row = article(conn, id)?;
+            let feed = names.get(&row.feed_id).cloned().unwrap_or_default();
+            Ok((row, feed))
+        })
+        .collect()
+}
+
 /// How many articles the list would show for `q` (its limit and offset aside).
 pub fn count_articles(conn: &Connection, q: &ListQuery) -> Result<i64> {
     let mut args = Vec::new();
@@ -867,6 +896,20 @@ pub struct SavedSearch {
     pub id: i64,
     pub title: String,
     pub state: String,
+}
+
+/// A saved search's name: one line of at most 100 characters.
+pub fn search_title(title: &str) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() || title.chars().count() > 100 {
+        return Err(Error::msg("Give the search a name of at most 100 characters"));
+    }
+    Ok(title)
+}
+
+/// Whether `state` can be a saved search's list state: a JSON object of at most 16 KB.
+pub fn search_state_is_valid(state: &str) -> bool {
+    state.len() <= 16 * 1024 && serde_json::from_str::<serde_json::Value>(state).is_ok_and(|v| v.is_object())
 }
 
 pub fn searches(conn: &Connection) -> Result<Vec<SavedSearch>> {

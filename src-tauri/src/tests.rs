@@ -2093,7 +2093,7 @@ fn opml_export_is_private() {
     // Also when a file readable by everyone is already there.
     std::fs::write(&path, "old").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    crate::commands::write_private(&path, b"<opml/>").unwrap();
+    crate::files::write_private(&path, b"<opml/>").unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(std::fs::read(&path).unwrap(), b"<opml/>");
 
@@ -2103,7 +2103,7 @@ fn opml_export_is_private() {
     std::fs::write(&other, "ORIGINAL").unwrap();
     let link = dir.join("export.opml");
     std::os::unix::fs::symlink(&other, &link).unwrap();
-    crate::commands::write_private(&link, b"<opml/>").unwrap();
+    crate::files::write_private(&link, b"<opml/>").unwrap();
     assert_eq!(std::fs::read(&other).unwrap(), b"ORIGINAL");
     let written = std::fs::symlink_metadata(&link).unwrap();
     assert!(written.file_type().is_file());
@@ -2111,7 +2111,7 @@ fn opml_export_is_private() {
     assert_eq!(std::fs::read(&link).unwrap(), b"<opml/>");
 
     // A failed export leaves nothing behind.
-    assert!(crate::commands::write_private(&dir, b"<opml/>").is_err());
+    assert!(crate::files::write_private(&dir, b"<opml/>").is_err());
     let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     assert_eq!(names, ["export.opml", "other.txt", "subscriptions.opml"]);
@@ -2262,4 +2262,321 @@ async fn svg_is_drawn_to_png() {
     let started = std::time::Instant::now();
     assert!(svg(bomb.as_bytes(), Use::Article).is_none());
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+}
+
+// ---------------------------------------------------------------------------
+// Backup and restore (backup.rs), starred articles (export.rs)
+// ---------------------------------------------------------------------------
+
+/// The data of a small reader: nested folders (the outer one made last, so a row
+/// refers to a later row), a feed on the local network, read, starred and deleted
+/// articles, a rule, a saved search, a brief and a translation.
+fn sample_reader(conn: &mut rusqlite::Connection) -> (i64, i64) {
+    let inner = db::create_folder(conn, "Inner", None).unwrap();
+    let outer = db::create_folder(conn, "Outer", None).unwrap();
+    db::move_folder(conn, inner, Some(outer), None).unwrap();
+    let feed = db::insert_feed(conn, "https://news.example/rss", Some(inner), Some("News"), None).unwrap();
+    let nas = db::insert_feed(conn, "http://nas.local:8080/feed", None, Some("NAS"), None).unwrap();
+    conn.execute("UPDATE feeds SET local = 1 WHERE id = ?1", [nas]).unwrap();
+    let t = db::now() - 1000;
+    store(
+        conn,
+        feed,
+        &[
+            db::NewArticle { content: "<p>Read me</p>".into(), ..item("read", t, None) },
+            db::NewArticle { content: "<p>Keep <b>me</b></p>".into(), ..item("star", t + 1, Some(("audio/mpeg", "https://cdn.example/a.mp3"))) },
+            item("gone", t + 2, None),
+            item("new", t + 3, None),
+        ],
+    );
+    let id = |guid: &str| conn.query_row("SELECT id FROM articles WHERE guid = ?1", [guid], |r| r.get::<_, i64>(0)).unwrap();
+    db::set_read(conn, &[id("read")], true).unwrap();
+    db::set_starred(conn, id("star"), true).unwrap();
+    db::delete_articles(conn, &[id("gone")]).unwrap();
+    db::save_rule(conn, &rule("title", "bitcoin", "delete", None, Some(outer))).unwrap();
+    db::insert_search(conn, "Podcasts", r#"{"scope":{"kind":"all"},"filter":"unread"}"#).unwrap();
+    db::insert_brief(conn, "Brief", "model", "{}", "{}").unwrap();
+    db::save_translation(conn, id("star"), false, r#"{"title":"T","paragraphs":[]}"#).unwrap();
+    let settings = crate::settings::Settings {
+        proxy: String::new(),
+        https_only: false,
+        video_player: "/opt/backup/player".into(),
+        reader_size: 22,
+        ..Default::default()
+    };
+    crate::settings::save(conn, &settings).unwrap();
+    db::set_value(conn, "yt_dlp_seen", "from the backup").unwrap();
+    (feed, nas)
+}
+
+fn table_count(conn: &rusqlite::Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn backup_and_restore() {
+    use crate::backup;
+    let (mut old, old_dir) = temp_db();
+    // `db::open` marks the file, so copies of it are known as Tidings databases.
+    assert_eq!(table_count(&old, "PRAGMA application_id"), backup::APPLICATION_ID as i64);
+    assert_eq!(table_count(&old, "PRAGMA user_version"), db::SCHEMA_VERSION);
+    let (feed, nas) = sample_reader(&mut old);
+    let file = old_dir.join("reader.tidings");
+    backup::copy_to(&old, &file).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    // Freed pages are not copied: the text of the deleted article is not in the file.
+    old.execute("UPDATE articles SET content = 'GONE-SECRET' WHERE guid = 'gone'", []).unwrap();
+    let file2 = old_dir.join("again.tidings");
+    old.execute("UPDATE articles SET content = NULL WHERE guid = 'gone'", []).unwrap();
+    backup::copy_to(&old, &file2).unwrap();
+    assert!(!String::from_utf8_lossy(&std::fs::read(&file2).unwrap()).contains("GONE-SECRET"));
+
+    // This computer: Tor, its own player, and other feeds.
+    let (mut live, dir) = temp_db();
+    db::insert_feed(&live, "https://mine.example/rss", None, Some("Mine"), None).unwrap();
+    db::set_value(&live, "yt_dlp_seen", "this computer").unwrap();
+    let current = crate::settings::Settings {
+        proxy: "socks5h://127.0.0.1:9050".into(),
+        https_only: true,
+        video_player: "/usr/local/bin/mpv".into(),
+        ..Default::default()
+    };
+    crate::settings::save(&live, &current).unwrap();
+
+    let summary = backup::inspect(&file, &current).unwrap();
+    assert_eq!((summary.folders, summary.feeds, summary.articles, summary.unread, summary.starred), (2, 2, 3, 2, 1));
+    assert_eq!((summary.rules, summary.searches), (1, 1));
+    assert_eq!(summary.local_feeds, ["nas.local:8080"]);
+    assert_eq!(summary.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(summary.created_at.is_some());
+    // The proxy in use stays.
+    assert_eq!(summary.proxy_after, "socks5h://127.0.0.1:9050");
+    assert!(summary.offline.is_none());
+
+    let previous = dir.join(backup::PREVIOUS_FILE);
+    let loaded = backup::restore(&mut live, &file, &previous, &current).unwrap();
+    assert!(loaded.offline.is_none());
+    let s = &loaded.settings;
+    assert_eq!((s.proxy.as_str(), s.https_only, s.video_player.as_str(), s.reader_size), ("socks5h://127.0.0.1:9050", true, "/usr/local/bin/mpv", 22));
+    assert_eq!(crate::settings::load(&live).settings.reader_size, 22);
+    // About this computer: stays.
+    assert_eq!(db::get_value(&live, "yt_dlp_seen").as_deref(), Some("this computer"));
+    assert_eq!(db::get_value(&live, "backup"), None);
+
+    // Everything else is the backup's, with the same ids.
+    let tree = db::tree(&live).unwrap();
+    let mut names: Vec<&str> = tree.feeds.iter().map(|f| f.title.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["NAS", "News"]);
+    assert_eq!(tree.starred, 1);
+    assert_eq!(
+        states(&live, feed),
+        [
+            ("gone".into(), true, false, true),
+            ("new".into(), false, false, false),
+            ("read".into(), true, false, false),
+            ("star".into(), false, true, false),
+        ]
+    );
+    assert!(db::fetch_info(&live, nas).unwrap().local);
+    assert_eq!(db::rules(&live).unwrap().len(), 1);
+    assert_eq!(db::searches(&live).unwrap().len(), 1);
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM briefs"), 1);
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM translations"), 1);
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM articles WHERE is_new = 1"), 0);
+
+    // The data from before is kept, and can be restored to go back.
+    let before = backup::inspect(&previous, &current).unwrap();
+    assert_eq!((before.feeds, before.articles), (1, 0));
+    backup::restore(&mut live, &previous, &dir.join("again.db"), &current).unwrap();
+    let names: Vec<String> = db::tree(&live).unwrap().feeds.into_iter().map(|f| f.title).collect();
+    assert_eq!(names, ["Mine"]);
+
+    // Without a proxy now, the backup's proxy is used; a broken one means offline.
+    let none = crate::settings::Settings::default();
+    let with_proxy = crate::settings::Settings { proxy: "http://user:secret@proxy.example:3128".into(), ..Default::default() };
+    crate::settings::save(&old, &with_proxy).unwrap();
+    backup::copy_to(&old, &file).unwrap();
+    let summary = backup::inspect(&file, &none).unwrap();
+    assert_eq!((summary.proxy_now.as_str(), summary.proxy_after.as_str()), ("", "http://proxy.example:3128/"));
+    old.execute("UPDATE settings SET value = json_set(value, '$.proxy', 'ftp://x') WHERE key = 'app'", []).unwrap();
+    backup::copy_to(&old, &file).unwrap();
+    assert!(backup::inspect(&file, &none).unwrap().offline.is_some());
+    assert!(backup::inspect(&file, &current).unwrap().offline.is_none());
+
+    let _ = std::fs::remove_dir_all(old_dir);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn crafted_backups_are_refused() {
+    use crate::backup;
+    let (mut source, source_dir) = temp_db();
+    sample_reader(&mut source);
+    let (mut live, dir) = temp_db();
+    db::insert_feed(&live, "https://mine.example/rss", None, Some("Mine"), None).unwrap();
+    let current = crate::settings::Settings::default();
+    let previous = dir.join(backup::PREVIOUS_FILE);
+    let untouched = |live: &rusqlite::Connection| {
+        let names: Vec<String> = db::tree(live).unwrap().feeds.into_iter().map(|f| f.title).collect();
+        assert_eq!(names, ["Mine"]);
+    };
+    // A copy of the sample, changed by `change` with no limits.
+    let crafted = |name: &str, change: &str| {
+        let path = source_dir.join(name);
+        backup::copy_to(&source, &path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(change).unwrap();
+        drop(conn);
+        path
+    };
+    let error = |path: &std::path::Path, live: &mut rusqlite::Connection| {
+        let err = backup::restore(live, path, &previous, &current).err().expect("refused").to_string();
+        untouched(live);
+        err
+    };
+
+    let text = source_dir.join("text.tidings");
+    std::fs::write(&text, "not a database").unwrap();
+    assert!(error(&text, &mut live).contains("not a Tidings backup"));
+    let other = crafted("other.tidings", "PRAGMA application_id = 1;");
+    assert!(error(&other, &mut live).contains("not a Tidings backup"));
+    let newer = crafted("newer.tidings", "PRAGMA user_version = 99;");
+    assert!(error(&newer, &mut live).contains("newer version"));
+    let older = crafted("older.tidings", "PRAGMA user_version = 6;");
+    assert!(error(&older, &mut live).contains("before 0.9.4"));
+    // A view runs code from the file when it is read.
+    let view = crafted("view.tidings", "PRAGMA foreign_keys = OFF; DROP TABLE articles; CREATE VIEW articles AS SELECT * FROM feeds;");
+    assert!(error(&view, &mut live).contains("not a Tidings backup"));
+    let typed = crafted("typed.tidings", "UPDATE articles SET published = 'yesterday';");
+    assert!(error(&typed, &mut live).contains("articles.published"));
+    let orphan = crafted("orphan.tidings", "PRAGMA foreign_keys = OFF; DELETE FROM feeds WHERE title = 'News';");
+    assert!(error(&orphan, &mut live).contains("not a Tidings backup"));
+    let huge = crafted("huge.tidings", "UPDATE articles SET content = zeroblob(40000000) WHERE guid = 'read';");
+    assert!(error(&huge, &mut live).contains("not a Tidings backup"));
+
+    // Its schema never reaches Tidings: a trigger, a table of its own and its
+    // settings for programs. Rules and searches that could not be saved are dropped.
+    let schema = crafted(
+        "schema.tidings",
+        "CREATE TABLE extra (x); \
+         CREATE TRIGGER evil AFTER UPDATE ON settings BEGIN UPDATE settings SET value = '{}'; END; \
+         UPDATE settings SET value = json_set(value, '$.videoPlayer', '/tmp/evil') WHERE key = 'app'; \
+         INSERT INTO rules (field, words, action, created_at) VALUES ('title', 'x', 'explode', 0); \
+         INSERT INTO searches (title, state, created_at) VALUES ('Bad', 'not json', 0);",
+    );
+    let loaded = backup::restore(&mut live, &schema, &previous, &current).unwrap();
+    assert_eq!(loaded.settings.video_player, "");
+    let objects = table_count(&live, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('extra', 'evil')");
+    assert_eq!(objects, 0);
+    assert_eq!(db::rules(&live).unwrap().len(), 1);
+    assert_eq!(db::searches(&live).unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(source_dir);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn starred_articles_are_exported() {
+    use crate::export;
+    let (mut conn, dir) = temp_db();
+    let feed = db::insert_feed(&conn, "https://news.example/rss", None, Some("News"), None).unwrap();
+    let t = 1_794_268_800;
+    store(
+        &mut conn,
+        feed,
+        &[
+            db::NewArticle {
+                title: "Rust *1.0* [out]".into(),
+                content: r#"<p>Hello <b>world</b> <a href="https://rust-lang.org/">site</a></p><img src="https://img.example/a.png" alt="pic"><script>alert(1)</script>"#.into(),
+                ..item("a", t, Some(("audio/mpeg", "https://cdn.example/a.mp3")))
+            },
+            db::NewArticle { url: Some("javascript:alert(1)".into()), content: "<p>Second</p>".into(), ..item("b", t - 86_400, None) },
+            item("c", t - 2 * 86_400, None),
+        ],
+    );
+    for guid in ["a", "b"] {
+        let id: i64 = conn.query_row("SELECT id FROM articles WHERE guid = ?1", [guid], |r| r.get(0)).unwrap();
+        db::set_starred(&conn, id, true).unwrap();
+    }
+    let articles = db::starred_articles(&conn).unwrap();
+    assert_eq!(articles.iter().map(|(a, feed)| (a.title.as_str(), feed.as_str())).collect::<Vec<_>>(), [("Rust *1.0* [out]", "News"), ("b", "News")]);
+
+    let html = export::html(&articles, false);
+    assert!(html.contains("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">"));
+    assert!(html.contains("<h2><a href=\"https://example.com/a\">Rust *1.0* [out]</a></h2>"));
+    assert!(html.contains("<b>world</b>"));
+    assert!(html.contains("Attachment: <a href=\"https://cdn.example/a.mp3\">audio/mpeg</a>"));
+    assert!(!html.contains("<img") && !html.contains("<script") && !html.contains("javascript:"));
+    assert!(html.contains("<h2>b</h2>"));
+    let with_images = export::html(&articles, true);
+    assert!(with_images.contains("img-src http: https:") && with_images.contains("src=\"https://img.example/a.png\""));
+    assert!(!with_images.contains("tidings://"));
+
+    let md = export::markdown(&articles, false);
+    assert!(md.contains("## [Rust \\*1.0\\* \\[out\\]](<https://example.com/a>)"), "{md}");
+    assert!(md.contains("**world**") && md.contains("[site](https://rust-lang.org/)"), "{md}");
+    assert!(md.contains("Attachment: [audio/mpeg](<https://cdn.example/a.mp3>)"));
+    assert!(!md.contains("img.example") && !md.contains("javascript:") && !md.contains("alert"));
+    assert!(md.contains("\n## b\n"));
+    assert!(export::markdown(&articles, true).contains("img.example/a.png"));
+
+    // Written readable only by this user, through the same writer as OPML.
+    let path = dir.join("starred.md");
+    crate::files::write_private(&path, md.as_bytes()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), md);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Backs up a real database and restores it into a new one, read-only on the source:
+/// `TIDINGS_LIVE_DB=<path to tidings.db> cargo test live_backup -- --ignored`
+#[test]
+#[ignore]
+fn live_backup() {
+    use crate::backup;
+    let Ok(path) = std::env::var("TIDINGS_LIVE_DB") else {
+        eprintln!("TIDINGS_LIVE_DB is not set");
+        return;
+    };
+    let source = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let (mut live, dir) = temp_db();
+    // Everything in a closure, so the copies of the data are removed also when it fails.
+    let run = || -> Result<String, String> {
+        let file = dir.join("live.tidings");
+        let started = std::time::Instant::now();
+        backup::copy_to(&source, &file).map_err(|e| e.to_string())?;
+        let copied = started.elapsed();
+        let current = crate::settings::Settings::default();
+        let summary = backup::inspect(&file, &current).map_err(|e| e.to_string())?;
+        let started = std::time::Instant::now();
+        backup::restore(&mut live, &file, &dir.join("previous.db"), &current).map_err(|e| e.to_string())?;
+        let restored = started.elapsed();
+        for table in ["folders", "feeds", "articles", "rules", "searches", "briefs", "translations"] {
+            // A database from before 0.10 has no rules, searches or translations.
+            let exists = format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'");
+            if table_count(&source, &exists) == 0 {
+                continue;
+            }
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            let (a, b) = (table_count(&source, &sql), table_count(&live, &sql));
+            if a != b {
+                return Err(format!("{table}: {a} rows in the database, {b} restored"));
+            }
+        }
+        let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        Ok(format!(
+            "backup {} MB in {copied:.1?}; restore in {restored:.1?}; {} feeds, {} articles, {} starred",
+            size / 1_000_000,
+            summary.feeds,
+            summary.articles,
+            summary.starred
+        ))
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("{}", result.expect("panicked").unwrap());
 }

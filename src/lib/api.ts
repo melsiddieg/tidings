@@ -15,6 +15,8 @@ import type {
   PeerTubeHit,
   PeerTubeVideo,
   AudioStream,
+  BackupSummary,
+  RestoreResult,
   Brief,
   Translation,
   Rule,
@@ -92,6 +94,12 @@ export const api = {
     call<number>('refresh_feeds', { feedIds: opts.feedIds ?? null, folderId: opts.folderId ?? null }),
   importOpml: () => call<ImportStats | null>('import_opml'),
   exportOpml: () => call<string | null>('export_opml'),
+  backup: () => call<string | null>('backup'),
+  /** Opens a file dialog; the summary of the chosen backup, which `restoreBackup` then restores. */
+  chooseBackup: () => call<BackupSummary | null>('choose_backup'),
+  restoreBackup: () => call<RestoreResult>('restore_backup'),
+  exportStarred: (format: 'html' | 'markdown', images: boolean) =>
+    call<string | null>('export_starred', { format, images }),
   settings: () => call<Settings>('get_settings'),
   saveSettings: (settings: Settings) => call<Settings>('save_settings', { settings }),
   openExternal: (url: string) => call<void>('open_external', { url }),

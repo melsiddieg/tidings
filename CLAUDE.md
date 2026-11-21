@@ -13,6 +13,7 @@ cargo test --manifest-path src-tauri/Cargo.toml                 # offline tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored    # + live network test
 TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored  # plays a clip in mpv/IINA
 cargo test --manifest-path src-tauri/Cargo.toml live_listen -- --ignored   # yt-dlp finds a clip's audio ("Listen")
+TIDINGS_LIVE_DB=<path to tidings.db> cargo test --manifest-path src-tauri/Cargo.toml live_backup -- --ignored  # backs up and restores a real database (read-only)
 npm run tauri dev                        # run the app (Vite on port 1420)
 npm run tauri build                      # release packages for the host OS
 npm run dev                              # UI only in a browser, with the fake backend in src/lib/mock.ts
@@ -34,9 +35,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
   `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
-  files through the instance API, and Sepia Search).
+  files through the instance API, and Sepia Search), `backup.rs` (backups with `VACUUM
+  INTO`, and restoring them), `export.rs` (starred articles as HTML or Markdown),
+  `files.rs` (`write_private` and `private_temp` for files the user saves).
 - `src-tauri/src/tests.rs` runs every SQL query against a real database. Add a case there when
-  you add or change a query.
+  you add or change a query. `backup_and_restore` and `crafted_backups_are_refused` cover
+  restoring; extend them when you add a table or a column.
 - `src/lib/store.svelte.ts` holds UI state and actions; components in `src/components/`.
   `src/lib/filters.ts` has the feed type list and the date range presets (`rangeBounds`).
 - Article filters all go through `db::where_clause` (scope, read state, search, `DateRange`,
@@ -95,7 +99,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   addresses in it by itself, past `net.rs`, the proxy and the private-address checks. Do
   not add HLS or DASH support by letting the player read a playlist.
 - Feed and page HTML must pass through `sanitize::clean` before storage and `sanitize::render`
-  before display. Both cut it to 2 MB and show it as text when its elements nest too deep
+  before display. A restored backup's HTML is stored without `clean`, so never show or
+  export stored HTML without `render` or `sanitize::export`. Both cut it to 2 MB and show it as text when its elements nest too deep
   (`sanitize::bounded`). Any other parse of untrusted HTML (`dom_query`, readability) must
   check `sanitize::too_deep` first: HTML parsers take time that grows with the square of
   the nesting depth. Keep `too_deep` one pass that reads tags exactly like the HTML
@@ -127,6 +132,22 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   show the answer as plain text (Svelte text, never `{@html}`). Keep the cap on the answer
   length and the stop between passages. Stored translations go with their article: the
   `translations_follow_article` trigger removes them when it is deleted or its text changes.
+- Restoring a backup (`backup.rs`) treats the file as untrusted. Open it only through
+  `open_backup` (read-only, `immutable`, defensive mode, `trusted_schema` off, a value
+  length limit, `quick_check`), read only ordinary tables (`is_table`: no views or virtual
+  tables), and copy rows column by column into Tidings' own schema, never the file's
+  schema. Keep the type check (`fits`), `drop_invalid` for rules and saved searches, and
+  the one transaction. Settings come through `settings::restored`, which never drops a
+  proxy in use, never turns off "HTTPS only" or tracker removal, and never takes the
+  video player from the file (it names a program Tidings starts). Other `settings` rows
+  describe this computer and are not copied. A migration that changes what stored values
+  mean (not one that only adds tables or columns) must raise `backup::OLDEST_VERSION`.
+  A restore is refused while feeds refresh (`AppState::refreshing`), and work that
+  stores by article id after waiting for the network (full text, briefs, translations)
+  locks with `AppState::db_since`, so it never writes into restored data.
+- The starred export (`export.rs`) cleans stored HTML again with `sanitize::export`,
+  writes only http, https and mailto links, and leaves images out unless the user asks.
+  Keep the HTML file's content security policy (no scripts; images only when included).
 - Filter rules (`rules.rs`) match plain phrases, never regular expressions, so no rule can
   make matching slow. A rule never deletes or marks read a starred article. Applying a
   rule to stored articles happens only when the user asks, after the UI shows the count;

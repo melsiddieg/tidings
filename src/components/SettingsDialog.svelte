@@ -505,6 +505,23 @@
           </div>
           <div class="row">
             <div class="row-text">
+              <span class="row-title">Backup</span>
+              <span class="hint">One file with your feeds, folders, articles and their read and starred state, settings, rules and saved searches. It holds your feed addresses and proxy setting, which can include passwords: keep it private.</span>
+            </div>
+            <div class="inline">
+              <button class="btn small" onclick={() => store.backup()}><Icon name="archive" size={13} />Back up…</button>
+              <button class="btn small" onclick={() => store.chooseBackup()}><Icon name="clock" size={13} />Restore…</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <span class="row-title">Starred articles</span>
+              <span class="hint">Saves them in one file: HTML for a web browser, or Markdown for a notes app.</span>
+            </div>
+            <button class="btn small" onclick={() => (store.dialog = { kind: 'export-starred' })}><Icon name="star" size={13} />Export…</button>
+          </div>
+          <div class="row">
+            <div class="row-text">
               <span class="row-title">Start over</span>
               <span class="hint">Removes every feed and folder, with all articles. Settings stay.</span>
             </div>

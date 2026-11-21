@@ -104,6 +104,34 @@ export interface ArticleDetail {
 }
 
 /** A feed's newest article and article count, for Feed health. */
+/** What a backup holds, shown before it is restored (backup.rs). */
+export interface BackupSummary {
+  fileName: string;
+  /** When it was made (Unix seconds) and by which version; null for a copy of the database file. */
+  createdAt: number | null;
+  version: string | null;
+  folders: number;
+  feeds: number;
+  articles: number;
+  unread: number;
+  starred: number;
+  rules: number;
+  searches: number;
+  /** Host and port of the feeds allowed on the local network. They keep that permission. */
+  localFeeds: string[];
+  /** The proxy now and after the restore, without passwords. */
+  proxyNow: string;
+  proxyAfter: string;
+  /** Set when the restored settings cannot be used: Tidings goes offline. */
+  offline: string | null;
+}
+
+export interface RestoreResult {
+  /** Where the data from before the restore is kept. */
+  previous: string;
+  offline: string | null;
+}
+
 export interface FeedActivity {
   feedId: number;
   newest: number | null;
@@ -379,6 +407,8 @@ export type Dialog =
   | { kind: 'feed-health' }
   /** Name a saved search: a new one from the list as it is (`id` null), or rename one. */
   | { kind: 'save-search'; id: number | null; title: string }
+  | { kind: 'restore'; summary: BackupSummary }
+  | { kind: 'export-starred' }
   | {
       kind: 'confirm';
       title: string;

@@ -199,6 +199,28 @@ pub fn load(conn: &Connection) -> Loaded {
     }
 }
 
+/// The settings of a backup being restored (backup.rs): `json` is its saved
+/// settings, None when it has none. If they cannot be read, the current ones stay.
+///
+/// Restoring never weakens what protects this computer now. A proxy in use stays,
+/// and "HTTPS only" and removing trackers stay on: the backup may come from a time
+/// or a computer without them, and restoring it must not start direct connections
+/// (Tor). The video player stays too: it names a program on this computer, and a
+/// backup file must not choose which program Tidings starts.
+pub fn restored(json: Option<&str>, current: &Settings) -> Loaded {
+    let Some(saved) = json.and_then(|json| serde_json::from_str::<Settings>(json).ok()) else {
+        return Loaded { settings: current.clone(), offline: None };
+    };
+    let merged = Settings {
+        proxy: if current.proxy.is_empty() { saved.proxy.clone() } else { current.proxy.clone() },
+        https_only: saved.https_only || current.https_only,
+        strip_tracking: saved.strip_tracking || current.strip_tracking,
+        video_player: current.video_player.clone(),
+        ..saved
+    };
+    merged.repaired()
+}
+
 impl Settings {
     /// Saved settings that no longer pass `validated` (a rule changed, or the row was
     /// edited). Never falls back to all defaults: that would drop the proxy. Other

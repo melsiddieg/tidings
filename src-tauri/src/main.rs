@@ -1,13 +1,16 @@
 // Tidings: a private, secure feed reader.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backup;
 mod brief;
 mod commands;
 mod db;
 mod discover;
 mod error;
+mod export;
 mod feed_types;
 mod feeds;
+mod files;
 mod images;
 mod media;
 mod media_server;
@@ -198,6 +201,10 @@ fn main() {
             commands::search_peertube,
             commands::set_badge,
             commands::app_info,
+            commands::backup,
+            commands::choose_backup,
+            commands::restore_backup,
+            commands::export_starred,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tidings");

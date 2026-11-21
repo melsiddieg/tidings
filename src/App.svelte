@@ -21,6 +21,8 @@
   import DateRangeDialog from './components/DateRangeDialog.svelte';
   import FeedHealthDialog from './components/FeedHealthDialog.svelte';
   import SaveSearchDialog from './components/SaveSearchDialog.svelte';
+  import RestoreDialog from './components/RestoreDialog.svelte';
+  import ExportStarredDialog from './components/ExportStarredDialog.svelte';
 
   onMount(() => {
     store.init();
@@ -247,6 +249,10 @@
     <FeedHealthDialog />
   {:else if store.dialog?.kind === 'save-search'}
     <SaveSearchDialog dialog={store.dialog} />
+  {:else if store.dialog?.kind === 'restore'}
+    <RestoreDialog summary={store.dialog.summary} />
+  {:else if store.dialog?.kind === 'export-starred'}
+    <ExportStarredDialog />
   {/if}
 
   {#if store.menu}

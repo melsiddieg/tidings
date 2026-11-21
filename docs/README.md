@@ -97,6 +97,16 @@ Source: <https://github.com/melsiddieg/tidings>
   open or close everything inside it. Folders from an OPML import start closed.
 - Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
+- **Backup and restore** (Settings → Archive & data, or the `…` menu): one file with
+  your feeds, folders, articles with their read and starred state, settings, rules,
+  saved searches, briefs and translations. Before a restore replaces everything, Tidings
+  shows what the backup holds and copies the current data to `tidings-before-restore.db`
+  in the data folder; restore that file to go back. A restore never turns off a proxy,
+  "HTTPS only" or tracker removal that is on now, and keeps the video player set on this
+  computer.
+- **Export starred articles** to one HTML file for a browser or one Markdown file for a
+  notes app such as Obsidian, with the full text where it was loaded. Images are left
+  out unless you ask for them.
 - Per-feed properties: custom name, type, update interval, archive rule, always load full text, pause updates.
 - Feed icons, unread counts on folders and on the dock/launcher icon.
 
@@ -123,7 +133,9 @@ Source: <https://github.com/melsiddieg/tidings>
 | Minimal permissions | The UI has four Tauri permissions (listen to events, drag and maximize the window). File dialogs and file access happen in Rust only. |
 | Local network protection | A feed cannot make Tidings send requests into your local network. Feeds, pages, favicons, images, audio and video may only reach public addresses; private and local ones are refused in the first URL, after every rewrite (such as removing a podcast tracking prefix), in every redirect and in DNS answers. The one exception is a feed you allow yourself: when an address is on your local network (a NAS or a home server), Tidings asks before it connects and before it subscribes, also when a website names such an address as its feed. That consent covers only the feed's own host and port: the feed itself, its icon, and the full text of its articles when the article's page is on that same host and port. Links inside articles, reader tabs, images, podcasts and videos never reach the local network, also not from a local feed; open those in your browser. Where a name resolves plays no part: a public-looking name that points to a private address is refused unless you allowed it. With a proxy, the proxy does the DNS lookups, so only literal private addresses and local names can be refused: Tidings cannot see where the proxy sends a name. This rule covers the requests Tidings makes. It does not cover mpv, IINA and yt-dlp after you click "Watch" or "Listen": they are separate programs that make their own connections (see Videos). |
 | Network hardening | rustls TLS, no cookie store, no `Referer` header, size limits on every download, generic user agent, optional HTTPS-only mode, optional HTTP/SOCKS5 proxy (works with Tor: `socks5h://127.0.0.1:9050`). SOCKS proxies always do the DNS lookups themselves: `socks5://` is saved as `socks5h://`. Tidings ignores the system's proxy settings and the `HTTP_PROXY` family of variables: with no proxy set, it connects directly. mpv, IINA and yt-dlp get the same: the proxy set in Tidings, or none. If the saved settings or the proxy in them cannot be used, Tidings starts offline instead of connecting directly. |
-| Local data | Feeds, articles, settings and briefs are in one SQLite database, file mode `0600` in a `0700` folder. `secure_delete` is on: when an article is deleted or archived, its text, title, link and author are overwritten, and only its ID stays for 60 days so it does not come back. After you delete articles, a feed, a folder or a brief, and after each refresh (which archives old articles), the database's write-ahead log is emptied too, so the deleted text is not left there. Outside the database: open tabs, playback positions and view settings are in the web view's local storage, shown images are in its cache, and the window size is in a small file, all in the system's folders for this app. An OPML export is written with mode `0600`; it lists every feed address, including a password if an address has one. Backups (such as Time Machine) can keep older copies of all of these. |
+| Local data | Feeds, articles, settings and briefs are in one SQLite database, file mode `0600` in a `0700` folder. `secure_delete` is on: when an article is deleted or archived, its text, title, link and author are overwritten, and only its ID stays for 60 days so it does not come back. After you delete articles, a feed, a folder or a brief, and after each refresh (which archives old articles), the database's write-ahead log is emptied too, so the deleted text is not left there. Outside the database: open tabs, playback positions and view settings are in the web view's local storage, shown images are in its cache, and the window size is in a small file, all in the system's folders for this app. An OPML export, a backup and a starred article export are written with mode `0600`; the first two list every feed address, including a password if an address has one, and a backup also holds the proxy setting. Backups (such as Time Machine) can keep older copies of all of these. |
+| Restoring a backup | A backup file is treated like a file from the internet. Tidings opens it read-only with SQLite's settings for files that cannot be trusted, checks it, and copies only the rows of the tables it knows into its own database: the file's tables, views, triggers and indexes never become part of Tidings. Every value must have the type of its column and fit a size limit; rules and saved searches are checked like new ones, and settings like saved ones. Stored article HTML is cleaned again before it is shown, like all article HTML. The settings never weaken this computer's protection: a proxy in use stays, "HTTPS only" and tracker removal stay on, and the video player is never taken from the file, since it names a program Tidings starts. Feeds allowed on your local network keep that permission; the summary before the restore lists their addresses. |
+| Starred article export | The HTML is cleaned again, links keep only web and mail addresses, and images are left out unless you ask for them. The HTML file carries a content security policy that blocks scripts, frames and everything else from the web, and allows images only when you included them. |
 
 Data folder:
 - macOS: `~/Library/Application Support/org.tidings.reader/`
@@ -395,6 +407,9 @@ src-tauri/src/
   feeds.rs               Fetching, parsing and storing feeds; favicons
   discover.rs            Feed autodiscovery from a web page
   opml.rs                OPML import and export
+  backup.rs              Backups of the whole database, and restoring them
+  export.rs              Starred articles as one HTML or Markdown file
+  files.rs               Writing files only this user can read
   reader.rs              Reader mode (article extraction)
   sanitize.rs            HTML cleaning and tracker removal
   protocol.rs            tidings:// image proxy and feed icons

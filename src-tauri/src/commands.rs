@@ -6,11 +6,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::backup;
 use crate::brief;
 use crate::db::{self, ArticleItem, ArticleRow, Counts, FeedPatch, Item, ListQuery, Scope, Tree};
 use crate::discover::{self, Candidate};
 use crate::error::{Error, Result};
+use crate::export;
 use crate::feeds;
+use crate::files;
 use crate::net;
 use crate::opml::{self, ImportStats};
 use crate::peertube;
@@ -138,6 +141,7 @@ pub async fn fetch_full_text(
     load_images: Option<bool>,
 ) -> Result<ArticleDetail> {
     let settings = state.settings();
+    let generation = state.generation();
     let row = db::article(&state.db(), id)?;
     if row.full_content.is_none() {
         let url = row.url.clone().ok_or_else(|| Error::msg("This article has no link"))?;
@@ -147,7 +151,7 @@ pub async fn fetch_full_text(
         let feed_url = url::Url::parse(&info.url).ok().filter(|_| info.local);
         let extracted =
             reader::extract_url(&state.net(), &url, feed_url.as_ref(), settings.strip_tracking).await?;
-        db::save_full_content(&state.db(), id, &extracted.html)?;
+        db::save_full_content(&*state.db_since(generation)?, id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
     Ok(detail(row, load_images.unwrap_or(settings.load_images), true))
@@ -469,45 +473,160 @@ pub async fn export_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     });
     let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
     let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
-    write_private(&path, xml.as_bytes())?;
+    files::write_private(&path, xml.as_bytes())?;
     Ok(Some(path.display().to_string()))
 }
 
-/// Writes a file only this user can read. The export lists every feed address, and
-/// an address can hold a password.
-///
-/// The bytes go to a new file next to `path`, which then replaces `path`. Opening
-/// `path` itself would follow a symbolic link there and overwrite the file it
-/// points to; a rename replaces the link. An existing file at `path` so also gets
-/// the private mode, and is never left half written.
-pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let name = path.file_name().ok_or_else(|| Error::msg("This is not a file name"))?.to_string_lossy();
-    let mut options = std::fs::OpenOptions::new();
-    // `create_new` fails on any existing name, also a symbolic link.
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+// ---------------------------------------------------------------------------
+// Backup and restore (backup.rs), starred articles (export.rs)
+// ---------------------------------------------------------------------------
+
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Copies the whole database to a file the user picks.
+#[tauri::command]
+pub async fn backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Back up Tidings")
+        .set_file_name(format!("tidings-backup-{}.tidings", today()))
+        .add_filter("Tidings backup", &["tidings"]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
     }
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
-    let mut attempt = 0;
-    let (temp, mut file) = loop {
-        let temp = dir.join(format!(".{name}.{}-{nanos}-{attempt}.tmp", std::process::id()));
-        match options.open(&temp) {
-            Ok(file) => break (temp, file),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => attempt += 1,
-            Err(e) => return Err(e.into()),
-        }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
+    let source = state.db_path();
+    let target = path.clone();
+    // A second, read-only connection: the app keeps working while the copy is made.
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &source,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        backup::copy_to(&conn, &target)
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))??;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Lets the user pick a backup, checks it and says what restoring it would do.
+/// `restore_backup` then restores that file.
+#[tauri::command]
+pub async fn choose_backup(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<backup::Summary>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Restore a backup")
+        .add_filter("Tidings backup", &["tidings", "db"]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.pick_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     };
-    let written = file.write_all(bytes).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temp, path));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e.into());
+    if same(&path, &state.db_path()) {
+        return Err(Error::msg("This is the database Tidings uses now. Choose a backup."));
     }
-    Ok(())
+    let current = state.settings();
+    let file = path.clone();
+    let summary = tokio::task::spawn_blocking(move || backup::inspect(&file, &current))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))??;
+    *state.restore_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    Ok(Some(summary))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    /// Where the data from before the restore is kept.
+    pub previous: String,
+    /// Set when Tidings is offline now because the restored proxy cannot be used.
+    pub offline: Option<String>,
+}
+
+/// Replaces everything with the backup `choose_backup` checked.
+#[tauri::command]
+pub async fn restore_backup(state: AppStateRef<'_>) -> Result<RestoreResult> {
+    // Kept until the restore succeeds, so the dialog can try again after a refusal.
+    let path = state
+        .restore_file
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| Error::msg("Choose a backup to restore first"))?;
+    translate::stop();
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || -> Result<RestoreResult> {
+        let mut conn = state.db();
+        // A refresh stores articles by feed id, which the restore gives to other feeds.
+        if state.refreshing() {
+            return Err(Error::msg("Feeds are being refreshed. Restore the backup when that is done."));
+        }
+        let previous = state.data_dir.join(backup::PREVIOUS_FILE);
+        let loaded = backup::restore(&mut conn, &path, &previous, &state.settings())?;
+        let offline = loaded.offline.clone();
+        state.restored(&conn, loaded)?;
+        *state.restore_file.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(RestoreResult { previous: previous.display().to_string(), offline })
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?
+}
+
+/// Saves every starred article in one file: "html" or "markdown".
+#[tauri::command]
+pub async fn export_starred(app: AppHandle, state: AppStateRef<'_>, format: String, images: bool) -> Result<Option<String>> {
+    let markdown = match format.as_str() {
+        "html" => false,
+        "markdown" => true,
+        _ => return Err(Error::msg("Choose HTML or Markdown")),
+    };
+    if db::tree(&state.db())?.starred == 0 {
+        return Err(Error::msg("There are no starred articles to export"));
+    }
+    let (extension, label) = if markdown { ("md", "Markdown") } else { ("html", "HTML") };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Export starred articles")
+        .set_file_name(format!("tidings-starred-{}.{extension}", today()))
+        .add_filter(label, &[extension]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(path) = rx.await.ok().flatten() else { return Ok(None) };
+    let path = path.into_path().map_err(|e| Error::msg(e.to_string()))?;
+    let articles = db::starred_articles(&state.db())?;
+    // Cleaning the HTML of many articles is CPU work: keep it off the async threads.
+    let text = tokio::task::spawn_blocking(move || {
+        if markdown { export::markdown(&articles, images) } else { export::html(&articles, images) }
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?;
+    files::write_private(&path, text.as_bytes())?;
+    Ok(Some(path.display().to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -622,13 +741,14 @@ pub async fn ai_models(state: AppStateRef<'_>) -> Result<Vec<String>> {
 #[tauri::command]
 pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String) -> Result<BriefView> {
     let settings = state.settings();
+    let generation = state.generation();
     let (sources, total) = db::brief_sources(&state.db(), &query, brief::MAX_ARTICLES)?;
     let title: String = title.trim().chars().take(200).collect();
     let title = if title.is_empty() { "Brief".to_string() } else { title };
     let (body, model) = brief::write(&state.net(), &settings, &title, &sources, total).await?;
     let query_json = serde_json::to_string(&query).map_err(|e| Error::msg(e.to_string()))?;
     let body_json = serde_json::to_string(&body).map_err(|e| Error::msg(e.to_string()))?;
-    let id = db::insert_brief(&state.db(), &title, &model, &query_json, &body_json)?;
+    let id = db::insert_brief(&*state.db_since(generation)?, &title, &model, &query_json, &body_json)?;
     brief_view(&state, id)?.ok_or_else(|| Error::msg("The brief was not stored"))
 }
 
@@ -655,6 +775,7 @@ pub async fn translate_article(
     full_text: Option<bool>,
     again: Option<bool>,
 ) -> Result<translate::Translation> {
+    let generation = state.generation();
     let row = db::article(&state.db(), id)?;
     let full = full_text.unwrap_or(false) && row.full_content.is_some();
     let stored = if again.unwrap_or(false) { None } else { db::translation(&state.db(), id, full)? };
@@ -671,7 +792,7 @@ pub async fn translate_article(
     };
     let translation = translate::translate(&state.net(), &settings, &row.title, &paragraphs, send).await?;
     let json = serde_json::to_string(&translation).map_err(|e| Error::msg(e.to_string()))?;
-    db::save_translation(&state.db(), id, full, &json)?;
+    db::save_translation(&*state.db_since(generation)?, id, full, &json)?;
     Ok(translation)
 }
 
@@ -702,21 +823,11 @@ pub fn list_searches(state: AppStateRef<'_>) -> Result<Vec<db::SavedSearch>> {
     db::searches(&state.db())
 }
 
-/// A saved search's name: one line of at most 100 characters.
-fn search_title(title: &str) -> Result<String> {
-    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.is_empty() || title.chars().count() > 100 {
-        return Err(Error::msg("Give the search a name of at most 100 characters"));
-    }
-    Ok(title)
-}
-
 /// Saves the list state `state` (JSON from the UI) under `title`.
 #[tauri::command]
 pub fn save_search(state: AppStateRef<'_>, title: String, search: String) -> Result<db::SavedSearch> {
-    let title = search_title(&title)?;
-    let valid = search.len() <= 16 * 1024 && serde_json::from_str::<serde_json::Value>(&search).is_ok_and(|v| v.is_object());
-    if !valid {
+    let title = db::search_title(&title)?;
+    if !db::search_state_is_valid(&search) {
         return Err(Error::msg("This search cannot be saved"));
     }
     let id = db::insert_search(&state.db(), &title, &search)?;
@@ -725,7 +836,7 @@ pub fn save_search(state: AppStateRef<'_>, title: String, search: String) -> Res
 
 #[tauri::command]
 pub fn rename_search(state: AppStateRef<'_>, id: i64, title: String) -> Result<()> {
-    db::rename_search(&state.db(), id, &search_title(&title)?)
+    db::rename_search(&state.db(), id, &db::search_title(&title)?)
 }
 
 #[tauri::command]
@@ -898,6 +1009,6 @@ pub fn app_info(state: AppStateRef<'_>) -> AppInfo {
         data_dir: state.data_dir.display().to_string(),
         platform: std::env::consts::OS,
         media_base: state.media_base.get().cloned(),
-        startup_warning: state.startup_warning.clone(),
+        startup_warning: state.startup_warning.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     }
 }

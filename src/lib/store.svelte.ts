@@ -280,6 +280,12 @@ class Store {
       this.info = info;
       setMediaBase(info.mediaBase);
       if (info.startupWarning) this.toast(info.startupWarning, 'error');
+      // Set by `restoreBackup` before it reloaded the window.
+      const notice = local.get<string | null>('notice', null);
+      if (notice) {
+        local.set('notice', null);
+        this.toast(notice, 'success');
+      }
     } catch (err) {
       this.error(err);
     }
@@ -1323,6 +1329,41 @@ class Store {
   }
 
   // -------------------------------------------------------------------------
+  // Backup and restore
+  // -------------------------------------------------------------------------
+
+  async backup() {
+    try {
+      const path = await api.backup();
+      if (path) this.toast(`Backed up to ${path}`, 'success');
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** Lets the user pick a backup, then shows what restoring it would do. */
+  async chooseBackup() {
+    try {
+      const summary = await api.chooseBackup();
+      if (summary) this.dialog = { kind: 'restore', summary };
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** Restores the backup chosen in `chooseBackup`, then reloads the window. Errors go to the caller. */
+  async restoreBackup() {
+    const result = await api.restoreBackup();
+    // Feed, folder and brief ids now name other rows: forget the tabs and the list
+    // that point at them.
+    local.set('tabs', []);
+    local.set('activeTab', 'main');
+    local.set('scope', { kind: 'all' });
+    local.set('notice', `Backup restored. The data from before is kept in ${result.previous}`);
+    location.reload();
+  }
+
+  // -------------------------------------------------------------------------
   // Settings
   // -------------------------------------------------------------------------
 
@@ -1365,6 +1406,15 @@ class Store {
         break;
       case 'export-opml':
         this.exportOpml();
+        break;
+      case 'backup':
+        this.backup();
+        break;
+      case 'restore-backup':
+        this.chooseBackup();
+        break;
+      case 'export-starred':
+        this.dialog = { kind: 'export-starred' };
         break;
       case 'refresh-all':
         this.refresh();

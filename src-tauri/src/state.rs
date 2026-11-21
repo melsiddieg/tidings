@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use lru::LruCache;
 use rusqlite::Connection;
 use tauri::{AppHandle, Manager};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::net::Net;
 use crate::settings::{self, Settings};
 use crate::db;
@@ -87,8 +88,15 @@ pub struct AppState {
     /// Base URL of the loopback media server (Linux only).
     pub media_base: std::sync::OnceLock<String>,
     pub data_dir: PathBuf,
-    /// Set when the saved proxy could not be used at startup and Tidings went offline.
-    pub startup_warning: Option<String>,
+    /// Set when the saved proxy could not be used at startup, or after a restore,
+    /// and Tidings went offline. The UI shows it when it starts.
+    pub startup_warning: Mutex<Option<String>>,
+    /// The backup the user chose to restore, after its summary was shown.
+    pub restore_file: Mutex<Option<PathBuf>>,
+    /// Goes up at each restore, which replaces every row. Work that reads an article,
+    /// waits for the network and then stores by the article's id checks it
+    /// (`db_since`), so it never writes into the restored data.
+    generation: AtomicU64,
 }
 
 impl AppState {
@@ -129,13 +137,61 @@ impl AppState {
             media: Default::default(),
             media_base: Default::default(),
             data_dir,
-            startup_warning,
+            startup_warning: Mutex::new(startup_warning),
+            restore_file: Mutex::new(None),
+            generation: AtomicU64::new(0),
         })
     }
 
     /// Locks the database. Never hold this guard across an `.await`.
     pub fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.data_dir.join("tidings.db")
+    }
+
+    /// The restore count now, to pass to `db_since` later.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Locks the database to store what was read at `generation`, unless a backup
+    /// was restored since.
+    pub fn db_since(&self, generation: u64) -> Result<MutexGuard<'_, Connection>> {
+        let conn = self.db();
+        if self.generation() != generation {
+            return Err(Error::msg("A backup was restored meanwhile"));
+        }
+        Ok(conn)
+    }
+
+    /// Whether feeds are being refreshed now.
+    pub fn refreshing(&self) -> bool {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner()).total > 0
+            || !self.inflight.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// After a restore, which the caller did while holding `conn`: uses the restored
+    /// settings, or goes offline when their proxy cannot be used.
+    pub fn restored(&self, _conn: &MutexGuard<'_, Connection>, loaded: settings::Loaded) -> Result<()> {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let (net, warning) = match (loaded.offline, Net::new(&loaded.settings)) {
+            (None, Ok(net)) => (net, None),
+            (reason, _) => (
+                Net::offline()?,
+                Some(reason.unwrap_or_else(|| {
+                    "The restored proxy setting cannot be used, so Tidings is offline. \
+                     Fix or remove the proxy in Settings → Privacy & network."
+                        .to_string()
+                })),
+            ),
+        };
+        *self.net.write().unwrap_or_else(|e| e.into_inner()) = net;
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = loaded.settings;
+        *self.startup_warning.lock().unwrap_or_else(|e| e.into_inner()) = warning;
+        Ok(())
     }
 
     pub fn settings(&self) -> Settings {
@@ -151,6 +207,7 @@ impl AppState {
         settings::save(&self.db(), &new)?;
         *self.net.write().unwrap_or_else(|e| e.into_inner()) = net;
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new;
+        *self.startup_warning.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 }
