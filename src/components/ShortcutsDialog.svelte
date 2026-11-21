@@ -19,6 +19,7 @@
         [['L'], 'Listen to a video (sound only)'],
         [['F'], 'Load full article'],
         [['I'], 'Show or hide images'],
+        [['T'], 'Translate a Chinese article, or show the original'],
       ],
     },
     {

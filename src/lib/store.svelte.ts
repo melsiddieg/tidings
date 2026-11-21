@@ -17,7 +17,9 @@ import type {
   ListQuery,
   MenuItem,
   RefreshProgress,
+  SavedSearch,
   Scope,
+  SearchState,
   Settings,
   Tab,
   Tree,
@@ -53,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   aiProvider: '',
   aiEndpoint: '',
   aiModel: '',
+  translateModel: '',
 };
 
 // UI preferences that are not worth a database round trip live in localStorage.
@@ -102,8 +105,12 @@ class Store {
   private markAnchor: string | null = null;
   /** The external video player, or null when none is found. */
   videoPlayer = $state<VideoPlayer | null>(null);
-  /** AI briefs are set up: a local model server and a model (Settings → AI briefs). */
+  /** AI briefs are set up: a local model server and a model (Settings → Local AI). */
   aiReady = $derived(this.settings.aiProvider !== '' && this.settings.aiModel.trim() !== '');
+  /** Translations are set up: the same server, and a model for them or for briefs. */
+  translateReady = $derived(this.settings.aiProvider !== '' && (this.settings.translateModel.trim() || this.settings.aiModel.trim()) !== '');
+  /** Articles translated in this session: they show translated when opened again. */
+  translated = new Set<number>();
   /** Brief tabs whose brief is being written, and the error of each that failed. */
   briefsRunning = $state<string[]>([]);
   briefErrors = $state<Record<string, string>>({});
@@ -122,6 +129,14 @@ class Store {
   /** Only feeds of this type inside the scope (the type icons above the list). Resets
    *  when another feed or folder is selected. */
   typeFilter = $state<FeedType | null>(null);
+  /** Saved searches in the sidebar, and the unread articles each finds now. */
+  searches = $state<SavedSearch[]>([]);
+  searchCounts = $state<Record<number, number>>({});
+  /** The saved search the list shows now, if it shows one exactly. */
+  activeSearchId = $derived.by(() => {
+    const now = JSON.stringify(this.searchState());
+    return this.searches.find((s) => s.state === now)?.id ?? null;
+  });
 
   articles = $state<ArticleItem[]>([]);
   hasMore = $state(false);
@@ -275,6 +290,7 @@ class Store {
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyAppearance());
     try {
       if (!this.scopeExists(this.scope)) this.scope = { kind: 'all' };
+      this.loadSearches();
       this.restoreTabs();
       await this.loadArticles(false);
       await on<FeedUpdated>('feed-updated', (e) => this.onFeedUpdated(e));
@@ -356,6 +372,7 @@ class Store {
     try {
       this.tree = await api.tree();
       if (!this.scopeExists(this.scope)) this.selectScope({ kind: 'all' });
+      this.loadSearchCounts();
     } catch (err) {
       this.error(err);
     }
@@ -369,6 +386,7 @@ class Store {
         const map = new Map(counts.feeds);
         for (const feed of this.tree.feeds) feed.unread = map.get(feed.id) ?? 0;
         this.tree.starred = counts.starred;
+        this.loadSearchCounts();
       } catch {
         /* counts are cosmetic */
       }
@@ -377,6 +395,107 @@ class Store {
 
   feedIcon(feedId: number): Feed | undefined {
     return this.feedById.get(feedId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Saved searches
+  // -------------------------------------------------------------------------
+
+  /** What a saved search keeps of the list: everything but the sort order. */
+  searchState(): SearchState {
+    return {
+      scope: $state.snapshot(this.scope),
+      filter: this.filter,
+      query: this.query.trim(),
+      dateRange: $state.snapshot(this.dateRange),
+      typeFilter: this.typeFilter,
+    };
+  }
+
+  /** A saved search's state, or null when it cannot be read or its feed or folder is gone. */
+  parseSearch(search: SavedSearch): SearchState | null {
+    try {
+      const state = JSON.parse(search.state) as SearchState;
+      return state && this.scopeExists(state.scope) ? state : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async loadSearches() {
+    try {
+      this.searches = await api.searches();
+      await this.loadSearchCounts();
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** The unread articles each saved search finds now. */
+  async loadSearchCounts() {
+    const counts: Record<number, number> = {};
+    for (const search of this.searches) {
+      const state = this.parseSearch(search);
+      if (!state) continue;
+      const query: ListQuery = {
+        scope: state.scope,
+        filter: 'unread',
+        query: state.query,
+        oldestFirst: false,
+        limit: 0,
+        offset: 0,
+        ...rangeBounds(validRange(state.dateRange)),
+        feedType: state.typeFilter,
+      };
+      try {
+        counts[search.id] = await api.countArticles(query);
+      } catch {
+        /* counts are cosmetic */
+      }
+    }
+    this.searchCounts = counts;
+  }
+
+  /** Shows the list a saved search keeps. */
+  openSearch(search: SavedSearch) {
+    const state = this.parseSearch(search);
+    if (!state) {
+      this.toast('The feed or folder of this search was removed');
+      return;
+    }
+    this.scope = state.scope;
+    this.filter = state.filter;
+    this.query = state.query;
+    this.dateRange = validRange(state.dateRange);
+    this.typeFilter = state.typeFilter;
+    local.set('scope', this.scope);
+    local.set('filter', this.filter);
+    local.set('dateRange', this.dateRange);
+    this.selectedId = null;
+    this.activeTabId = 'main';
+    this.loadArticles(false);
+  }
+
+  /** Saves the list as it is now (`id` null), or renames a saved search. */
+  async nameSearch(id: number | null, title: string): Promise<boolean> {
+    try {
+      if (id == null) await api.saveSearch(title, JSON.stringify(this.searchState()));
+      else await api.renameSearch(id, title);
+      await this.loadSearches();
+      return true;
+    } catch (err) {
+      this.error(err);
+      return false;
+    }
+  }
+
+  async deleteSearch(id: number) {
+    try {
+      await api.deleteSearch(id);
+      await this.loadSearches();
+    } catch (err) {
+      this.error(err);
+    }
   }
 
   // -------------------------------------------------------------------------

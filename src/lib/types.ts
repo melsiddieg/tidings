@@ -99,6 +99,66 @@ export interface ArticleDetail {
   hasFullText: boolean;
   enclosureUrl: string | null;
   enclosureType: string | null;
+  /** Mostly Chinese: the article view offers to translate it. */
+  chinese: boolean;
+}
+
+/** A feed's newest article and article count, for Feed health. */
+export interface FeedActivity {
+  feedId: number;
+  newest: number | null;
+  articles: number;
+}
+
+/** The list state a saved search restores. */
+export interface SearchState {
+  scope: Scope;
+  filter: Filter;
+  query: string;
+  dateRange: DateRange;
+  typeFilter: FeedType | null;
+}
+
+/** A saved search in the sidebar; `state` is a SearchState as JSON. */
+export interface SavedSearch {
+  id: number;
+  title: string;
+  state: string;
+}
+
+/** A filter rule (rules.rs): when `field` contains one of `words`, do `action`. */
+export interface Rule {
+  /** 0 for a rule that is not saved yet. */
+  id: number;
+  enabled: boolean;
+  /** The feed or folder the rule is for; neither: all feeds. */
+  feedId: number | null;
+  folderId: number | null;
+  field: 'title' | 'text' | 'author' | 'link';
+  /** Phrases separated by commas. */
+  words: string;
+  action: 'read' | 'star' | 'delete';
+  /** Articles the rule matched so far. */
+  hits: number;
+}
+
+/** An article translated into English by the local model (translate.rs). */
+export interface Translation {
+  title: string;
+  paragraphs: string[];
+  model: string;
+  /** The article was longer than what was translated. */
+  cut: boolean;
+}
+
+/** One part of a translation while the model works ("translation-part" event). */
+export interface TranslationPart {
+  articleId: number;
+  full: boolean;
+  /** null for the title, else the paragraph's index. */
+  index: number | null;
+  total: number;
+  text: string;
 }
 
 export interface ReaderPage {
@@ -163,6 +223,8 @@ export interface Settings {
   aiProvider: '' | 'ollama' | 'openai';
   aiEndpoint: string;
   aiModel: string;
+  /** The model that translates articles; empty uses aiModel. */
+  translateModel: string;
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */
@@ -314,6 +376,9 @@ export type Dialog =
   | { kind: 'settings'; section?: string }
   | { kind: 'shortcuts' }
   | { kind: 'date-range' }
+  | { kind: 'feed-health' }
+  /** Name a saved search: a new one from the list as it is (`id` null), or rename one. */
+  | { kind: 'save-search'; id: number | null; title: string }
   | {
       kind: 'confirm';
       title: string;

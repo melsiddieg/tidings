@@ -1,6 +1,6 @@
 // Fake backend for `npm run dev` in a normal browser (UI work only).
 // It is loaded only in development and never ships in release builds.
-import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Scope, Settings } from './types';
+import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Rule, SavedSearch, Scope, Settings, Translation } from './types';
 
 type Handler = (p: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -105,7 +105,7 @@ for article in feed.unread() {
 <p>There is still work to do, and the roadmap is public. If you want to follow along, the project posts weekly updates, and of course it has an RSS feed.</p>`;
 }
 
-let articles: (ArticleItem & { html: string; full?: string })[] = [];
+let articles: (ArticleItem & { html: string; full?: string; zh?: boolean })[] = [];
 for (let i = 0; i < 64; i++) {
   const f = feeds[i % feeds.length];
   const title = TITLES[i % TITLES.length];
@@ -127,12 +127,29 @@ for (let i = 0; i < 64; i++) {
   });
 }
 
+// A Chinese article, for the Translate button.
+const ZH = [
+  '开源软件正在改变人工智能的发展方式。越来越多的公司选择公开模型的权重，让研究人员可以在自己的电脑上运行它们。',
+  '这种做法降低了门槛，也让隐私更有保障：数据不必离开用户的设备。',
+  '不过，专家也提醒，开放并不等于安全。模型仍然需要仔细评估，才能用在重要的场合。',
+];
+const ZH_EN = [
+  'Open-source software is changing how artificial intelligence develops. More and more companies choose to publish the weights of their models, so researchers can run them on their own computers.',
+  'This lowers the barrier, and it also protects privacy better: the data does not have to leave the user’s device.',
+  'Experts warn, however, that open does not mean safe. Models still need careful evaluation before they are used where it matters.',
+];
+articles.unshift({
+  id: 65, feedId: 1, title: '开源模型改变人工智能的发展', url: 'https://example.com/1/zh-article', author: '李明',
+  excerpt: ZH[0], published: now - 900, isRead: false, isStarred: false, isNew: true, hasEnclosure: false, thumb: null,
+  html: ZH.map((p) => `<p>${p}</p>`).join(''), zh: true,
+});
+
 let settings: Settings = {
   refreshInterval: 60, refreshOnStartup: true, retentionMode: 'count', retentionCount: 1000, retentionDays: 90,
   loadImages: true, stripTracking: true, httpsOnly: false, proxy: '',
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
-  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b',
+  concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b', translateModel: '',
 };
 
 function counts() {
@@ -186,7 +203,47 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     showingFullText: full && !!a.full, hasFullText: !!a.full,
     enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
+    chinese: !!a.zh,
   };
+}
+
+let searches: SavedSearch[] = [
+  { id: 1, title: 'Unread Linux news', state: JSON.stringify({ scope: { kind: 'folder', id: 4 }, filter: 'unread', query: '', dateRange: { preset: 'any' }, typeFilter: null }) },
+];
+
+/** Filter rules: a simplified version of rules.rs (any phrase, as a whole word). */
+let rules: Rule[] = [{ id: 1, enabled: true, feedId: null, folderId: null, field: 'title', words: 'sponsored, crypto*', action: 'delete', hits: 3 }];
+function ruleMatches(r: Rule): typeof articles {
+  const phrases = r.words.toLowerCase().split(/[,，]/).map((p) => p.trim()).filter(Boolean);
+  const test = (text: string) =>
+    phrases.some((p) => new RegExp(`(^|\\W)${p.replace(/\*$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${p.endsWith('*') ? '' : '(\\W|$)'}`, 'i').test(text));
+  return articles.filter((a) => {
+    if (r.feedId != null && a.feedId !== r.feedId) return false;
+    if (r.folderId != null && !inScope(a, { kind: 'folder', id: r.folderId })) return false;
+    if (r.action !== 'star' && a.isStarred) return false;
+    if (r.action === 'read' && a.isRead) return false;
+    const text = r.field === 'title' ? a.title : r.field === 'text' ? `${a.title} ${a.html.replace(/<[^>]+>/g, ' ')}` : r.field === 'author' ? a.author ?? '' : a.url ?? '';
+    return test(text);
+  });
+}
+
+/** The fake model translates one paragraph every 700 ms. Stop and new translations end the one that runs. */
+let translationRun = 0;
+async function mockTranslate(id: number, full: boolean): Promise<Translation> {
+  const run = ++translationRun;
+  const a = articles.find((x) => x.id === id);
+  if (!a?.zh) throw 'This article has no Chinese text';
+  const model = settings.translateModel || settings.aiModel;
+  const title = 'Open models change how AI develops';
+  await wait(500);
+  if (run !== translationRun) throw 'The translation was stopped';
+  emit('translation-part', { articleId: id, full, index: null, total: ZH_EN.length, text: title });
+  for (let i = 0; i < ZH_EN.length; i++) {
+    await wait(700);
+    if (run !== translationRun) throw 'The translation was stopped';
+    emit('translation-part', { articleId: id, full, index: i, total: ZH_EN.length, text: ZH_EN[i] });
+  }
+  return { title, paragraphs: ZH_EN, model, cut: false };
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -406,6 +463,59 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'make_brief':
       await wait(2500);
       return structuredClone(mockBrief(args.query, args.title));
+    case 'feed_activity':
+      return feeds.map((f) => {
+        const mine = articles.filter((a) => a.feedId === f.id);
+        // Daring Fireball has gone quiet in this demo.
+        const newest = f.id === 9 ? now - 300 * 86400 : mine.length ? Math.max(...mine.map((a) => a.published)) : null;
+        return { feedId: f.id, newest, articles: mine.length };
+      });
+    case 'count_articles':
+      return query({ ...args.query, offset: 0, limit: 100000 }).length;
+    case 'list_searches':
+      return structuredClone(searches);
+    case 'save_search': {
+      const s = { id: ++nextId, title: String(args.title).trim(), state: args.search };
+      searches.push(s);
+      return structuredClone(s);
+    }
+    case 'rename_search':
+      searches = searches.map((s) => (s.id === args.id ? { ...s, title: String(args.title).trim() } : s));
+      return null;
+    case 'delete_search':
+      searches = searches.filter((s) => s.id !== args.id);
+      return null;
+    case 'list_rules':
+      return structuredClone(rules);
+    case 'save_rule': {
+      const rule = { ...args.rule, words: String(args.rule.words).split(/[,，]/).map((p: string) => p.trim()).filter(Boolean).join(', ') };
+      if (!rule.words) throw 'Enter the words the rule looks for';
+      if (rule.id === 0) rules.push({ ...rule, id: ++nextId, hits: 0 });
+      else rules = rules.map((r) => (r.id === rule.id ? { ...rule, hits: r.hits } : r));
+      return structuredClone(rules.find((r) => r.id === (rule.id || nextId)));
+    }
+    case 'delete_rule':
+      rules = rules.filter((r) => r.id !== args.id);
+      return null;
+    case 'count_rule_matches':
+      await wait(150);
+      return ruleMatches(args.rule).length;
+    case 'apply_rule': {
+      const rule = rules.find((r) => r.id === args.id)!;
+      const hit = ruleMatches(rule);
+      for (const a of hit) {
+        if (rule.action === 'read') a.isRead = true;
+        if (rule.action === 'star') a.isStarred = true;
+      }
+      if (rule.action === 'delete') articles = articles.filter((a) => !hit.includes(a));
+      rule.hits += hit.length;
+      return hit.length;
+    }
+    case 'translate_article':
+      return mockTranslate(args.id, !!args.fullText);
+    case 'stop_translation':
+      translationRun++;
+      return null;
     case 'briefs':
       return briefs.map(({ id, createdAt, title, model }) => ({ id, createdAt, title, model }));
     case 'brief':

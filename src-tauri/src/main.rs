@@ -17,10 +17,12 @@ mod opml;
 mod peertube;
 mod protocol;
 mod reader;
+mod rules;
 mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod translate;
 mod updates;
 mod video;
 #[cfg(test)]
@@ -175,6 +177,19 @@ fn main() {
             commands::check_components,
             commands::ai_models,
             commands::make_brief,
+            commands::translate_article,
+            commands::stop_translation,
+            commands::feed_activity,
+            commands::count_articles,
+            commands::list_searches,
+            commands::save_search,
+            commands::rename_search,
+            commands::delete_search,
+            commands::list_rules,
+            commands::save_rule,
+            commands::delete_rule,
+            commands::count_rule_matches,
+            commands::apply_rule,
             commands::briefs,
             commands::brief,
             commands::delete_brief,

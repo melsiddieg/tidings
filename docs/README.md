@@ -60,7 +60,18 @@ Source: <https://github.com/melsiddieg/tidings>
   topics with points that link to their source articles. A language model on this
   computer or your local network writes it (Ollama, LM Studio, llama.cpp), never a cloud
   service, and it only sees titles, feed names, dates and short excerpts. Off until you
-  choose a model in Settings → AI briefs.
+  choose a model in Settings → Local AI.
+- **Translate Chinese articles** into English with the same local model: a Translate
+  button (or `T`) on articles that are mostly Chinese. The translation appears paragraph
+  by paragraph, is kept with the article, and goes when the article goes. Models trained
+  on much Chinese text, such as Qwen, translate best; Settings → Local AI can name a
+  model for translations only.
+- **Filter rules** (Settings → Rules): when the title, the text, the author or the link
+  contains certain words, mark the article as read, star it or delete it. For all
+  feeds, a folder or one feed. Rules run on new articles; you can also apply a rule to
+  the articles already stored, after seeing how many it matches. Words match whole, in
+  any case, and `crypto*` matches the start of a word. Starred articles are never
+  deleted or marked as read by a rule.
 - **Security check** (Settings → Security): shows whether Tidings, yt-dlp and WebKitGTK
   (Linux, BSD) are up to date, and how to update each one, matched to how it was installed.
   Without going online it checks how old each one is, at every start, and shows a notice
@@ -73,6 +84,13 @@ Source: <https://github.com/melsiddieg/tidings>
 - Folders with any depth. Drag and drop to put any feed or folder anywhere, including
   feeds above folders.
 - Favorites: pin feeds and folders to the top of the sidebar.
+- **Saved searches**: keep a list as it is (a feed or folder, unread or all, search words,
+  dates, a feed type) under a name in the sidebar, with its unread count. Dates such as
+  "Last 7 days" stay relative. Save one from the view options above the list or the `…`
+  menu; rename or delete it with a right click.
+- **Feed health** (`…` menu): feeds that fail, with their error and when they last
+  worked; feeds that have posted nothing for six months; and paused feeds. Retry, pause,
+  resume, open the properties or unsubscribe from there.
 - Select several feeds and folders with ⌘/Ctrl-click or Shift-click and delete them at
   once. Settings → Archive & data → **Remove all** starts over.
 - Collapse or expand all folders with one click; Option/Alt-click a folder's arrow to
@@ -95,7 +113,7 @@ Source: <https://github.com/melsiddieg/tidings>
 | HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. HTML whose elements nest more than 200 deep is shown as plain text, because nesting that deep makes every HTML parser very slow; Tidings finds it in one pass over the tags before anything is parsed. HTML longer than 2 MB is cut. Titles are cut at 500 characters. |
 | Strict Content Security Policy | The web view may only run the app's own scripts and use the app's own stylesheet. It cannot load remote scripts, styles, fonts, frames or media, and a `<style>` element added at run time is refused. Only `style` attributes are allowed inline, which the UI needs in two places. This needs WebKit from Safari 15.4 or WebKitGTK 2.36 (macOS 12.3, Ubuntu 22.04, Debian 12 and newer). |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). The image host still sees your IP address (or your proxy's) and the time of the request: thumbnails in the article list are fetched when the list shows them, before you open the article. Images can be turned off; then they load only when you click "Load images". |
-| AI briefs | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. |
+| AI briefs and translations | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. A translation sends the text of the one article you translate, only when you click Translate, and shows the model's answer as plain text, so an article that tries to steer the model can at worst produce a wrong translation. |
 | Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is drawn to a PNG in Rust as well (with resvg), so WebKit's SVG code never sees a file from the internet; images that an SVG refers to are not loaded. An animated GIF keeps its frames only up to 2400 pixels on a side, and up to a limit on frames times picture size: the web view allocates the whole picture for each frame, however small the frame is. A larger one is shown as a still picture, scaled down. SVG is drawn in a separate helper process with a time limit and a memory limit: a small crafted SVG can crash the drawing library or keep it busy for minutes, and then only the helper ends and that image is not shown. AVIF is not shown. |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped, and so are images marked as 0 or 1 pixel wide or high. This cannot catch every counting pixel: with images on, a feed can still tell that you loaded an article. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. Only single audio and video files are played. A streaming playlist (HLS, DASH and similar) is refused, whatever its address or type says, also when it comes after ID3 or APE tags at the start of the file (GStreamer removes such tags before it looks at the rest): a playlist is a list of addresses that the media engine would fetch by itself, without the proxy setting and without the local network rule. |
@@ -349,6 +367,7 @@ backend is only loaded in development and is not part of release builds.
 | `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
+| `T` | Translate a Chinese article, or show the original |
 | `S` | Star |
 | `M` | Mark read / unread |
 | `C` | Copy link |
@@ -382,6 +401,8 @@ src-tauri/src/
   images.rs              Re-encodes every image before the web view sees it
   updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
   brief.rs               AI briefs written by a local model (Ollama, LM Studio, llama.cpp)
+  translate.rs           Chinese-to-English translation by the same local model
+  rules.rs               Filter rules: matching words in new articles
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup
   menu.rs                macOS menu bar

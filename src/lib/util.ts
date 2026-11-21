@@ -38,7 +38,10 @@ export function relativeAgo(ms: number, now = Date.now()): string {
   if (diff < 45_000) return 'just now';
   if (diff < 3_600_000) return `${Math.round(diff / 60_000)} min ago`;
   if (diff < DAY) return `${Math.round(diff / 3_600_000)} h ago`;
-  return `${Math.round(diff / DAY)} days ago`;
+  if (diff < 60 * DAY) return `${Math.round(diff / DAY)} days ago`;
+  if (diff < 365 * DAY) return `${Math.round(diff / (30 * DAY))} months ago`;
+  const years = Math.round(diff / (365 * DAY));
+  return years === 1 ? 'a year ago' : `${years} years ago`;
 }
 
 /** Group label for date headers in the article list. */

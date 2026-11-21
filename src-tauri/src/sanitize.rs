@@ -750,6 +750,95 @@ fn flatten(html: &str) -> String {
         .collect()
 }
 
+/// The text of HTML without its markup, in one pass over the tags and without
+/// building a tree: fast enough to run on every stored article (filter rules).
+/// Character references are decoded; scripts and styles are left out.
+pub fn quick_text(html: &str) -> String {
+    let mut end = html.len().min(MAX_HTML_BYTES);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Tags inside a line of text: they do not separate words.
+    const INLINE: &[&str] = &[
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "del", "dfn", "em", "font", "i", "ins", "kbd", "mark", "q",
+        "s", "samp", "small", "span", "strike", "strong", "sub", "sup", "time", "u", "var",
+    ];
+    let mut out = String::new();
+    let mut tokens = Tokens::new(&html[..end]);
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Text(text) => decode_into(&mut out, text),
+            Token::Start { name, .. } => match name.as_str() {
+                "script" => {
+                    tokens.skip_script();
+                    out.push(' ');
+                }
+                "style" | "noscript" | "template" | "textarea" | "title" | "xmp" | "iframe" => {
+                    tokens.skip_raw(&name);
+                    out.push(' ');
+                }
+                n if INLINE.contains(&n) => {}
+                _ => out.push(' '),
+            },
+            Token::End(name) if INLINE.contains(&name.as_str()) => {}
+            Token::End(_) => out.push(' '),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Appends `text` with its character references (`&amp;`, `&#20013;`) decoded.
+/// Named references other than the common ones stay as they are.
+fn decode_into(out: &mut String, text: &str) {
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let end = rest[1..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '#')).map(|i| i + 1);
+        let reference = end.filter(|&e| rest[e..].starts_with(';')).map(|e| &rest[1..e]);
+        let decoded = reference.and_then(|r| match r {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => {
+                let number = r.strip_prefix('#')?;
+                let code = match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => number.parse().ok()?,
+                };
+                char::from_u32(code)
+            }
+        });
+        match (decoded, reference) {
+            (Some(c), Some(r)) => {
+                out.push(c);
+                rest = &rest[r.len() + 2..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+}
+
+/// The text of cleaned HTML as paragraphs of plain text, for translation. Headings,
+/// list items and table cells become paragraphs of their own; images and links go.
+pub fn paragraphs(html: &str) -> Vec<String> {
+    let html = bounded(html);
+    let flat = flatten(&html);
+    let doc = Document::fragment(flat.as_str());
+    doc.select("p")
+        .iter()
+        .map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// Feed or page HTML that is safe to parse: cut at `MAX_HTML_BYTES`, and only its
 /// text when its elements nest deeper than `MAX_DEPTH`.
 fn bounded(html: &str) -> Cow<'_, str> {
@@ -895,6 +984,17 @@ mod tests {
         for html in deep {
             assert!(too_deep(&html), "{}", &html[..80.min(html.len())]);
         }
+    }
+
+    #[test]
+    fn quick_text_reads_text_only() {
+        assert_eq!(quick_text("<p>Fish &amp; chips</p><p>&#20013;&#x6587; &nbsp;x</p>"), "Fish & chips 中文 x");
+        assert_eq!(quick_text("<p>a</p>b<script>c</script><style>d</style>e<br>f"), "a b e f");
+        // Inline tags do not split a word.
+        assert_eq!(quick_text("<p>Bit<b>coin</b> news</p>"), "Bitcoin news");
+        // Not a reference, or one that is not known: kept as written.
+        assert_eq!(quick_text("AT&T &copy; &#xZZ; & end&"), "AT&T &copy; &#xZZ; & end&");
+        assert_eq!(quick_text("<a href='x'>link</a> 1 < 2"), "link 1 < 2");
     }
 
     #[test]

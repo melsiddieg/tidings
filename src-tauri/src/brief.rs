@@ -83,23 +83,24 @@ pub struct SourceRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Ollama,
     OpenAi,
 }
 
-/// The model server and model to use, from the settings.
-struct Server {
-    kind: Kind,
-    base: Url,
-    model: String,
+/// The model server and model to use, from the settings. Translations
+/// (`translate.rs`) use the same server, with their own model if one is set.
+pub(crate) struct Server {
+    pub kind: Kind,
+    pub base: Url,
+    pub model: String,
 }
 
-fn server(settings: &Settings) -> Result<Server> {
+pub(crate) fn server(settings: &Settings) -> Result<Server> {
     let kind = match settings.ai_provider.as_str() {
         "ollama" => Kind::Ollama,
         "openai" => Kind::OpenAi,
-        _ => return Err(Error::msg("Briefs are off. Choose a local model in Settings → AI briefs.")),
+        _ => return Err(Error::msg("Local AI is off. Choose a local model in Settings → Local AI.")),
     };
     let base = settings.ai_server().ok_or_else(|| Error::msg("The model server address is not valid"))?;
     Ok(Server { kind, base, model: settings.ai_model.clone() })
@@ -166,7 +167,7 @@ impl Drop for Busy {
 pub async fn write(net: &Net, settings: &Settings, title: &str, sources: &[BriefSource], total: usize) -> Result<(Body, String)> {
     let server = server(settings)?;
     if server.model.is_empty() {
-        return Err(Error::msg("Choose a model for briefs in Settings → AI briefs."));
+        return Err(Error::msg("Choose a model for briefs in Settings → Local AI."));
     }
     if sources.is_empty() {
         return Err(Error::msg("There are no articles to brief here."));
@@ -333,7 +334,7 @@ async fn complete(net: &Net, server: &Server, system: &str, user: &str) -> Resul
     }
 }
 
-async fn post(net: &Net, server: &Server, path: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn post(net: &Net, server: &Server, path: &str, body: &Value) -> Result<Value> {
     let url = endpoint(server, path)?;
     let request = net
         .local_model(Method::POST, &url)?
@@ -387,7 +388,7 @@ async fn send(request: reqwest::RequestBuilder, server: &Server) -> Result<Value
     Ok(json)
 }
 
-fn text_at(json: &Value, path: &[&str]) -> Result<String> {
+pub(crate) fn text_at(json: &Value, path: &[&str]) -> Result<String> {
     let mut at = json;
     for key in path {
         at = match key.parse::<usize>() {

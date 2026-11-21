@@ -45,6 +45,9 @@ pub struct Settings {
     pub ai_endpoint: String,
     /// The model's name on that server.
     pub ai_model: String,
+    /// The model that translates articles (translate.rs), on the same server. Empty
+    /// uses `ai_model`.
+    pub translate_model: String,
 }
 
 impl Default for Settings {
@@ -73,6 +76,7 @@ impl Default for Settings {
             ai_provider: String::new(),
             ai_endpoint: String::new(),
             ai_model: String::new(),
+            translate_model: String::new(),
         }
     }
 }
@@ -127,8 +131,11 @@ impl Settings {
             self.ai_provider = String::new();
         }
         self.ai_model = self.ai_model.trim().to_string();
-        if self.ai_model.chars().any(|c| c.is_control()) || self.ai_model.len() > 300 {
-            return Err(Error::msg("The model name contains invalid characters"));
+        self.translate_model = self.translate_model.trim().to_string();
+        for model in [&self.ai_model, &self.translate_model] {
+            if model.chars().any(|c| c.is_control()) || model.len() > 300 {
+                return Err(Error::msg("The model name contains invalid characters"));
+            }
         }
         self.ai_endpoint = self.ai_endpoint.trim().trim_end_matches('/').to_string();
         if !self.ai_endpoint.is_empty() {
@@ -205,6 +212,7 @@ impl Settings {
             ai_provider: defaults.ai_provider,
             ai_endpoint: defaults.ai_endpoint,
             ai_model: defaults.ai_model,
+            translate_model: defaults.translate_model,
             video_player: defaults.video_player,
             user_agent: defaults.user_agent,
             ..self

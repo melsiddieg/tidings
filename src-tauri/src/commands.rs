@@ -15,7 +15,9 @@ use crate::net;
 use crate::opml::{self, ImportStats};
 use crate::peertube;
 use crate::reader;
+use crate::rules::Rule;
 use crate::sanitize;
+use crate::translate;
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::updates;
@@ -41,12 +43,16 @@ pub struct ArticleDetail {
     pub has_full_text: bool,
     pub enclosure_url: Option<String>,
     pub enclosure_type: Option<String>,
+    /// The article is mostly Chinese: the UI offers to translate it.
+    pub chinese: bool,
 }
 
 fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail {
     let use_full = full_text && row.full_content.is_some();
     let source = if use_full { row.full_content.as_deref() } else { row.content.as_deref() };
     let rendered = sanitize::render(source.unwrap_or(""), load_images);
+    let text = sanitize::plain_text(&rendered.html);
+    let chinese = translate::is_chinese(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
     ArticleDetail {
         id: row.id,
         feed_id: row.feed_id,
@@ -63,6 +69,7 @@ fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail 
         has_full_text: row.full_content.is_some(),
         enclosure_url: row.enclosure_url,
         enclosure_type: row.enclosure_type,
+        chinese,
     }
 }
 
@@ -623,6 +630,178 @@ pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String)
     let body_json = serde_json::to_string(&body).map_err(|e| Error::msg(e.to_string()))?;
     let id = db::insert_brief(&state.db(), &title, &model, &query_json, &body_json)?;
     brief_view(&state, id)?.ok_or_else(|| Error::msg("The brief was not stored"))
+}
+
+/// One part of a translation, as it is done: the title (`index` None) or a paragraph.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationPart {
+    article_id: i64,
+    full: bool,
+    index: Option<usize>,
+    total: usize,
+    text: String,
+}
+
+/// Translates an article into English with the local model (translate.rs): the
+/// full text when it is loaded and `full_text` is set, else the feed's text. A
+/// stored translation is returned at once unless `again`. Parts arrive as
+/// "translation-part" events while the model works.
+#[tauri::command]
+pub async fn translate_article(
+    app: AppHandle,
+    state: AppStateRef<'_>,
+    id: i64,
+    full_text: Option<bool>,
+    again: Option<bool>,
+) -> Result<translate::Translation> {
+    let row = db::article(&state.db(), id)?;
+    let full = full_text.unwrap_or(false) && row.full_content.is_some();
+    let stored = if again.unwrap_or(false) { None } else { db::translation(&state.db(), id, full)? };
+    if let Some(found) = stored.and_then(|json| serde_json::from_str(&json).ok()) {
+        return Ok(found);
+    }
+    let source = if full { row.full_content.as_deref() } else { row.content.as_deref() };
+    let paragraphs = sanitize::paragraphs(source.unwrap_or(""));
+    let total = paragraphs.len();
+    let settings = state.settings();
+    let send = |index: Option<usize>, text: &str| {
+        let part = TranslationPart { article_id: id, full, index, total, text: text.to_string() };
+        let _ = app.emit("translation-part", part);
+    };
+    let translation = translate::translate(&state.net(), &settings, &row.title, &paragraphs, send).await?;
+    let json = serde_json::to_string(&translation).map_err(|e| Error::msg(e.to_string()))?;
+    db::save_translation(&state.db(), id, full, &json)?;
+    Ok(translation)
+}
+
+/// Stops the translation that runs now.
+#[tauri::command]
+pub fn stop_translation() {
+    translate::stop();
+}
+
+// ---------------------------------------------------------------------------
+// Feed health and saved searches
+// ---------------------------------------------------------------------------
+
+/// The newest article and the article count of each feed (Feed health).
+#[tauri::command]
+pub fn feed_activity(state: AppStateRef<'_>) -> Result<Vec<db::FeedActivity>> {
+    db::feed_activity(&state.db())
+}
+
+/// How many articles a list query matches: the unread counts of saved searches.
+#[tauri::command]
+pub fn count_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<i64> {
+    db::count_articles(&state.db(), &query)
+}
+
+#[tauri::command]
+pub fn list_searches(state: AppStateRef<'_>) -> Result<Vec<db::SavedSearch>> {
+    db::searches(&state.db())
+}
+
+/// A saved search's name: one line of at most 100 characters.
+fn search_title(title: &str) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() || title.chars().count() > 100 {
+        return Err(Error::msg("Give the search a name of at most 100 characters"));
+    }
+    Ok(title)
+}
+
+/// Saves the list state `state` (JSON from the UI) under `title`.
+#[tauri::command]
+pub fn save_search(state: AppStateRef<'_>, title: String, search: String) -> Result<db::SavedSearch> {
+    let title = search_title(&title)?;
+    let valid = search.len() <= 16 * 1024 && serde_json::from_str::<serde_json::Value>(&search).is_ok_and(|v| v.is_object());
+    if !valid {
+        return Err(Error::msg("This search cannot be saved"));
+    }
+    let id = db::insert_search(&state.db(), &title, &search)?;
+    Ok(db::SavedSearch { id, title, state: search })
+}
+
+#[tauri::command]
+pub fn rename_search(state: AppStateRef<'_>, id: i64, title: String) -> Result<()> {
+    db::rename_search(&state.db(), id, &search_title(&title)?)
+}
+
+#[tauri::command]
+pub fn delete_search(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    db::delete_search(&state.db(), id)
+}
+
+// ---------------------------------------------------------------------------
+// Filter rules (rules.rs)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_rules(state: AppStateRef<'_>) -> Result<Vec<Rule>> {
+    db::rules(&state.db())
+}
+
+/// Stores a new rule (id 0) or changes one, and returns it as stored.
+#[tauri::command]
+pub fn save_rule(state: AppStateRef<'_>, rule: Rule) -> Result<Rule> {
+    let rule = rule.validated()?;
+    let conn = state.db();
+    let id = db::save_rule(&conn, &rule)?;
+    db::rule(&conn, id)
+}
+
+#[tauri::command]
+pub fn delete_rule(state: AppStateRef<'_>, id: i64) -> Result<()> {
+    db::delete_rule(&state.db(), id)
+}
+
+/// Articles are looked at this many at a time, so the database is free between
+/// batches for the rest of the app.
+const RULE_BATCH: usize = 500;
+
+/// The stored articles a rule (saved or not) would change now.
+fn rule_matches(state: &AppState, rule: &Rule) -> Result<Vec<i64>> {
+    let feeds = db::rule_feeds(&state.db(), rule)?;
+    let (mut all, mut after) = (Vec::new(), 0);
+    loop {
+        let (matched, last) = db::rule_batch(&state.db(), rule, &feeds, after, RULE_BATCH)?;
+        all.extend(matched);
+        match last {
+            Some(id) => after = id,
+            None => return Ok(all),
+        }
+    }
+}
+
+/// How many stored articles a rule (saved or not) would change now.
+#[tauri::command]
+pub async fn count_rule_matches(state: AppStateRef<'_>, rule: Rule) -> Result<usize> {
+    let rule = rule.validated()?;
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || rule_matches(&state, &rule).map(|ids| ids.len()))
+        .await
+        .map_err(|e| Error::msg(e.to_string()))?
+}
+
+/// Does what a saved rule says to the stored articles it matches. Returns how many.
+#[tauri::command]
+pub async fn apply_rule(state: AppStateRef<'_>, id: i64) -> Result<usize> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let rule = db::rule(&state.db(), id)?;
+        let ids = rule_matches(&state, &rule)?;
+        let conn = state.db();
+        for chunk in ids.chunks(RULE_BATCH) {
+            db::apply_rule_to(&conn, &rule, chunk)?;
+        }
+        if rule.action == "delete" {
+            db::checkpoint(&conn);
+        }
+        Ok(ids.len())
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))?
 }
 
 /// Past briefs, newest first.

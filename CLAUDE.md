@@ -28,7 +28,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
-  in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `updates.rs` (security check: versions of Tidings,
+  in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `translate.rs` (Chinese-to-English
+  translation by the same model), `rules.rs` (filter rules on new articles), `updates.rs` (security check: versions of Tidings,
   yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
@@ -121,6 +122,15 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   never uses the proxy or follows redirects. Do not add cloud AI providers. Send the model
   only titles, feed names, dates and excerpts; keep its answer JSON that cites article
   numbers, drop citations of articles that were not sent, and show its text as plain text.
+- Translations (`translate.rs`) use the same server through `brief::post`, only when the
+  user clicks Translate. Send the article's text as plain text, one passage at a time, and
+  show the answer as plain text (Svelte text, never `{@html}`). Keep the cap on the answer
+  length and the stop between passages. Stored translations go with their article: the
+  `translations_follow_article` trigger removes them when it is deleted or its text changes.
+- Filter rules (`rules.rs`) match plain phrases, never regular expressions, so no rule can
+  make matching slow. A rule never deletes or marks read a starred article. Applying a
+  rule to stored articles happens only when the user asks, after the UI shows the count;
+  deleting asks for confirmation.
 - If the saved proxy cannot be used at startup, `AppState::init` uses `Net::offline()`.
   Never fall back to a direct connection: it would bypass Tor without the user knowing.
 - Do not start other programs at startup. The security check runs `yt-dlp --version` only

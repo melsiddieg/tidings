@@ -19,6 +19,8 @@
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ShortcutsDialog from './components/ShortcutsDialog.svelte';
   import DateRangeDialog from './components/DateRangeDialog.svelte';
+  import FeedHealthDialog from './components/FeedHealthDialog.svelte';
+  import SaveSearchDialog from './components/SaveSearchDialog.svelte';
 
   onMount(() => {
     store.init();
@@ -146,6 +148,9 @@
       case 'i':
         store.send('images');
         break;
+      case 't':
+        store.send('translate');
+        break;
       case 'c':
         store.send('copy-link');
         break;
@@ -238,6 +243,10 @@
     <ShortcutsDialog />
   {:else if store.dialog?.kind === 'date-range'}
     <DateRangeDialog />
+  {:else if store.dialog?.kind === 'feed-health'}
+    <FeedHealthDialog />
+  {:else if store.dialog?.kind === 'save-search'}
+    <SaveSearchDialog dialog={store.dialog} />
   {/if}
 
   {#if store.menu}

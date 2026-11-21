@@ -4,10 +4,10 @@
   import FeedIcon from './FeedIcon.svelte';
   import ArticleBody from './ArticleBody.svelte';
   import VideoCard from './VideoCard.svelte';
-  import { api, errorText } from '../lib/api';
+  import { api, errorText, on } from '../lib/api';
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
-  import type { ArticleDetail } from '../lib/types';
+  import type { ArticleDetail, TranslationPart } from '../lib/types';
   import { copyText, enclosureLabel, hostOf, isVideoFile, longTime, videoSource } from '../lib/util';
 
   let {
@@ -22,6 +22,10 @@
   let error = $state<string | null>(null);
   let fullLoading = $state(false);
   let imagesOverride = $state<boolean | null>(null);
+  // The translation shown instead of the article: filled part by part while the
+  // local model works (`translating`).
+  let shown = $state<{ title: string | null; paragraphs: string[]; total: number; model: string | null; cut: boolean } | null>(null);
+  let translating = $state(false);
   let scroller: HTMLDivElement | undefined = $state();
   let token = 0;
 
@@ -46,6 +50,7 @@
       detail = d;
       if (tabId) store.setTabTitle(tabId, d.title);
       if (store.feedById.get(d.feedId)?.fullText && d.url) toggleFullText(true);
+      else if (d.chinese && store.translated.has(d.id)) translate();
     } catch (e) {
       if (t === token) error = errorText(e);
     } finally {
@@ -58,6 +63,10 @@
     untrack(() => {
       imagesOverride = null;
       fullLoading = false;
+      // A translation of the article before stops: the model works for the one shown.
+      if (translating) api.stopTranslation();
+      shown = null;
+      translating = false;
       load(id);
       scroller?.scrollTo({ top: 0 });
     });
@@ -88,12 +97,71 @@
     fullLoading = true;
     try {
       const d = await api.fullText(id, loadImages);
-      if (d.id === articleId) detail = d;
+      if (d.id === articleId) {
+        detail = d;
+        // The translation was of the feed's text: translate the full text instead.
+        if (shown || (d.chinese && store.translated.has(d.id))) translate(false, true);
+      }
     } catch (e) {
       if (!force) store.error(e);
     } finally {
       fullLoading = false;
     }
+  }
+
+  // Parts of the translation as the model finishes them.
+  $effect(() => {
+    let stop: (() => void) | null = null;
+    let gone = false;
+    on<TranslationPart>('translation-part', (part) => {
+      if (!translating || !shown || part.articleId !== detail?.id || part.full !== detail.showingFullText) return;
+      shown.total = part.total;
+      if (part.index == null) shown.title = part.text;
+      else shown.paragraphs[part.index] = part.text;
+    }).then((unlisten) => (gone ? unlisten() : (stop = unlisten)));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  /** Shows the article in English, or the original again. `again` asks the model anew. */
+  async function translate(again = false, keep = false) {
+    if (!detail) return;
+    const d = detail;
+    if (shown && !again && !keep) {
+      if (translating) api.stopTranslation();
+      shown = null;
+      translating = false;
+      store.translated.delete(d.id);
+      return;
+    }
+    if (!store.translateReady) {
+      store.dialog = { kind: 'settings', section: 'ai' };
+      return;
+    }
+    store.translated.add(d.id);
+    shown = { title: null, paragraphs: [], total: 0, model: null, cut: false };
+    translating = true;
+    try {
+      const t = await api.translate(d.id, d.showingFullText, again);
+      if (detail?.id === d.id && shown) shown = { title: t.title, paragraphs: t.paragraphs, total: t.paragraphs.length, model: t.model, cut: t.cut };
+    } catch (e) {
+      if (detail?.id !== d.id) return;
+      shown = null;
+      if (errorText(e) !== 'The translation was stopped') {
+        store.translated.delete(d.id);
+        store.error(e);
+      }
+    } finally {
+      if (detail?.id === d.id) translating = false;
+    }
+  }
+
+  function stopTranslating() {
+    api.stopTranslation();
+    if (shown && shown.paragraphs.length === 0) shown = null;
+    translating = false;
   }
 
   async function toggleImages() {
@@ -143,6 +211,10 @@
       case 'images':
         toggleImages();
         break;
+      case 'translate':
+        if (detail.chinese || shown) translate();
+        else store.toast('This article is not in Chinese');
+        break;
       case 'browser':
         store.openExternal(detail.url);
         break;
@@ -182,6 +254,17 @@
         <button class="icon-btn" class:active={loadImages} title={loadImages ? 'Hide images (I)' : 'Load images (I)'} onclick={toggleImages}>
           <Icon name={loadImages ? 'image' : 'image-off'} size={16} />
         </button>
+        {#if detail.chinese}
+          <button
+            class="tool"
+            class:on={!!shown}
+            title={shown ? 'Show the original (T)' : store.translateReady ? 'Translate into English with the local model (T)' : 'Translate: set up a local model'}
+            onclick={() => translate()}
+          >
+            {#if translating}<span class="spinner"></span>{:else}<Icon name="languages" size={15} />{/if}
+            <span>{shown ? 'Original' : 'Translate'}</span>
+          </button>
+        {/if}
       </div>
       <div class="group">
         {#if mode === 'preview'}
@@ -218,11 +301,12 @@
           </div>
           <h1 class="article-title" dir="auto">
             {#if detail.url}
-              <a href={detail.url} onclick={(e) => { e.preventDefault(); store.openExternal(detail?.url); }}>{detail.title}</a>
+              <a href={detail.url} onclick={(e) => { e.preventDefault(); store.openExternal(detail?.url); }}>{shown?.title ?? detail.title}</a>
             {:else}
-              {detail.title}
+              {shown?.title ?? detail.title}
             {/if}
           </h1>
+          {#if shown?.title}<div class="original-title" dir="auto">{detail.title}</div>{/if}
           {#if detail.author}<div class="byline" dir="auto">By {detail.author}</div>{/if}
         </header>
 
@@ -274,7 +358,26 @@
           <div class="fulltext-note"><Icon name="book" size={13} /> Full article loaded from {hostOf(detail.url)}</div>
         {/if}
 
-        <ArticleBody html={detail.html} />
+        {#if shown}
+          <div class="fulltext-note translation-note">
+            <Icon name="languages" size={13} />
+            {#if translating}
+              <span class="spinner"></span> Translating{shown.total ? ` ${shown.paragraphs.filter(Boolean).length} of ${shown.total}` : ''} with {store.settings.translateModel || store.settings.aiModel}…
+              <button class="link" onclick={stopTranslating}>Stop</button>
+            {:else}
+              Translated from Chinese by {shown.model} · not checked by a person
+              <button class="link" onclick={() => translate()}>Original</button>
+              <button class="link" onclick={() => translate(true)}>Translate again</button>
+            {/if}
+          </div>
+          <!-- Plain text from the model: Svelte escapes it, so it can never be markup. -->
+          <div class="prose translated" dir="auto">
+            {#each shown.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{/each}
+          </div>
+          {#if shown.cut}<p class="no-content">The rest of this article is too long to translate.</p>{/if}
+        {:else}
+          <ArticleBody html={detail.html} />
+        {/if}
 
         {#if !detail.html.trim()}
           <p class="no-content">This feed only sends a headline.

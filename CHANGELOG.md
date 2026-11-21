@@ -5,6 +5,23 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Translate Chinese articles into English with the local model that writes AI briefs:
+  a Translate button (or `T`) on articles that are mostly Chinese. The translation
+  appears paragraph by paragraph and is kept with the article until the article or its
+  text changes. Settings → Local AI (renamed from AI briefs) can name a model for
+  translations only.
+- Filter rules (Settings → Rules): when the title, the text, the author or the link
+  contains certain words, mark the article as read, star it or delete it, for all
+  feeds, a folder or one feed. Rules run on new articles, and on stored ones when you
+  ask, after a count and, for deleting, a confirmation. Words match whole and in any
+  case; `crypto*` matches the start of a word; Chinese matches inside sentences.
+  Starred articles are never deleted or marked as read by a rule.
+- Saved searches: keep a list (feed or folder, read filter, search words, dates, feed
+  type) under a name in the sidebar, with its unread count.
+- Feed health (`…` menu): feeds that fail, feeds quiet for six months or more, and
+  paused feeds, with retry, pause, resume and unsubscribe.
+
 ## [0.9.6] - 2026-11-13
 
 ### Security

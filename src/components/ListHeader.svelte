@@ -88,6 +88,8 @@
       { separator: true },
       { label: 'Newest first', checked: !store.oldestFirst, action: () => store.setOldestFirst(false) },
       { label: 'Oldest first', checked: store.oldestFirst, action: () => store.setOldestFirst(true) },
+      { separator: true },
+      { label: 'Save this search…', icon: 'search', action: () => (store.dialog = { kind: 'save-search', id: null, title: store.briefTitle() }) },
     ]);
   }
 </script>

@@ -4,7 +4,7 @@
   import { store } from '../lib/store.svelte';
   import { childKey, countLabel, relativeAgo } from '../lib/util';
   import FeedIcon from './FeedIcon.svelte';
-  import type { FeedType, ItemRef } from '../lib/types';
+  import type { FeedType, ItemRef, SavedSearch } from '../lib/types';
   import TreeFolder from './TreeFolder.svelte';
   import FeedRow from './FeedRow.svelte';
 
@@ -18,6 +18,9 @@
       { separator: true },
       { label: 'Import OPML…', icon: 'download', action: () => store.importOpml() },
       { label: 'Export OPML…', icon: 'upload', action: () => store.exportOpml() },
+      { separator: true },
+      { label: 'Feed health…', icon: 'alert', action: () => (store.dialog = { kind: 'feed-health' }) },
+      { label: 'Save this search…', icon: 'search', action: () => (store.dialog = { kind: 'save-search', id: null, title: store.briefTitle() }) },
       { separator: true },
       { label: 'Expand all folders', icon: 'expand', action: () => store.setExpanded(true) },
       { label: 'Collapse all folders', icon: 'collapse', action: () => store.setExpanded(false) },
@@ -36,6 +39,13 @@
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead(ref.kind === 'feed' ? { kind: 'feed', id: ref.id } : { kind: 'folder', id: ref.id }) },
       { separator: true },
       { label: 'Remove from Favorites', icon: 'star', action: () => store.setPinned(ref, false) },
+    ]);
+  }
+
+  function searchMenu(e: MouseEvent, search: SavedSearch) {
+    store.openMenu(e, [
+      { label: 'Rename…', icon: 'pencil', action: () => (store.dialog = { kind: 'save-search', id: search.id, title: search.title }) },
+      { label: 'Delete search', icon: 'trash', danger: true, action: () => store.deleteSearch(search.id) },
     ]);
   }
 
@@ -115,6 +125,28 @@
               <Icon name="folder" size={16} />
             {/if}
             <span class="label">{fav.title}</span>
+            {#if unread > 0}<span class="count">{countLabel(unread)}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    {#if store.searches.length > 0}
+      <div class="section-title"><span>Saved searches</span></div>
+      <div class="group">
+        {#each store.searches as search (search.id)}
+          {@const unread = store.searchCounts[search.id] ?? 0}
+          {@const gone = !store.parseSearch(search)}
+          <button
+            class="item"
+            class:selected={store.activeSearchId === search.id}
+            class:gone
+            title={gone ? 'The feed or folder of this search was removed' : search.title}
+            onclick={() => store.openSearch(search)}
+            oncontextmenu={(e) => searchMenu(e, search)}
+          >
+            <Icon name="search" size={16} />
+            <span class="label">{search.title}</span>
             {#if unread > 0}<span class="count">{countLabel(unread)}</span>{/if}
           </button>
         {/each}
@@ -265,6 +297,10 @@
   }
   .item:hover {
     background: var(--bg-hover);
+  }
+  .item.gone .label {
+    color: var(--text-3);
+    text-decoration: line-through;
   }
   .item.selected {
     background: var(--accent-soft);

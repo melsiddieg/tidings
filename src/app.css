@@ -996,6 +996,18 @@ kbd {
   color: var(--text-3);
   background: var(--bg-muted);
 }
+.translation-note {
+  flex-wrap: wrap;
+  border-radius: 10px;
+}
+.translation-note .link {
+  font-size: inherit;
+}
+.original-title {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 14px;
+}
 .no-content {
   color: var(--text-3);
   font-size: 14px;
