@@ -34,7 +34,8 @@ jobs:
           toolchain: stable
       - name: cargo audit
         # Fails on vulnerabilities. "Unmaintained" and "unsound" notices are printed
-        # as warnings; they come from Tauri's GTK dependencies.
+        # as warnings; most come from Tauri's GTK dependencies, and one is chrono,
+        # which Tidings and feed-rs use for dates.
         # The tool's version is fixed, like the actions: a new release of it is
         # not run here before someone has chosen it. The list of advisories it
         # downloads is always the current one.
