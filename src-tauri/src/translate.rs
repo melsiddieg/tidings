@@ -9,6 +9,9 @@
 //!   article that tries to steer the model can make a wrong translation, nothing more.
 //! - Translations are kept next to the article (`db::save_translation`). A trigger
 //!   removes them when the article is deleted or its text changes.
+//! - The UI shows the translation in the article's own layout (`layout`): the
+//!   paragraphs in order, with the article's images between them. The images come
+//!   from the stored HTML through `sanitize::render`, never from the model.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +21,7 @@ use serde_json::{json, Value};
 use crate::brief::{self, Kind, Server};
 use crate::error::{Error, Result};
 use crate::net::Net;
+use crate::sanitize::{self, Piece};
 use crate::settings::Settings;
 
 /// Longer paragraphs are sent in parts, cut after a sentence. A small model keeps
@@ -48,6 +52,41 @@ pub struct Translation {
     pub model: String,
     /// The article had more text than `MAX_TEXT`; the rest is not translated.
     pub cut: bool,
+}
+
+/// A part of a translated article, in the order the UI shows them.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Block {
+    /// The paragraph with this index in `Translation::paragraphs`.
+    Text { index: usize },
+    /// One of the article's images, cleaned and proxied by `sanitize::render`.
+    Image { html: String },
+}
+
+/// The layout of a translation of `html`: its paragraphs, as `sanitize::paragraphs`
+/// numbers them, and its images where they are in the article. Without
+/// `load_images` the images are left out, as in the article itself.
+pub fn layout(html: &str, load_images: bool) -> Vec<Block> {
+    let mut index = 0;
+    let mut out = Vec::new();
+    for piece in sanitize::pieces(html) {
+        match piece {
+            Piece::Text(_) => {
+                out.push(Block::Text { index });
+                index += 1;
+            }
+            Piece::Image(tag) if load_images => {
+                let shown = sanitize::render(&tag, true).html;
+                // `render` drops an address it does not allow, and leaves an empty `<img>`.
+                if shown.contains(" src=") {
+                    out.push(Block::Image { html: shown });
+                }
+            }
+            Piece::Image(_) => {}
+        }
+    }
+    out
 }
 
 /// Chinese characters (CJK ideographs), which Japanese also uses.
@@ -103,6 +142,8 @@ fn parts(text: &str, max: usize) -> Vec<String> {
 fn clean_answer(answer: &str, chars: usize) -> String {
     let answer = match answer.rfind("</think>") {
         Some(i) => &answer[i + "</think>".len()..],
+        // Thinking that the token limit cut off: there is no answer.
+        None if answer.trim_start().starts_with("<think>") => "",
         None => answer,
     };
     let mut text = answer.trim().trim_start_matches("```").trim_end_matches("```").trim();
@@ -152,19 +193,36 @@ async fn translate_part(net: &Net, server: &Server, text: &str) -> Result<String
             brief::text_at(&json, &["message", "content"])?
         }
         Kind::OpenAi => {
-            let body: Value = json!({
+            let mut body: Value = json!({
                 "model": server.model,
                 "messages": messages,
                 "stream": false,
                 "temperature": 0.1,
                 "max_tokens": tokens
             });
-            let json = brief::post(net, server, "chat/completions", &body).await?;
+            body[brief::NO_THINKING] = brief::no_thinking();
+            let json = match brief::post(net, server, "chat/completions", &body).await {
+                // A server that refuses the template setting: ask again without it.
+                Err(e) if e.to_string().contains(brief::NO_THINKING) => {
+                    body.as_object_mut().map(|o| o.remove(brief::NO_THINKING));
+                    brief::post(net, server, "chat/completions", &body).await?
+                }
+                other => other?,
+            };
             brief::text_at(&json, &["choices", "0", "message", "content"])?
         }
     };
-    Ok(clean_answer(&answer, chars))
+    let text = clean_answer(&answer, chars);
+    if text.is_empty() {
+        // Most often a model that thinks first and used up the token limit on it.
+        return Err(Error::msg(NO_ANSWER));
+    }
+    Ok(text)
 }
+
+/// The error when the model answers a passage with nothing.
+pub const NO_ANSWER: &str = "The model gave no translation. If it thinks before it answers (Qwen3 and Qwen3.5 do), \
+turn thinking off on its server, for example llama-server --reasoning off, or choose another model.";
 
 /// The translation that runs now. Each new one counts up, and the one before stops
 /// at its next passage.
@@ -229,6 +287,8 @@ pub async fn translate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
 
     #[test]
     fn chinese_is_told_from_other_text() {
@@ -260,8 +320,29 @@ mod tests {
     }
 
     #[test]
+    fn layout_puts_images_between_paragraphs() {
+        let html = r#"<p>第一段。</p><img src="https://img.example/a.jpg" alt="图" onerror="x()"><p>第二段。</p><img src="javascript:alert(1)">"#;
+        let blocks = layout(html, true);
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        assert_eq!(blocks[0], Block::Text { index: 0 });
+        assert_eq!(blocks[2], Block::Text { index: 1 });
+        let Block::Image { html: image } = &blocks[1] else { panic!("{blocks:?}") };
+        let proxied = format!("tidings://localhost/img/{}", URL_SAFE_NO_PAD.encode("https://img.example/a.jpg"));
+        assert!(image.contains(&proxied) && image.contains("alt=") && !image.contains("onerror"), "{image}");
+        // The UI gets a tagged list.
+        assert_eq!(serde_json::to_value(&blocks[0]).unwrap(), json!({"kind": "text", "index": 0}));
+        assert_eq!(serde_json::to_value(&blocks[1]).unwrap()["kind"], "image");
+        // Without images, as in the article itself.
+        assert_eq!(layout(html, false), [Block::Text { index: 0 }, Block::Text { index: 1 }]);
+        // The paragraphs are numbered as the translation numbers them.
+        let texts = sanitize::paragraphs(html);
+        assert_eq!(texts, ["第一段。", "第二段。"]);
+    }
+
+    #[test]
     fn answers_are_cleaned() {
         assert_eq!(clean_answer("<think>The user wants…</think>\n\nHello world.", 4), "Hello world.");
+        assert_eq!(clean_answer("<think>The user wants a translation. First,", 4), "");
         assert_eq!(clean_answer("Translation: \"Hello world.\"", 4), "Hello world.");
         assert_eq!(clean_answer("“Hello.”", 2), "Hello.");
         // Text that starts with Chinese is not cut inside a character.

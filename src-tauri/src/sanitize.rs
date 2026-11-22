@@ -422,6 +422,8 @@ enum Token<'a> {
 struct Tokens<'a> {
     html: &'a str,
     at: usize,
+    /// Where the last start tag begins (`Tokens::last_tag`).
+    tag: usize,
     /// Whether `<![CDATA[` starts a CDATA section (inside SVG or MathML).
     cdata: bool,
 }
@@ -512,7 +514,12 @@ fn comment_end(b: &[u8], from: usize) -> usize {
 
 impl<'a> Tokens<'a> {
     fn new(html: &'a str) -> Self {
-        Tokens { html, at: 0, cdata: false }
+        Tokens { html, at: 0, tag: 0, cdata: false }
+    }
+
+    /// The last start tag as it is written, from `<` to `>`.
+    fn last_tag(&self) -> &'a str {
+        &self.html[self.tag..self.at]
     }
 
     fn name(&self, from: usize, to: usize) -> String {
@@ -633,6 +640,7 @@ impl<'a> Tokens<'a> {
                     return None;
                 };
                 self.at = end;
+                self.tag = i;
                 return Some(Token::Start { name: self.name(i + 1, name_end), closed });
             }
         }
@@ -730,13 +738,21 @@ fn deeper_than(html: &str, max: usize, noscript_is_text: bool) -> bool {
     }
 }
 
-/// The text of `html` as paragraphs, for HTML that nests too deep to parse.
-fn flatten(html: &str) -> String {
-    const BLOCKS: &[&str] = &[
-        "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt", "figcaption",
-        "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p",
-        "pre", "section", "summary", "table", "td", "th", "tr", "ul",
-    ];
+/// Elements that start and end a paragraph of text (`flatten`, `pieces`).
+const BLOCKS: &[&str] = &[
+    "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt", "figcaption", "figure",
+    "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+    "summary", "table", "td", "th", "tr", "ul",
+];
+
+/// Marks the place of an image in the text of `block_text`. Text never holds `<`
+/// before a letter (that starts a tag), so the mark cannot come from the text.
+const IMAGE_MARK: &str = "<img>";
+
+/// The text of `html`, with "\n\n" where a block element starts or ends. The text
+/// keeps its character references (`&amp;`). With `images`, each image tag is added
+/// there as it is written, and its place in the text marked with `IMAGE_MARK`.
+fn block_text(html: &str, mut images: Option<&mut Vec<String>>) -> String {
     let mut text = String::new();
     let mut tokens = Tokens::new(html);
     while let Some(token) = tokens.next() {
@@ -747,6 +763,12 @@ fn flatten(html: &str) -> String {
                 "style" | "noscript" | "template" | "iframe" | "noembed" | "noframes" | "xmp" | "textarea" | "title" => {
                     tokens.skip_raw(&name)
                 }
+                "img" => {
+                    if let Some(list) = images.as_mut() {
+                        text.push_str(IMAGE_MARK);
+                        list.push(tokens.last_tag().to_string());
+                    }
+                }
                 n if BLOCKS.contains(&n) => text.push_str("\n\n"),
                 _ => {}
             },
@@ -754,13 +776,18 @@ fn flatten(html: &str) -> String {
             Token::End(_) => {}
         }
     }
-    // The text keeps its character references (`&amp;`); only `<` and `>` could
-    // start markup.
-    text.split("\n\n")
-        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|p| !p.is_empty())
-        .map(|p| format!("<p>{}</p>", p.replace('<', "&lt;").replace('>', "&gt;")))
-        .collect()
+    text
+}
+
+/// A paragraph of `block_text` on one line, as HTML: only `<` and `>` could start markup.
+fn paragraph_html(text: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then(|| format!("<p>{}</p>", line.replace('<', "&lt;").replace('>', "&gt;")))
+}
+
+/// The text of `html` as paragraphs, for HTML that nests too deep to parse.
+fn flatten(html: &str) -> String {
+    block_text(html, None).split("\n\n").filter_map(paragraph_html).collect()
 }
 
 /// The text of HTML without its markup, in one pass over the tags and without
@@ -842,13 +869,64 @@ fn decode_into(out: &mut String, text: &str) {
 /// The text of cleaned HTML as paragraphs of plain text, for translation. Headings,
 /// list items and table cells become paragraphs of their own; images and links go.
 pub fn paragraphs(html: &str) -> Vec<String> {
+    pieces(html)
+        .into_iter()
+        .filter_map(|piece| match piece {
+            Piece::Text(text) => Some(text),
+            Piece::Image(_) => None,
+        })
+        .collect()
+}
+
+/// A part of an article for a translation (`pieces`).
+#[derive(Debug, PartialEq)]
+pub enum Piece {
+    /// A paragraph of plain text, as `paragraphs` returns it.
+    Text(String),
+    /// An image tag as it is written in the stored HTML. Show it only through `render`.
+    Image(String),
+}
+
+/// The paragraphs of `html` as `paragraphs` returns them, with its images between
+/// them. An image inside a paragraph comes before it when no text is before the
+/// image there, else after it. The text is exactly that of `paragraphs` in 0.10 and
+/// 0.11, so a stored translation keeps the index of each paragraph.
+pub fn pieces(html: &str) -> Vec<Piece> {
+    enum Entry {
+        Paragraph,
+        Image(usize),
+    }
     let html = bounded(html);
-    let flat = flatten(&html);
+    let mut images = Vec::new();
+    let text = block_text(&html, Some(&mut images));
+    let mut entries = Vec::new();
+    let mut flat = String::new();
+    let mut next = 0;
+    for chunk in text.split("\n\n") {
+        let mut parts = chunk.split(IMAGE_MARK);
+        let mut joined = parts.next().unwrap_or_default().to_string();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for part in parts {
+            if joined.trim().is_empty() { before.push(next) } else { after.push(next) }
+            next += 1;
+            joined.push_str(part);
+        }
+        entries.extend(before.into_iter().map(Entry::Image));
+        if let Some(p) = paragraph_html(&joined) {
+            flat.push_str(&p);
+            entries.push(Entry::Paragraph);
+        }
+        entries.extend(after.into_iter().map(Entry::Image));
+    }
+    // One parse decodes the character references of all paragraphs.
     let doc = Document::fragment(flat.as_str());
-    doc.select("p")
-        .iter()
-        .map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|t| !t.is_empty())
+    let mut texts = doc.select("p").iter().map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().into_iter();
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Paragraph => texts.next().filter(|t| !t.is_empty()).map(Piece::Text),
+            Entry::Image(k) => images.get_mut(k).map(|tag| Piece::Image(std::mem::take(tag))),
+        })
         .collect()
 }
 
@@ -870,6 +948,54 @@ fn bounded(html: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `paragraphs` in 0.10 and 0.11. Stored translations number their paragraphs this way.
+    fn paragraphs_0_11(html: &str) -> Vec<String> {
+        let html = bounded(html);
+        let flat = flatten(&html);
+        let doc = Document::fragment(flat.as_str());
+        doc.select("p")
+            .iter()
+            .map(|p| p.text().split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn pieces_keep_images_in_place() {
+        let image = |name: &str| Piece::Image(format!(r#"<img src="https://img.example/{name}.jpg">"#));
+        let text = |t: &str| Piece::Text(t.to_string());
+        let html = r#"<h1>标题</h1><p>第一段&amp;文字。</p><figure><img src="https://img.example/a.jpg"><figcaption>图片说明</figcaption></figure>
+            <p>第二段<img src="https://img.example/b.jpg">继续。</p><ul><li>一</li><li>二</li></ul>
+            <p><a href="https://example.com/"><img src="https://img.example/c.jpg"></a>链接下的说明</p>"#;
+        assert_eq!(
+            pieces(html),
+            [text("标题"), text("第一段&文字。"), image("a"), text("图片说明"), text("第二段继续。"), image("b"), text("一"), text("二"), image("c"), text("链接下的说明")]
+        );
+        // Only real images: not in a comment, a script, `<noscript>` or the text.
+        let hidden = r#"<!-- <img src="https://img.example/x.jpg"> --><script>document.write("<img src=x>")</script>
+            <noscript><img src="https://img.example/y.jpg"></noscript><p>文字 &lt;img&gt; 不是图片</p>"#;
+        assert_eq!(pieces(hidden), [text("文字 <img> 不是图片")]);
+        // HTML that nests too deep keeps only its text.
+        let deep = format!("{}深层文字<img src=\"https://img.example/d.jpg\">", "<div>".repeat(300));
+        assert_eq!(pieces(&deep), [text("深层文字")]);
+    }
+
+    #[test]
+    fn paragraphs_are_numbered_as_before() {
+        let samples = [
+            r#"<h1>标题</h1><p>第一段&amp;文字。</p><figure><img src="https://img.example/a.jpg"><figcaption>说明</figcaption></figure><p>第二段<img src="x.png">继续。</p>"#,
+            "<p>一段\n\n两行</p><p>&nbsp;</p><p>   </p><br>尾巴",
+            "<div>甲<span>乙</span><div>丙</div>丁</div><table><tr><td>格一</td><td>格二</td></tr></table>",
+            "<p>a < b and c > d &lt;p&gt; &copy; &#x4E2D;</p><pre>code\n  block</pre><style>p{}</style><textarea><p>no</p></textarea>",
+            "<blockquote><p>引用</p></blockquote><dl><dt>词</dt><dd>义</dd></dl><details><summary>摘要</summary>内容</details>",
+            "",
+        ];
+        let deep = format!("{}深<img src=\"a.png\">层", "<div>".repeat(300));
+        for html in samples.iter().copied().chain([deep.as_str()]) {
+            assert_eq!(paragraphs(html), paragraphs_0_11(html), "{html}");
+        }
+    }
 
     #[test]
     fn removes_scripts_and_handlers() {

@@ -5,6 +5,29 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+### Added
+- Adding a feed finds it from more kinds of addresses. Paste an article, a YouTube video
+  or playlist, a subreddit or Reddit user, a GitHub project or user, a Medium writer,
+  publication or tag, or an Apple Podcasts or Overcast page. When a page names no feed,
+  Tidings looks at links in the page that lead to feeds, then at the site's home page,
+  then at common feed addresses, and loads each guess to check it before it offers it.
+  It also tries the common addresses when the page itself is refused, as behind a bot
+  check.
+
+### Fixed
+- A translation shows the article's images between its paragraphs, where they are in
+  the original, instead of leaving them out. Translations made by 0.10 and 0.11 keep
+  their paragraphs and get the images too.
+- Translations and briefs with a model that thinks before it answers (Qwen3, Qwen3.5)
+  on llama.cpp or another OpenAI-style server: Tidings now asks the model to answer at
+  once (`chat_template_kwargs`), as it already did with Ollama. Before, the thinking
+  could use up a passage's token limit and leave it blank. A passage that still gets no
+  answer now stops the translation with an error that says what to change.
+- Adding a YouTube video page no longer offers its oEmbed link as a feed: a feed link's
+  type must now match exactly.
+- A feed found on a page no longer takes the page's title (on an article, the
+  article's title) or a title such as "RSS"; it keeps the title the feed gives itself.
+
 ## [0.11.0] - 2026-11-21
 
 ### Added

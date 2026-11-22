@@ -675,6 +675,32 @@ async fn test_server() -> u16 {
     port
 }
 
+/// Serves the given paths (status, content type, body); everything else is a 404.
+async fn site_server(routes: Vec<(&'static str, (u16, &'static str, String))>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let routes = std::sync::Arc::new(routes.into_iter().collect::<std::collections::HashMap<_, _>>());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let routes = routes.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (status, kind, body) = routes.get(path.as_str()).cloned().unwrap_or((404, "text/plain", "not found".into()));
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
 /// Serves a `size`-byte file (byte `i` is `i % 251`) with byte ranges, sending at most
 /// `cap` bytes per request, like some real hosts. Returns the port and a request count.
 async fn range_server(size: usize, cap: usize) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -1435,7 +1461,8 @@ async fn briefs_with_a_local_model() {
 
 /// A fake model server for translations: it answers each passage with
 /// "EN<passage>" and records what it got. With `no_think`, it refuses the "think"
-/// option, like an older Ollama.
+/// option, like an older Ollama, or `chat_template_kwargs` like a strict OpenAI-style
+/// server. A passage with "思考" gets only thinking, and no answer.
 async fn translation_server(openai: bool, no_think: bool) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -1475,9 +1502,11 @@ async fn translation_server(openai: bool, no_think: bool) -> (u16, std::sync::Ar
                 log.lock().unwrap().push(body.clone());
                 let (status, answer) = if no_think && body.get("think").is_some() {
                     ("400 Bad Request", serde_json::json!({"error": "\"qwen2.5\" does not support thinking"}))
+                } else if no_think && body.get("chat_template_kwargs").is_some() {
+                    ("400 Bad Request", serde_json::json!({"error": {"message": "Unrecognized request argument supplied: chat_template_kwargs"}}))
                 } else {
                     let passage = body["messages"][1]["content"].as_str().unwrap_or("").to_string();
-                    let text = format!("<think>hmm</think>EN{passage}");
+                    let text = if passage.contains("思考") { "<think>Let me think about it at length".to_string() } else { format!("<think>hmm</think>EN{passage}") };
                     if openai {
                         ("200 OK", serde_json::json!({"choices": [{"message": {"role": "assistant", "content": text}}]}))
                     } else {
@@ -1517,7 +1546,7 @@ async fn articles_are_translated_by_the_local_model() {
         "Rust 1.90 release notes".to_string(),
         "这是一个很长的句子。".repeat(150),
     ];
-    for (openai, no_think) in [(false, false), (false, true), (true, false)] {
+    for (openai, no_think) in [(false, false), (false, true), (true, false), (true, true)] {
         let (port, seen) = translation_server(openai, no_think).await;
         let settings = settings(openai, port);
         let net = crate::net::Net::new(&settings).unwrap();
@@ -1537,18 +1566,29 @@ async fn articles_are_translated_by_the_local_model() {
         assert_eq!(parts.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [None, Some(0), Some(1), Some(2)]);
 
         let seen = seen.lock().unwrap().clone();
-        let sent: Vec<&serde_json::Value> = seen.iter().filter(|b| !(no_think && b.get("think").is_some())).collect();
+        let refused = |b: &serde_json::Value| no_think && (b.get("think").is_some() || b.get("chat_template_kwargs").is_some());
+        let sent: Vec<&serde_json::Value> = seen.iter().filter(|b| !refused(b)).collect();
         assert!(sent.iter().all(|b| b["model"] == "qwen3:4b" && b["messages"][0]["role"] == "system"));
         assert!(!sent.iter().any(|b| b["messages"][1]["content"].as_str().unwrap().contains("Rust")));
         assert!(sent.iter().all(|b| b["messages"][1]["content"].as_str().unwrap().chars().count() <= 1_000));
         if !openai && !no_think {
             assert!(sent.iter().all(|b| b["think"] == false && b["options"]["num_predict"].as_u64().is_some()));
         }
-        if no_think {
-            // Refused with "think", asked again without it.
-            assert!(seen.iter().any(|b| b.get("think").is_some()));
-            assert!(sent.iter().all(|b| b.get("think").is_none()));
+        if openai && !no_think {
+            // Thinking models are asked to answer at once.
+            assert!(sent.iter().all(|b| b["chat_template_kwargs"]["enable_thinking"] == false && b["max_tokens"].as_u64().is_some()));
         }
+        if no_think {
+            // Refused with "think" or the template setting, asked again without it.
+            let option = if openai { "chat_template_kwargs" } else { "think" };
+            assert!(seen.iter().any(|b| b.get(option).is_some()));
+            assert!(sent.iter().all(|b| b.get(option).is_none()));
+        }
+
+        // A model that only thinks and gives no answer: an error that says what to do,
+        // not a blank paragraph.
+        let err = translate::translate(&net, &settings, "标题", &["我在思考。".to_string()], |_, _| {}).await.unwrap_err();
+        assert_eq!(err.to_string(), translate::NO_ANSWER);
     }
 
     // A new translation (or the Stop button) stops the one that runs, at its next passage.
@@ -1933,6 +1973,72 @@ async fn local_addresses_need_consent() {
     let lan = Url::parse(&typed).unwrap();
     assert!(net.get(&lan, Some(&other)).await.is_err());
     assert!(net.get(&lan, None).await.is_err());
+}
+
+/// Discovery finds a feed that the page links to, that the home page names, or that
+/// is at a common path, and loads each guess before it offers it.
+#[tokio::test]
+async fn discovery_checks_its_guesses() {
+    use crate::discover::{discover, Candidate};
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let html = |body: &str| (200, "text/html; charset=utf-8", format!("<!doctype html><title>Page</title>{body}"));
+    let feed = |title: &str| {
+        (200, "application/rss+xml", format!(r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title><link>https://site.example/</link><description>d</description><item><title>a</title><link>https://site.example/a</link></item></channel></rss>"#))
+    };
+    let found = |list: Vec<Candidate>| {
+        list.into_iter().map(|c| (Url::parse(&c.url).unwrap().path().to_string(), c.title)).collect::<Vec<_>>()
+    };
+    let pair = |path: &str, title: &str| (path.to_string(), title.to_string());
+
+    let port = site_server(vec![
+        ("/2024/post", html(r#"<a href="/broken.xml">Feed</a><a href="/notes/rss.xml">RSS</a>"#)),
+        ("/notes/rss.xml", feed("Notes")),
+        ("/plain", html("<p>No feed here</p>")),
+        ("/", html(r#"<link rel="alternate" type="application/rss+xml" title="Home" href="/home.xml">"#)),
+    ])
+    .await;
+    let site = format!("http://127.0.0.1:{port}");
+    // A link in the page. The one that is not a feed is left out.
+    assert_eq!(found(discover(&net, &format!("{site}/2024/post"), true).await.unwrap()), [pair("/notes/rss.xml", "Notes")]);
+    // Nothing in the page: the home page names the feed.
+    assert_eq!(found(discover(&net, &format!("{site}/plain"), true).await.unwrap()), [pair("/home.xml", "Home")]);
+
+    // Nothing named or linked: a common path.
+    let port = site_server(vec![("/", html("")), ("/article", html("")), ("/index.xml", feed("Index"))]).await;
+    assert_eq!(found(discover(&net, &format!("http://127.0.0.1:{port}/article"), true).await.unwrap()), [pair("/index.xml", "Index")]);
+
+    // A page behind a bot check, with the feed outside it.
+    let port = site_server(vec![("/page", (403, "text/html", "Checking your browser".into())), ("/feed", feed("Blog"))]).await;
+    assert_eq!(found(discover(&net, &format!("http://127.0.0.1:{port}/page"), true).await.unwrap()), [pair("/feed", "Blog")]);
+
+    // No feed anywhere: the page's own error, or none found.
+    let port = site_server(vec![("/page", (403, "text/html", "No".into())), ("/other", html(""))]).await;
+    let err = discover(&net, &format!("http://127.0.0.1:{port}/page"), true).await.unwrap_err();
+    assert_eq!(err.to_string(), "The address returned HTTP 403");
+    let err = discover(&net, &format!("http://127.0.0.1:{port}/other"), true).await.unwrap_err();
+    assert_eq!(err.to_string(), "No feed was found at this address");
+}
+
+/// Discovery on real sites. Run with: cargo test -- --ignored live_discovery
+#[tokio::test]
+#[ignore]
+async fn live_discovery() {
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    for (typed, expect) in [
+        // A video: its channel's feed.
+        ("https://www.youtube.com/watch?v=jNQXAC9IVRw", "channel_id=UC4QobU6STFB0P71PMvOGN5A"),
+        // A handle: the page names the feed.
+        ("https://www.youtube.com/@YouTube", "channel_id=UCBR8-60-B28hp2BmDPdntcQ"),
+        ("https://github.com/rust-lang/rust", "/rust-lang/rust/releases.atom"),
+        ("https://medium.com/@ev", "medium.com/feed/@ev"),
+        ("https://podcasts.apple.com/us/podcast/the-daily/id1200361736", "feeds.simplecast.com"),
+        // An article: the site's own feed first.
+        ("https://blog.rust-lang.org/2024/05/02/Rust-1.78.0/", "blog.rust-lang.org/feed.xml"),
+    ] {
+        let found = crate::discover::discover(&net, typed, false).await.unwrap_or_else(|e| panic!("{typed}: {e}"));
+        println!("{typed}: {:?}", found.iter().map(|c| (&c.url, &c.title)).collect::<Vec<_>>());
+        assert!(found[0].url.contains(expect), "{typed}: {found:?}");
+    }
 }
 
 /// H-2: 0.9.1 marked feeds as local by DNS. The upgrade keeps that only for

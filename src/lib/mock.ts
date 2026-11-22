@@ -1,6 +1,6 @@
 // Fake backend for `npm run dev` in a normal browser (UI work only).
 // It is loaded only in development and never ships in release builds.
-import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Rule, SavedSearch, Scope, Settings, Translation } from './types';
+import type { ArticleDetail, ArticleItem, Brief, Feed, Folder, ListQuery, Rule, SavedSearch, Scope, Settings, Translation, TranslationBlock } from './types';
 
 type Handler = (p: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -141,8 +141,20 @@ const ZH_EN = [
 articles.unshift({
   id: 65, feedId: 1, title: '开源模型改变人工智能的发展', url: 'https://example.com/1/zh-article', author: '李明',
   excerpt: ZH[0], published: now - 900, isRead: false, isStarred: false, isNew: true, hasEnclosure: false, thumb: null,
-  html: ZH.map((p) => `<p>${p}</p>`).join(''), zh: true,
+  // Images between the paragraphs, to check that a translation keeps them in place.
+  html: `<p>${ZH[0]}</p><figure><img src="${svgImage(200, 1200, 500)}" alt="模型"></figure><p>${ZH[1]}</p><p><img src="${svgImage(20, 1200, 400)}" alt="设备">${ZH[2]}</p>`,
+  zh: true,
 });
+
+/** translate::layout, simplified: paragraphs in order and the images between them. */
+function mockLayout(html: string): TranslationBlock[] {
+  let index = 0;
+  return [...html.matchAll(/<img[^>]*>|<p>(?:<img[^>]*>)?[^<]+<\/p>/g)].flatMap((m): TranslationBlock[] => {
+    const image = m[0].match(/<img[^>]*>/)?.[0];
+    const text = m[0].startsWith('<p>') ? [{ kind: 'text', index: index++ } as const] : [];
+    return image ? [{ kind: 'image', html: image }, ...text] : text;
+  });
+}
 
 let settings: Settings = {
   refreshInterval: 60, refreshOnStartup: true, retentionMode: 'count', retentionCount: 1000, retentionDays: 90,
@@ -204,6 +216,7 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
     chinese: !!a.zh,
+    translationLayout: a.zh ? mockLayout(html) : [],
   };
 }
 
@@ -332,6 +345,14 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         if (local && !args.allowLocal) throw `local-network:${host}`;
         // A public page that names a feed on the local network.
         if (host === 'evil.example') return [{ url: 'http://192.168.1.1/feed', title: 'Router', kind: 'RSS', local: true }];
+        // discover::site_feeds: a GitHub project has two feeds.
+        const repo = String(args.url).match(/github\.com\/([\w-]+)\/([\w.-]+)/);
+        if (repo) {
+          return [
+            { url: `https://github.com/${repo[1]}/${repo[2]}/releases.atom`, title: `Release notes from ${repo[2]}`, kind: 'Atom', local: false },
+            { url: `https://github.com/${repo[1]}/${repo[2]}/commits.atom`, title: `Recent Commits to ${repo[2]}:main`, kind: 'Atom', local: false },
+          ];
+        }
         return [{ url: `${local ? 'http' : 'https'}://${String(args.url).replace(/^https?:\/\//, '')}/feed.xml`, title: 'Example Blog', kind: 'RSS', local }];
       }
     case 'add_feed': {

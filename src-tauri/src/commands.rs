@@ -48,14 +48,19 @@ pub struct ArticleDetail {
     pub enclosure_type: Option<String>,
     /// The article is mostly Chinese: the UI offers to translate it.
     pub chinese: bool,
+    /// For a Chinese article in the article view: where its translated paragraphs
+    /// and its images go (`translate::layout`). Empty otherwise.
+    pub translation_layout: Vec<translate::Block>,
 }
 
-fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail {
+/// `layout`: fill `translation_layout` when the article is Chinese.
+fn detail(row: ArticleRow, load_images: bool, full_text: bool, layout: bool) -> ArticleDetail {
     let use_full = full_text && row.full_content.is_some();
     let source = if use_full { row.full_content.as_deref() } else { row.content.as_deref() };
     let rendered = sanitize::render(source.unwrap_or(""), load_images);
     let text = sanitize::plain_text(&rendered.html);
     let chinese = translate::is_chinese(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
+    let translation_layout = if chinese && layout { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
     ArticleDetail {
         id: row.id,
         feed_id: row.feed_id,
@@ -73,6 +78,7 @@ fn detail(row: ArticleRow, load_images: bool, full_text: bool) -> ArticleDetail 
         enclosure_url: row.enclosure_url,
         enclosure_type: row.enclosure_type,
         chinese,
+        translation_layout,
     }
 }
 
@@ -117,7 +123,7 @@ pub fn list_articles_full(
     let conn = state.db();
     let ids = db::list_article_ids(&conn, &query)?;
     ids.into_iter()
-        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false)))
+        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, false)))
         .collect()
 }
 
@@ -130,7 +136,7 @@ pub fn get_article(
 ) -> Result<ArticleDetail> {
     let load = load_images.unwrap_or(state.settings().load_images);
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load, full_text.unwrap_or(false)))
+    Ok(detail(row, load, full_text.unwrap_or(false), true))
 }
 
 /// Downloads the linked web page and extracts the full article (reader mode).
@@ -154,7 +160,7 @@ pub async fn fetch_full_text(
         db::save_full_content(&*state.db_since(generation)?, id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load_images.unwrap_or(settings.load_images), true))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, true))
 }
 
 /// Reader pages kept in memory hold at most this much HTML together.

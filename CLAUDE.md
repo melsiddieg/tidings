@@ -13,6 +13,7 @@ cargo test --manifest-path src-tauri/Cargo.toml                 # offline tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored    # + live network test
 TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored  # plays a clip in mpv/IINA
 cargo test --manifest-path src-tauri/Cargo.toml live_listen -- --ignored   # yt-dlp finds a clip's audio ("Listen")
+cargo test --manifest-path src-tauri/Cargo.toml live_discovery -- --ignored   # finds feeds on YouTube, GitHub, Medium, Apple Podcasts
 TIDINGS_LIVE_DB=<path to tidings.db> cargo test --manifest-path src-tauri/Cargo.toml live_backup -- --ignored  # backs up and restores a real database (read-only)
 npm run tauri dev                        # run the app (Vite on port 1420)
 npm run tauri build                      # release packages for the host OS
@@ -32,7 +33,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `translate.rs` (Chinese-to-English
   translation by the same model), `rules.rs` (filter rules on new articles), `updates.rs` (security check: versions of Tidings,
   yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
-  checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs`, `scheduler.rs`, `menu.rs` (macOS menu),
+  checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs` (finds the feed of a page: `<link>` tags,
+  links that look like feeds, the home page, common paths, and `site_feeds` for YouTube, Reddit,
+  GitHub, Medium, Apple Podcasts and Overcast), `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
   `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
   files through the instance API, and Sepia Search), `backup.rs` (backups with `VACUUM
@@ -71,6 +74,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   DNS must never decide trust: a public-looking name that resolves to a private address is
   refused unless the user allowed it. `local` is set only by the user's consent (`add_feed`
   with `allow_local`, or the toggle in the feed's properties), never from a lookup.
+- Feed discovery (`discover.rs`) loads and parses every guess (links in a page, known
+  sites, common paths) before it offers it, and stops each step's guesses after
+  `GUESS_TIME`. It contacts the typed site, addresses its pages link to, and the same
+  service's feed address for a known site. The one other host is Apple's lookup
+  service for Apple Podcasts and Overcast addresses. Do not add lookups that send the
+  address to a third party (feed search services and the like).
 - Start image, audio and video requests with `Net::public(url)`. It refuses private and
   local addresses where the request starts, after any rewriting (`media::strip_trackers`,
   cached redirect targets, addresses from yt-dlp or PeerTube). Do not check only in the
@@ -129,8 +138,12 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   numbers, drop citations of articles that were not sent, and show its text as plain text.
 - Translations (`translate.rs`) use the same server through `brief::post`, only when the
   user clicks Translate. Send the article's text as plain text, one passage at a time, and
-  show the answer as plain text (Svelte text, never `{@html}`). Keep the cap on the answer
-  length and the stop between passages. Stored translations go with their article: the
+  show the answer as plain text (Svelte text, never `{@html}`). The article's images go
+  between the paragraphs through `translate::layout`, which takes them from the stored
+  HTML and passes each through `sanitize::render`; never let the model's text into it.
+  Keep `sanitize::pieces` splitting text exactly like `paragraphs` did in 0.11
+  (`paragraphs_are_numbered_as_before`): stored translations are matched by paragraph
+  index. Keep the cap on the answer length and the stop between passages. Stored translations go with their article: the
   `translations_follow_article` trigger removes them when it is deleted or its text changes.
 - Restoring a backup (`backup.rs`) treats the file as untrusted. Open it only through
   `open_backup` (read-only, `immutable`, defensive mode, `trusted_schema` off, a value

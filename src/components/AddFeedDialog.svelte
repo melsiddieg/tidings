@@ -119,12 +119,15 @@
           autocapitalize="off"
         />
       </div>
-      <p class="hint">Paste a website and Tidings will find its feed. RSS, Atom and JSON Feed are supported.</p>
+      <p class="hint">
+        Paste any page: a website, an article, a YouTube channel or video, a subreddit, a GitHub project, a Medium
+        writer or an Apple Podcasts page. Tidings finds its feed. RSS, Atom and JSON Feed are supported.
+      </p>
     </div>
 
     {#if candidates.length > 0}
       <div class="field">
-        <span class="field-label">{candidates.length === 1 ? 'This site names one feed' : `This site has ${candidates.length} feeds`}</span>
+        <span class="field-label">{candidates.length === 1 ? 'Tidings found one feed' : `Tidings found ${candidates.length} feeds`}</span>
         <div class="candidates" role="radiogroup">
           {#each candidates as c, i (c.url)}
             <label class="candidate" class:on={chosen === i}>

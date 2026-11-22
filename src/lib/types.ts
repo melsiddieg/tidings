@@ -101,7 +101,12 @@ export interface ArticleDetail {
   enclosureType: string | null;
   /** Mostly Chinese: the article view offers to translate it. */
   chinese: boolean;
+  /** Where a translation's paragraphs and the article's images go (Chinese articles only). */
+  translationLayout: TranslationBlock[];
 }
+
+/** A paragraph of a translation by its index, or one of the article's images as cleaned HTML. */
+export type TranslationBlock = { kind: 'text'; index: number } | { kind: 'image'; html: string };
 
 /** A feed's newest article and article count, for Feed health. */
 /** What a backup holds, shown before it is restored (backup.rs). */

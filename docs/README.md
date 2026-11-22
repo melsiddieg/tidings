@@ -63,7 +63,8 @@ Source: <https://github.com/melsiddieg/tidings>
   choose a model in Settings → Local AI.
 - **Translate Chinese articles** into English with the same local model: a Translate
   button (or `T`) on articles that are mostly Chinese. The translation appears paragraph
-  by paragraph, is kept with the article, and goes when the article goes. Models trained
+  by paragraph, with the article's images in their places, is kept with the article,
+  and goes when the article goes. Models trained
   on much Chinese text, such as Qwen, translate best; Settings → Local AI can name a
   model for translations only.
 - **Filter rules** (Settings → Rules): when the title, the text, the author or the link
@@ -95,7 +96,12 @@ Source: <https://github.com/melsiddieg/tidings>
   once. Settings → Archive & data → **Remove all** starts over.
 - Collapse or expand all folders with one click; Option/Alt-click a folder's arrow to
   open or close everything inside it. Folders from an OPML import start closed.
-- Add a feed by pasting a site address. Tidings finds the feed (autodiscovery).
+- Add a feed by pasting any page address. Tidings finds the feed: the feeds a page
+  names, links in the page that lead to feeds, the feeds of the site's home page, and
+  common feed addresses such as `/feed`. It also knows sites that do not name their
+  feeds: a YouTube channel, playlist or video gives the channel's or playlist's feed;
+  a subreddit or Reddit user, a GitHub project (releases and commits) or user, a Medium
+  writer, publication or tag, and an Apple Podcasts or Overcast page give theirs.
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
 - **Backup and restore** (Settings → Archive & data, or the `…` menu): one file with
   your feeds, folders, articles with their read and starred state, settings, rules,
@@ -119,11 +125,11 @@ Source: <https://github.com/melsiddieg/tidings>
 
 | Measure | What it does |
 |---|---|
-| No telemetry | No analytics, crash reporting, automatic update checks or accounts. Tidings contacts the feeds you add; once per feed, the feed's website for its icon; the images of the articles in the list and of the article you open (unless images are off); and the pages and media you open. The security check in Settings reads versions on this computer; it asks GitHub and webkitgtk.org for newer versions only when you click "Check now". |
+| No telemetry | No analytics, crash reporting, automatic update checks or accounts. Tidings contacts the feeds you add, and the pages it reads to find a feed when you add one (for an Apple Podcasts or Overcast page, also Apple's directory at itunes.apple.com, which gives the podcast's feed address); once per feed, the feed's website for its icon; the images of the articles in the list and of the article you open (unless images are off); and the pages and media you open. The security check in Settings reads versions on this computer; it asks GitHub and webkitgtk.org for newer versions only when you click "Check now". |
 | HTML sanitizing in Rust | Feed HTML goes through [ammonia](https://github.com/rust-ammonia/ammonia) twice (when stored and when shown). Scripts, styles, event handlers, forms and iframes are removed. Embedded videos become plain links. HTML whose elements nest more than 200 deep is shown as plain text, because nesting that deep makes every HTML parser very slow; Tidings finds it in one pass over the tags before anything is parsed. HTML longer than 2 MB is cut. Titles are cut at 500 characters. |
 | Strict Content Security Policy | The web view may only run the app's own scripts and use the app's own stylesheet. It cannot load remote scripts, styles, fonts, frames or media, and a `<style>` element added at run time is refused. Only `style` attributes are allowed inline, which the UI needs in two places. This needs WebKit from Safari 15.4 or WebKitGTK 2.36 (macOS 12.3, Ubuntu 22.04, Debian 12 and newer). |
 | Image proxy | Remote images load through a built-in `tidings://` handler written in Rust. Image hosts never receive cookies or a referrer, the proxy setting applies to them, and they cannot be used to probe your local network (see below). The image host still sees your IP address (or your proxy's) and the time of the request: thumbnails in the article list are fetched when the list shows them, before you open the article. Images can be turned off; then they load only when you click "Load images". |
-| AI briefs and translations | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. A translation sends the text of the one article you translate, only when you click Translate, and shows the model's answer as plain text, so an article that tries to steer the model can at worst produce a wrong translation. |
+| AI briefs and translations | Only with a model server on this computer or your local network: Tidings refuses public addresses, and with a proxy set it accepts only IP addresses, so no name is looked up outside the proxy. The model gets the titles, feed names, dates and short excerpts of the articles being briefed, nothing else. Article text cannot steer the brief into links or markup: the model answers in JSON that cites articles by number, Tidings keeps only citations of articles it sent, and the brief is shown as plain text. A translation sends the text of the one article you translate, only when you click Translate, and shows the model's answer as plain text, so an article that tries to steer the model can at worst produce a wrong translation. The article's images are shown between the translated paragraphs; they come from the stored article through the same cleaning and image proxy as the original, never from the model. |
 | Image re-encoding | Every image is decoded in Rust, with memory limits, and written out again as a new JPEG, PNG or GIF before the web view sees it. WebKit's image libraries (libwebp, libjpeg-turbo, libpng...) never parse a file from the internet, so a crafted image cannot reach a bug in them. Metadata is dropped and large images are scaled down. SVG is drawn to a PNG in Rust as well (with resvg), so WebKit's SVG code never sees a file from the internet; images that an SVG refers to are not loaded. An animated GIF keeps its frames only up to 2400 pixels on a side, and up to a limit on frames times picture size: the web view allocates the whole picture for each frame, however small the frame is. A larger one is shown as a still picture, scaled down. SVG is drawn in a separate helper process with a time limit and a memory limit: a small crafted SVG can crash the drawing library or keep it busy for minutes, and then only the helper ends and that image is not shown. AVIF is not shown. |
 | Tracking cleanup | `utm_*`, `fbclid`, `gclid` and similar parameters are removed from links. Known tracking pixels are dropped, and so are images marked as 0 or 1 pixel wide or high. This cannot catch every counting pixel: with images on, a feed can still tell that you loaded an article. |
 | Podcast audio | Streamed by Rust in byte ranges with tracking redirects removed. On macOS through `tidings://`; on Linux and the BSDs through a server that listens only on 127.0.0.1 and only answers URLs carrying a random secret token, because WebKitGTK's media engine (GStreamer) cannot read custom URL schemes. Only single audio and video files are played. A streaming playlist (HLS, DASH and similar) is refused, whatever its address or type says, also when it comes after ID3 or APE tags at the start of the file (GStreamer removes such tags before it looks at the rest): a playlist is a list of addresses that the media engine would fetch by itself, without the proxy setting and without the local network rule. |
@@ -405,7 +411,7 @@ src-tauri/src/
   commands.rs            Commands the UI can call
   db.rs                  SQLite schema and queries
   feeds.rs               Fetching, parsing and storing feeds; favicons
-  discover.rs            Feed autodiscovery from a web page
+  discover.rs            Finds the feed of a page: links, known sites, common paths
   opml.rs                OPML import and export
   backup.rs              Backups of the whole database, and restoring them
   export.rs              Starred articles as one HTML or Markdown file

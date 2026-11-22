@@ -1,9 +1,15 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { store } from '../lib/store.svelte';
   import { copyText, isVideoLink } from '../lib/util';
 
   // `html` is already sanitized by the Rust backend; the CSP blocks scripts as a second layer.
-  let { html, dir = 'auto' }: { html: string; dir?: 'ltr' | 'rtl' | 'auto' } = $props();
+  // `children` takes its place for a translation, which is shown as text with the article's images.
+  let {
+    html = '',
+    dir = 'auto',
+    children,
+  }: { html?: string; dir?: 'ltr' | 'rtl' | 'auto'; children?: Snippet } = $props();
 
   let el: HTMLDivElement | undefined = $state();
 
@@ -60,7 +66,7 @@
 </script>
 
 <div class="prose" {dir} bind:this={el} {onclick} {onauxclick} {oncontextmenu} role="presentation">
-  {@html html}
+  {#if children}{@render children()}{:else}{@html html}{/if}
 </div>
 
 <style>

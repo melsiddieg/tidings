@@ -7,7 +7,7 @@
   import { api, errorText, on } from '../lib/api';
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
-  import type { ArticleDetail, TranslationPart } from '../lib/types';
+  import type { ArticleDetail, TranslationBlock, TranslationPart } from '../lib/types';
   import { copyText, enclosureLabel, hostOf, isVideoFile, longTime, videoSource } from '../lib/util';
 
   let {
@@ -26,6 +26,24 @@
   // local model works (`translating`).
   let shown = $state<{ title: string | null; paragraphs: string[]; total: number; model: string | null; cut: boolean } | null>(null);
   let translating = $state(false);
+  // The translation in the article's layout, as far as it is done: each paragraph once
+  // the model has translated it, and each image once the text before it is there.
+  const translatedBlocks = $derived.by((): TranslationBlock[] => {
+    if (!shown || !detail) return [];
+    const paragraphs = shown.paragraphs;
+    const layout = detail.translationLayout.length
+      ? detail.translationLayout
+      : paragraphs.map((_, index): TranslationBlock => ({ kind: 'text', index }));
+    const out: TranslationBlock[] = [];
+    let textBefore = true;
+    for (const block of layout) {
+      if (block.kind === 'text') {
+        textBefore = paragraphs[block.index] != null;
+        if (textBefore) out.push(block);
+      } else if (textBefore) out.push(block);
+    }
+    return out;
+  });
   let scroller: HTMLDivElement | undefined = $state();
   let token = 0;
 
@@ -91,6 +109,8 @@
     const id = detail.id;
     if (detail.showingFullText && !force) {
       detail = await api.article(id, loadImages, false);
+      // The translation was of the full text: translate the feed's text instead.
+      if (shown) translate(false, true);
       return;
     }
     if (!detail.url) return store.toast('This article has no link to load');
@@ -370,10 +390,17 @@
               <button class="link" onclick={() => translate(true)}>Translate again</button>
             {/if}
           </div>
-          <!-- Plain text from the model: Svelte escapes it, so it can never be markup. -->
-          <div class="prose translated" dir="auto">
-            {#each shown.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{/each}
-          </div>
+          <ArticleBody>
+            {#each translatedBlocks as block, i (i)}
+              {#if block.kind === 'image'}
+                <!-- One of the article's images, cleaned and proxied by sanitize::render; not from the model. -->
+                {@html block.html}
+              {:else}
+                <!-- Plain text from the model: Svelte escapes it, so it can never be markup. -->
+                <p>{shown.paragraphs[block.index]}</p>
+              {/if}
+            {/each}
+          </ArticleBody>
           {#if shown.cut}<p class="no-content">The rest of this article is too long to translate.</p>{/if}
         {:else}
           <ArticleBody html={detail.html} />
