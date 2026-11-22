@@ -5,6 +5,8 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-22
+
 ### Added
 - Adding a feed finds it from more kinds of addresses. Paste an article, a YouTube video
   or playlist, a subreddit or Reddit user, a GitHub project or user, a Medium writer,
@@ -27,6 +29,10 @@ All notable changes to Tidings are listed here. Versions follow
   type must now match exactly.
 - A feed found on a page no longer takes the page's title (on an article, the
   article's title) or a title such as "RSS"; it keeps the title the feed gives itself.
+
+### Security
+- url 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:`
+  URLs). Tidings does not call `Url::origin()`, and neither do Tauri, wry or reqwest.
 
 ## [0.11.0] - 2026-11-21
 
@@ -489,7 +495,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/melsiddieg/tidings/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/melsiddieg/tidings/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/melsiddieg/tidings/compare/v0.9.6...v0.10.0
 [0.9.6]: https://github.com/melsiddieg/tidings/compare/v0.9.5...v0.9.6
