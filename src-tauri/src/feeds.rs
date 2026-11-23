@@ -238,11 +238,18 @@ pub struct ParsedFeed {
 }
 
 pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
-    feed_rs::parser::Builder::new()
-        .base_uri(Some(url.as_str()))
-        .build()
-        .parse(bytes)
-        .map_err(|e| {
+    use feed_rs::parser::{ParseErrorKind, ParseFeedError};
+    let parse = |bytes: &[u8]| feed_rs::parser::Builder::new().base_uri(Some(url.as_str())).build().parse(bytes);
+    let mut parsed = parse(bytes);
+    // feed-rs refuses a whole feed when one text element is empty, such as an empty
+    // <media:description> on a YouTube video or an empty Atom <summary>. Try again
+    // without the empty ones. Feeds that parse are never changed.
+    if matches!(parsed, Err(ParseFeedError::ParseError(ParseErrorKind::MissingContent { .. }))) {
+        if let Some(cleaned) = without_empty_text(bytes) {
+            parsed = parse(&cleaned);
+        }
+    }
+    parsed.map_err(|e| {
             let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
             if head.contains("<html") || head.contains("<!doctype html") {
                 Error::msg("This address is a web page, not a feed")
@@ -250,6 +257,57 @@ pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
                 Error::msg(format!("Could not read the feed: {e}"))
             }
         })
+}
+
+/// Text elements that feed-rs refuses when they are empty: Atom's title, subtitle,
+/// summary, rights and content, and Media RSS title and description.
+const TEXT_ELEMENTS: &[&str] = &["title", "subtitle", "summary", "rights", "content", "description"];
+
+/// The feed without text elements that hold nothing but spaces, or `None` when it
+/// has none or is not UTF-8 XML. Only elements whose attributes are at most `type`,
+/// `xml:lang` and `xml:base` go: `<media:content url=...>` and `<content src=...>`
+/// stay. They are cut out of the original bytes, so nothing else changes.
+fn without_empty_text(bytes: &[u8]) -> Option<Vec<u8>> {
+    use quick_xml::events::{BytesStart, Event};
+    let text = std::str::from_utf8(bytes).ok()?;
+    let removable = |e: &BytesStart<'_>| {
+        TEXT_ELEMENTS.contains(&e.local_name().as_ref())
+            && e.attributes().all(|a| a.is_ok_and(|a| matches!(a.key.as_ref(), "type" | "xml:lang" | "xml:base")))
+    };
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    // An element that may turn out empty: where it starts and its name.
+    let mut open: Option<(usize, String)> = None;
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader.read_event().ok()?;
+        let after = reader.buffer_position() as usize;
+        match event {
+            Event::Eof => break,
+            Event::Empty(e) if removable(&e) => cuts.push((before, after)),
+            Event::Start(e) if removable(&e) => open = Some((before, e.name().as_ref().to_string())),
+            Event::Text(t) if open.is_some() && t.as_ref().chars().all(|c| c.is_ascii_whitespace()) => {}
+            Event::End(e) => {
+                if let Some((start, name)) = open.take() {
+                    if name == e.name().as_ref() {
+                        cuts.push((start, after));
+                    }
+                }
+            }
+            _ => open = None,
+        }
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    for (start, end) in cuts {
+        out.extend_from_slice(&bytes[at..start]);
+        at = end;
+    }
+    out.extend_from_slice(&bytes[at..]);
+    Some(out)
 }
 
 pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<ParsedFeed> {

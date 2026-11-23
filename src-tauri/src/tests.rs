@@ -2060,6 +2060,17 @@ async fn live_discovery() {
         println!("{typed}: {:?}", found.iter().map(|c| (&c.url, &c.title)).collect::<Vec<_>>());
         assert!(found[0].url.contains(expect), "{typed}: {found:?}");
     }
+    // A channel with a video without a description (an empty <media:description>),
+    // which feed-rs 3.0 refuses: its refreshes failed with "missing text".
+    let found = crate::discover::discover(&net, "https://www.youtube.com/@BSDJedi", false).await.unwrap();
+    assert!(found[0].url.contains("channel_id=UC06UgoRaAgJBBfshLMvfT2Q"), "{found:?}");
+    let url = url::Url::parse(&found[0].url).unwrap();
+    let response = net.get(&url, None).await.unwrap().send().await.unwrap();
+    let body = crate::net::read_limited(response, crate::net::MAX_FEED_BYTES).await.unwrap();
+    let feed = crate::feeds::parse_feed(&body, &url, true).unwrap();
+    println!("BSDJedi: {:?}, {} videos", feed.title, feed.articles.len());
+    assert_eq!(feed.title.as_deref(), Some("BSDJedi"));
+    assert!(!feed.articles.is_empty());
 }
 
 /// H-2: 0.9.1 marked feeds as local by DNS. The upgrade keeps that only for
@@ -2801,4 +2812,64 @@ fn feed_keys_ignore_small_differences() {
     assert_ne!(key("https://example.com/feed?tag=a"), key("https://example.com/feed?tag=b"));
     assert_ne!(key("https://example.com:8443/feed"), key("https://example.com/feed"));
     assert_ne!(key("https://blog.example.com/feed"), key("https://example.com/feed"));
+}
+
+/// feed-rs 3.0 refuses a whole feed for one empty text element. A YouTube channel
+/// whose video has no description (<media:description></media:description>) failed
+/// with "missing text at position ...".
+#[test]
+fn feeds_with_empty_text_elements_are_read() {
+    let url = url::Url::parse("https://www.youtube.com/feeds/videos.xml?channel_id=UC06UgoRaAgJBBfshLMvfT2Q").unwrap();
+    let youtube = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <title>BSDJedi</title>
+ <link rel="alternate" href="https://www.youtube.com/channel/UC06UgoRaAgJBBfshLMvfT2Q"/>
+ <entry>
+  <id>yt:video:a</id><title>With a description</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=a"/>
+  <published>2026-11-20T10:00:00+00:00</published>
+  <media:group>
+   <media:title>With a description</media:title>
+   <media:content url="https://www.youtube.com/v/a?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+   <media:description>Pf, part 2.</media:description>
+  </media:group>
+ </entry>
+ <entry>
+  <id>yt:video:b</id><title>Without one</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=b"/>
+  <published>2026-11-19T10:00:00+00:00</published>
+  <summary type="html">  </summary>
+  <media:group>
+   <media:title>Without one</media:title>
+   <media:content url="https://www.youtube.com/v/b?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+   <media:description></media:description>
+  </media:group>
+ </entry>
+ <entry>
+  <id>tag:c</id><title/>
+  <link rel="alternate" href="https://example.com/c"/>
+  <published>2026-11-18T10:00:00+00:00</published>
+  <content src="https://example.com/c.mp4" type="video/mp4"/>
+ </entry>
+</feed>"#;
+    let feed = crate::feeds::parse_raw(youtube.as_bytes(), &url).unwrap();
+    assert_eq!(feed.title.unwrap().content, "BSDJedi");
+    assert_eq!(feed.entries.len(), 3);
+    // The empty elements are gone; everything else is as it was.
+    let b = &feed.entries[1];
+    assert_eq!(b.title.as_ref().unwrap().content, "Without one");
+    assert!(b.summary.is_none());
+    assert_eq!(b.media[0].content[0].url.as_ref().unwrap().as_str(), "https://www.youtube.com/v/b?version=3");
+    assert!(b.media[0].description.is_none());
+    assert_eq!(feed.entries[0].media[0].description.as_ref().unwrap().content, "Pf, part 2.");
+    let c = &feed.entries[2];
+    assert_eq!(c.content.as_ref().unwrap().src.as_ref().unwrap().href, "https://example.com/c.mp4", "content with src stays");
+    let parsed = crate::feeds::parse_feed(youtube.as_bytes(), &url, true).unwrap();
+    assert_eq!(parsed.articles.len(), 3);
+
+    // A feed that is not XML still gets its own error.
+    let err = crate::feeds::parse_raw(b"<html><body>Not a feed</body></html>", &url).unwrap_err().to_string();
+    assert!(err.contains("web page"), "{err}");
+    let err = crate::feeds::parse_raw(b"", &url).unwrap_err().to_string();
+    assert!(err.contains("Could not read the feed"), "{err}");
 }

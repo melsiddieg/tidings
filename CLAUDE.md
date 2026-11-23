@@ -28,7 +28,7 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 ## Layout
 
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
-  store, favicons), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
+  store, favicons; `parse_raw` retries without empty text elements, which feed-rs 3.0 refuses), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
   in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `translate.rs` (Chinese-to-English
   translation by the same model), `rules.rs` (filter rules on new articles), `updates.rs` (security check: versions of Tidings,
