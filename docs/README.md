@@ -22,7 +22,9 @@ Source: <https://github.com/melsiddieg/tidings>
 - **Feed types**: Podcasts, Videos, Code & releases, Discussions, Newsletters and Articles
   each get a view in the sidebar. The type is worked out on your computer from the feed's
   address (GitHub, YouTube, Reddit, Substack and others) and from what its recent items
-  carry (audio means podcast); you can set it yourself in the feed's properties.
+  carry (audio means podcast). If a feed lands in the wrong view, right-click it and
+  choose **Change type** (or select several feeds and change them together); Automatic
+  goes back to the detected type.
   Inside a folder (and in All articles and Starred), icons above the list show one type
   at a time, with unread counts; "Mark all as read" then marks only that type.
 - **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
@@ -84,6 +86,12 @@ Source: <https://github.com/melsiddieg/tidings>
 **Subscriptions**
 - Folders with any depth. Drag and drop to put any feed or folder anywhere, including
   feeds above folders.
+- **Sort** the subscriptions (the arrows next to Subscriptions, or the `…` menu) by name,
+  date added, unread articles or latest article, ascending or descending, with folders
+  first. Turn off "Sort feeds too" to sort only folders. Manual order goes back to the
+  order you made by dragging, which sorting never changes.
+- Add a feed straight into a folder with the **+** on the folder's row. The **+** at the
+  top (and ⌘N) adds to the selected folder, or to the folder of the selected feed.
 - Favorites: pin feeds and folders to the top of the sidebar.
 - **Saved searches**: keep a list as it is (a feed or folder, unread or all, search words,
   dates, a feed type) under a name in the sidebar, with its unread count. Dates such as
@@ -210,8 +218,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.12.0-freebsd-x86_64.tar.gz
-./tidings-0.12.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.13.0-freebsd-x86_64.tar.gz
+./tidings-0.13.0-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next

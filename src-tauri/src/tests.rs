@@ -472,6 +472,27 @@ fn feed_types_and_date_ranges() {
     db::update_feed(&conn, blog, &patch).unwrap();
     assert_eq!(type_of(&conn, blog), "article");
 
+    // The sidebar menu sets the type of one or several feeds at once.
+    assert_eq!(db::set_feed_type(&conn, &[show, blog], Some("article")).unwrap(), 2);
+    assert_eq!([type_of(&conn, show), type_of(&conn, blog)], ["article", "article"]);
+    assert!(titles(&conn, &in_type("podcast")).is_empty());
+    assert_eq!(db::feed(&conn, show).unwrap().detected_type, "podcast", "detection is kept for Automatic");
+    db::detect_feed_type(&conn, show).unwrap();
+    assert_eq!(type_of(&conn, show), "article", "the choice survives the next refresh");
+    assert!(db::set_feed_type(&conn, &[show], Some("bogus")).is_err());
+    assert_eq!(type_of(&conn, show), "article", "an unknown type changes nothing");
+    assert_eq!(db::set_feed_type(&conn, &[show, blog], None).unwrap(), 2);
+    assert_eq!([type_of(&conn, show), type_of(&conn, blog)], ["podcast", "article"]);
+    assert_eq!(db::feed(&conn, show).unwrap().type_override, None);
+
+    // What the sidebar sorts by: when a feed was added and its newest article.
+    let s = db::feed(&conn, show).unwrap();
+    assert!(s.created_at > 0 && s.created_at <= db::now());
+    assert_eq!(s.newest, Some(t0 + 10 * day));
+    let empty = db::insert_feed(&conn, "https://empty.example/feed", None, None, None).unwrap();
+    assert_eq!(db::feed(&conn, empty).unwrap().newest, None);
+    db::delete_feed(&conn, empty).unwrap();
+
     // Date ranges: since is inclusive, until is exclusive, both combine with scope and filter.
     let ranged = |scope: Scope, since: Option<i64>, until: Option<i64>| {
         let mut q = query(scope, "all", "");

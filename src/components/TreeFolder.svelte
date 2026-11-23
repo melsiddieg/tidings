@@ -26,7 +26,7 @@
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'folder', id: folder.id }) },
       { label: pinned ? 'Remove from Favorites' : 'Add to Favorites', icon: 'star', action: () => store.setPinned(ref, !pinned) },
       { separator: true },
-      { label: 'Add feed here…', icon: 'plus', action: () => (store.dialog = { kind: 'add-feed', folderId: folder.id }) },
+      { label: 'Add feed here…', icon: 'plus', action: () => store.addFeed(folder.id) },
       { label: 'New subfolder…', icon: 'folder-plus', action: () => (store.dialog = { kind: 'folder', folderId: null, parentId: folder.id }) },
       { label: 'Rename…', icon: 'pencil', action: () => (store.dialog = { kind: 'folder', folderId: folder.id, parentId: folder.parentId }) },
       { separator: true },
@@ -102,6 +102,17 @@
   >
   <span class="row-icon"><Icon name={folder.expanded ? 'folder-open' : 'folder'} size={15} /></span>
   <span class="row-label">{folder.title}</span>
+  <button
+    class="row-add"
+    title="Add a feed to {folder.title}"
+    aria-label="Add a feed to {folder.title}"
+    draggable="false"
+    onclick={(e) => {
+      e.stopPropagation();
+      store.addFeed(folder.id);
+    }}
+    ondblclick={(e) => e.stopPropagation()}><Icon name="plus" size={13} stroke={2.2} /></button
+  >
   {#if unread > 0}<span class="row-count">{countLabel(unread)}</span>{/if}
 </div>
 

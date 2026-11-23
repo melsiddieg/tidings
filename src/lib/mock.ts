@@ -30,7 +30,7 @@ function feed(id: number, folderId: number | null, title: string, url: string, e
     description: null, position: 100 + id, iconVersion: null, updateInterval: null, retentionMode: null,
     retentionValue: null, fullText: false, paused: false, lastFetched: now - 600, lastSuccess: now - 600,
     lastError: null, unread: 0, total: 0, pinned: 0, feedType: 'article', typeOverride: null,
-    detectedType: extra.feedType ?? 'article', local: false, ...extra,
+    detectedType: extra.feedType ?? 'article', local: false, createdAt: now - 86_400 * (40 - id * 2), newest: null, ...extra,
   };
 }
 
@@ -168,6 +168,7 @@ function counts() {
   for (const f of feeds) {
     f.unread = articles.filter((a) => a.feedId === f.id && !a.isRead).length;
     f.total = articles.filter((a) => a.feedId === f.id).length;
+    f.newest = articles.filter((a) => a.feedId === f.id).reduce<number | null>((n, a) => Math.max(n ?? 0, a.published), null);
   }
 }
 
@@ -358,7 +359,7 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'add_feed': {
       if (/\/\/(192\.168\.|10\.|127\.)/.test(args.url) && !args.allowLocal) throw `local-network:${new URL(args.url).hostname}`;
       const id = ++nextId;
-      feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url));
+      feeds.push(feed(id, args.folderId ?? null, args.title ?? 'New feed', args.url, { createdAt: Math.floor(Date.now() / 1000) }));
       setTimeout(() => emit('feed-updated', { feedId: id, newArticles: 0, error: null }), 800);
       return id;
     }
@@ -369,6 +370,13 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         feedType: args.patch.typeOverride ?? f.detectedType,
       });
       return null;
+    }
+    case 'set_feed_type': {
+      const valid = ['podcast', 'video', 'code', 'discussion', 'newsletter', 'article'];
+      if (args.feedType != null && !valid.includes(args.feedType)) throw 'Unknown feed type';
+      const changed = feeds.filter((f) => args.ids.includes(f.id));
+      for (const f of changed) Object.assign(f, { typeOverride: args.feedType, feedType: args.feedType ?? f.detectedType });
+      return changed.length;
     }
     case 'delete_feed':
       feeds.splice(feeds.findIndex((f) => f.id === args.id), 1);

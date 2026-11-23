@@ -5,6 +5,23 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-22
+
+### Added
+- Add a feed straight into a folder: a **+** shows on a folder's row when the pointer is
+  on it. The **+** at the top of the sidebar, the `…` menu and ⌘N now add to the selected
+  folder, or to the folder of the selected feed; the dialog's title names the folder.
+  A folder that was closed opens so the new feed shows.
+- Sort the subscriptions by name, date added, unread articles or latest article,
+  ascending or descending (the arrows next to Subscriptions, or the `…` menu). Folders
+  come first; "Sort feeds too" can be turned off to sort only folders. Manual order is
+  kept and comes back when you choose it. While the list is sorted, dragging still moves
+  items into other folders.
+- Change a feed's type from its right-click menu (**Change type**), for example a blog
+  that the detection put under Podcasts because it attaches audio. Select several feeds
+  to change them together. Automatic goes back to the detected type. This was already
+  possible in the feed's properties.
+
 ## [0.12.0] - 2026-11-22
 
 ### Added
@@ -495,7 +512,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/melsiddieg/tidings/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/melsiddieg/tidings/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/melsiddieg/tidings/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/melsiddieg/tidings/compare/v0.9.6...v0.10.0

@@ -1,4 +1,5 @@
-import type { Feed, Folder, FolderNode, ItemRef, RootNode, TreeChild, Tree } from './types';
+import type { Feed, Folder, FolderNode, ItemRef, RootNode, TreeChild, Tree, TreeSort, TreeSortKey } from './types';
+import { MANUAL_SORT } from './filters';
 
 const DAY = 86_400_000;
 
@@ -166,7 +167,19 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function buildTree(tree: Tree): RootNode {
+/** A row of the tree with what it can be sorted by. A folder counts what is inside it. */
+interface Entry {
+  child: TreeChild;
+  id: number;
+  folder: boolean;
+  position: number;
+  title: string;
+  added: number;
+  unread: number;
+  latest: number;
+}
+
+export function buildTree(tree: Tree, sort: TreeSort = MANUAL_SORT): RootNode {
   const byParent = new Map<number | null, Folder[]>();
   for (const f of tree.folders) {
     const list = byParent.get(f.parentId) ?? [];
@@ -179,19 +192,66 @@ export function buildTree(tree: Tree): RootNode {
     list.push(f);
     feedsByFolder.set(f.folderId, list);
   }
+  const compare = treeOrder(sort);
   const seen = new Set<number>();
-  // Feeds and folders share one order; on a tie, folders come first.
-  const childrenOf = (parent: number | null): TreeChild[] => {
+  const childrenOf = (parent: number | null): Entry[] => {
     const folders = (byParent.get(parent) ?? []).filter((f) => !seen.has(f.id));
     folders.forEach((f) => seen.add(f.id));
-    const items: [number, number, string, () => TreeChild][] = [
-      ...folders.map((f): [number, number, string, () => TreeChild] => [f.position, 0, f.title, () => ({ kind: 'folder', node: { folder: f, children: childrenOf(f.id) } })]),
-      ...(feedsByFolder.get(parent) ?? []).map((f): [number, number, string, () => TreeChild] => [f.position, 1, f.title, () => ({ kind: 'feed', feed: f })]),
+    const entries: Entry[] = [
+      ...folders.map((f): Entry => {
+        const inside = childrenOf(f.id);
+        return {
+          child: { kind: 'folder', node: { folder: f, children: inside.map((e) => e.child) } },
+          id: f.id,
+          folder: true,
+          position: f.position,
+          title: f.title,
+          // A new folder always gets a higher id than every folder there is, so ids
+          // are in the order the folders were made.
+          added: f.id,
+          unread: inside.reduce((n, e) => n + e.unread, 0),
+          latest: inside.reduce((n, e) => Math.max(n, e.latest), 0),
+        };
+      }),
+      ...(feedsByFolder.get(parent) ?? []).map(
+        (f): Entry => ({
+          child: { kind: 'feed', feed: f },
+          id: f.id,
+          folder: false,
+          position: f.position,
+          title: f.title,
+          added: f.createdAt,
+          unread: f.unread,
+          latest: f.newest ?? 0,
+        }),
+      ),
     ];
-    items.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]));
-    return items.map((i) => i[3]());
+    return entries.sort(compare);
   };
-  return { children: childrenOf(null) };
+  return { children: childrenOf(null).map((e) => e.child) };
+}
+
+/** How two rows with the same parent are ordered. */
+function treeOrder(sort: TreeSort): (a: Entry, b: Entry) => number {
+  // Manual: feeds and folders share one order; on a tie, folders come first.
+  const manual = (a: Entry, b: Entry) =>
+    a.position - b.position || Number(b.folder) - Number(a.folder) || a.title.localeCompare(b.title);
+  if (sort.key === 'manual') return manual;
+  const dir = sort.descending ? -1 : 1;
+  const byName = (a: Entry, b: Entry) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+  const by: Record<Exclude<TreeSortKey, 'manual'>, (a: Entry, b: Entry) => number> = {
+    name: (a, b) => dir * (byName(a, b) || a.id - b.id),
+    added: (a, b) => dir * (a.added - b.added || a.id - b.id),
+    unread: (a, b) => dir * (a.unread - b.unread) || byName(a, b),
+    latest: (a, b) => dir * (a.latest - b.latest) || byName(a, b),
+  };
+  const sorted = by[sort.key];
+  // Sorted: folders first, then feeds.
+  return (a, b) => {
+    if (a.folder !== b.folder) return a.folder ? -1 : 1;
+    if (!a.folder && !sort.feeds) return manual(a, b);
+    return sorted(a, b);
+  };
 }
 
 export function childKey(child: TreeChild): string {

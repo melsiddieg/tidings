@@ -74,6 +74,8 @@ export const api = {
   addFeed: (url: string, folderId: number | null, title?: string, allowLocal = false) =>
     call<number>('add_feed', { url, folderId, title, allowLocal }),
   updateFeed: (id: number, patch: FeedPatch) => call<void>('update_feed', { id, patch }),
+  /** `feedType` null: back to the detected type. */
+  setFeedType: (ids: number[], feedType: FeedType | null) => call<number>('set_feed_type', { ids, feedType }),
   deleteFeed: (id: number) => call<void>('delete_feed', { id }),
   moveFeed: (id: number, folderId: number | null, before: ItemRef | null) =>
     call<void>('move_feed', { id, folderId, before }),

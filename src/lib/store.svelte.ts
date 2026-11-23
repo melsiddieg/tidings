@@ -23,10 +23,22 @@ import type {
   Settings,
   Tab,
   Tree,
+  TreeSort,
   VideoPlayer,
 } from './types';
 import { buildTree, childRef, flattenFeeds, isVideoLink, sameItem } from './util';
-import { FEED_TYPES, isAnyTime, rangeBounds, rangeLabel, typeInfo, validRange, type TypeInfo } from './filters';
+import {
+  FEED_TYPES,
+  SORT_KEYS,
+  isAnyTime,
+  rangeBounds,
+  rangeLabel,
+  sortLabel,
+  typeInfo,
+  validRange,
+  validSort,
+  type TypeInfo,
+} from './filters';
 
 const PAGE = 150;
 const MAIN_TAB: Tab = { id: 'main', kind: 'main' };
@@ -163,7 +175,9 @@ class Store {
   /** Keyboard commands for the article view in the active tab. */
   command = $state<{ name: string; seq: number }>({ name: '', seq: 0 });
 
-  root = $derived(buildTree(this.tree));
+  /** How the sidebar orders subscriptions; kept on this computer. */
+  treeSort = $state<TreeSort>(validSort(local.get<unknown>('treeSort', null)));
+  root = $derived(buildTree(this.tree, this.treeSort));
   feedOrder = $derived(flattenFeeds(this.root));
   feedById = $derived(new Map(this.tree.feeds.map((f) => [f.id, f])));
   nodeById = $derived.by(() => {
@@ -360,6 +374,11 @@ class Store {
   openMenuAt(el: HTMLElement, items: MenuItem[]) {
     const r = el.getBoundingClientRect();
     this.menu = { x: r.left, y: r.bottom + 4, items };
+  }
+
+  /** A second menu where the first one was opened ("Change type", "Sort"). */
+  openMenuAtPoint(x: number, y: number, items: MenuItem[]) {
+    this.menu = { x, y, items };
   }
 
   confirm(title: string, message: string, confirmLabel: string, onConfirm: () => void | Promise<void>, danger = true) {
@@ -1211,7 +1230,22 @@ class Store {
   /** The context menu for a right-click on one of several marked items. */
   markedMenu(e: MouseEvent) {
     const n = this.marked.length;
+    const feeds = this.marked
+      .filter((key) => key.startsWith('feed:'))
+      .map((key) => this.feedById.get(Number(key.slice(5))))
+      .filter((f): f is Feed => !!f);
+    const { clientX: x, clientY: y } = e;
     this.openMenu(e, [
+      ...(feeds.length
+        ? [
+            {
+              label: feeds.length === 1 ? 'Change type of 1 feed' : `Change type of ${feeds.length} feeds`,
+              icon: 'filter',
+              action: () => this.openMenuAtPoint(x, y, this.typeMenuItems(feeds)),
+            },
+            { separator: true },
+          ]
+        : []),
       { label: `Delete ${n} items…`, icon: 'trash', danger: true, action: () => this.deleteMarked() },
       { separator: true },
       { label: 'Clear selection', icon: 'x', action: () => this.clearMarks() },
@@ -1224,6 +1258,79 @@ class Store {
     folder.expanded = !folder.expanded;
     try {
       await api.setFolderExpanded(id, folder.expanded);
+    } catch (err) {
+      this.error(err);
+    }
+  }
+
+  /** Opens a folder and the folders around it, so a feed added there shows. */
+  revealFolder(id: number) {
+    const closed: number[] = [];
+    let f = this.folderById.get(id);
+    for (let depth = 0; f && depth < 64; depth++) {
+      if (!f.expanded) closed.push(f.id);
+      f = f.parentId == null ? undefined : this.folderById.get(f.parentId);
+    }
+    if (closed.length) this.setExpanded(true, closed);
+  }
+
+  /** The Add Feed dialog. Without a folder it uses the selected folder, or the
+   *  folder of the selected feed. */
+  addFeed(folderId?: number | null) {
+    let target = folderId ?? null;
+    if (folderId === undefined) {
+      const s = this.scope;
+      if (s.kind === 'folder') target = s.id;
+      else if (s.kind === 'feed') target = this.feedById.get(s.id)?.folderId ?? null;
+    }
+    this.dialog = { kind: 'add-feed', folderId: target };
+  }
+
+  setTreeSort(patch: Partial<TreeSort>) {
+    this.treeSort = { ...this.treeSort, ...patch };
+    local.set('treeSort', this.treeSort);
+  }
+
+  /** The sort menu: what to sort by, which way, and whether feeds are sorted too. */
+  sortMenuItems(): MenuItem[] {
+    const sort = this.treeSort;
+    const manual = sort.key === 'manual';
+    const key = SORT_KEYS.find((k) => k.key === sort.key) ?? SORT_KEYS[0];
+    return [
+      ...SORT_KEYS.map((k) => ({ label: k.label, checked: sort.key === k.key, action: () => this.setTreeSort({ key: k.key }) })),
+      { separator: true },
+      { label: manual ? 'Ascending' : `Ascending (${key.up})`, checked: !manual && !sort.descending, disabled: manual, action: () => this.setTreeSort({ descending: false }) },
+      { label: manual ? 'Descending' : `Descending (${key.down})`, checked: !manual && sort.descending, disabled: manual, action: () => this.setTreeSort({ descending: true }) },
+      { separator: true },
+      { label: 'Sort feeds too', checked: !manual && sort.feeds, disabled: manual, action: () => this.setTreeSort({ feeds: !sort.feeds }) },
+    ];
+  }
+
+  /** Types to choose from for these feeds. A check marks the choice they all share. */
+  typeMenuItems(feeds: Feed[]): MenuItem[] {
+    const all = (type: FeedType | null) => feeds.every((f) => f.typeOverride === type);
+    const detected = feeds.length === 1 ? ` (${typeInfo(feeds[0].detectedType).one})` : '';
+    return [
+      { label: `Automatic${detected}`, checked: all(null), action: () => this.setFeedType(feeds, null) },
+      { separator: true },
+      ...FEED_TYPES.map((t) => ({ label: t.one, checked: all(t.value), action: () => this.setFeedType(feeds, t.value) })),
+    ];
+  }
+
+  /** Sets the type of feeds by hand; `null` goes back to the detected type. */
+  async setFeedType(feeds: Feed[], type: FeedType | null) {
+    if (!feeds.length) return;
+    try {
+      await api.setFeedType(
+        feeds.map((f) => f.id),
+        type,
+      );
+      await this.reloadTree();
+      // The list may show a type scope or a type filter that these feeds left or joined.
+      await this.loadArticles();
+      const what = feeds.length === 1 ? `“${feeds[0].title}”` : `${feeds.length} feeds`;
+      if (type) this.toast(`${what} now ${feeds.length === 1 ? 'shows' : 'show'} under ${typeInfo(type).label}`, 'success');
+      else this.toast(`${what} ${feeds.length === 1 ? 'uses its' : 'use their'} detected type again`, 'success');
     } catch (err) {
       this.error(err);
     }
@@ -1270,6 +1377,14 @@ class Store {
   /** Moves a feed or folder into `parentId` (null = top level), before `before` or at the end. */
   async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null) {
     if (sameItem(item, before)) return;
+    // In a sorted list a new place in the same folder would not show. Moving into
+    // another folder still works.
+    const sorted = this.treeSort.key !== 'manual' && (item.kind === 'folder' || this.treeSort.feeds);
+    const parentNow = item.kind === 'feed' ? this.feedById.get(item.id)?.folderId : this.folderById.get(item.id)?.parentId;
+    if (sorted && (parentNow ?? null) === parentId) {
+      this.toast(`The list is sorted by ${sortLabel(this.treeSort).toLowerCase()}. To arrange it by hand, choose Manual order in the sort menu.`);
+      return;
+    }
     try {
       if (item.kind === 'feed') await api.moveFeed(item.id, parentId, before);
       else await api.moveFolder(item.id, parentId, before);
@@ -1396,7 +1511,7 @@ class Store {
         this.dialog = { kind: 'settings' };
         break;
       case 'add-feed':
-        this.dialog = { kind: 'add-feed', folderId: null };
+        this.addFeed();
         break;
       case 'new-folder':
         this.dialog = { kind: 'folder', folderId: null, parentId: null };

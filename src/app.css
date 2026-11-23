@@ -766,6 +766,28 @@ kbd {
 .tree-row.paused .row-label {
   color: var(--text-3);
 }
+/* "Add a feed to this folder", shown while the pointer is on the row. */
+.tree-row .row-add {
+  display: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  flex: none;
+}
+.tree-row:hover .row-add,
+.tree-row .row-add:focus-visible {
+  display: grid;
+}
+.tree-row .row-add:hover {
+  background: var(--bg-press);
+  color: var(--text);
+}
 .tree-row .row-count {
   font-size: 11.5px;
   font-weight: 600;

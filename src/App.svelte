@@ -256,7 +256,9 @@
   {/if}
 
   {#if store.menu}
-    <ContextMenu menu={store.menu} />
+    {#key store.menu}
+      <ContextMenu menu={store.menu} />
+    {/key}
   {/if}
   <Toasts />
 </div>

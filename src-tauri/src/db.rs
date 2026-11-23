@@ -375,6 +375,10 @@ pub struct Feed {
     pub detected_type: String,
     /// The user allowed Tidings to fetch this feed from the local network.
     pub local: bool,
+    /// When it was added (Unix time).
+    pub created_at: i64,
+    /// Publication date of its newest article, `None` when it has none.
+    pub newest: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -502,7 +506,8 @@ const FEED_COLUMNS: &str = "
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0 AND a.is_deleted = 0),
     (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0),
     f.pinned, COALESCE(f.type_override, f.detected_type), f.type_override, f.detected_type,
-    COALESCE(f.local, 0)";
+    COALESCE(f.local, 0), f.created_at,
+    (SELECT MAX(a.published) FROM articles a WHERE a.feed_id = f.id AND a.is_deleted = 0)";
 
 fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     // A feed without a title is shown by its address. A password in the address
@@ -535,6 +540,8 @@ fn feed_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         type_override: r.get(22)?,
         detected_type: r.get(23)?,
         local: r.get(24)?,
+        created_at: r.get(25)?,
+        newest: r.get(26)?,
     })
 }
 
@@ -1578,6 +1585,22 @@ pub fn update_feed(conn: &Connection, id: i64, patch: &FeedPatch) -> Result<()> 
         move_feed(conn, id, patch.folder_id, None)?;
     }
     Ok(())
+}
+
+/// Sets the type of several feeds: one of `feed_types::TYPES`, or `None` to go back
+/// to the detected type. Returns how many feeds changed.
+pub fn set_feed_type(conn: &Connection, ids: &[i64], feed_type: Option<&str>) -> Result<usize> {
+    if feed_type.is_some_and(|t| !feed_types::is_type(t)) {
+        return Err(Error::msg("Unknown feed type"));
+    }
+    let mut changed = 0;
+    for chunk in ids.chunks(500) {
+        let sql = format!("UPDATE feeds SET type_override = ? WHERE id IN ({})", placeholders(chunk.len()));
+        let mut args: Vec<Value> = vec![feed_type.map_or(Value::Null, |t| Value::Text(t.into()))];
+        args.extend(chunk.iter().map(|id| Value::Integer(*id)));
+        changed += conn.execute(&sql, params_from_iter(args))?;
+    }
+    Ok(changed)
 }
 
 pub fn delete_feed(conn: &Connection, id: i64) -> Result<()> {

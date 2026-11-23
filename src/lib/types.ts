@@ -55,6 +55,20 @@ export interface Feed {
   detectedType: FeedType;
   /** The user allowed Tidings to fetch this feed from the local network. */
   local: boolean;
+  /** Unix time it was added. */
+  createdAt: number;
+  /** Publication date of its newest article (Unix seconds), null when it has none. */
+  newest: number | null;
+}
+
+/** How the sidebar orders subscriptions. `manual` is the order made by dragging. */
+export type TreeSortKey = 'manual' | 'name' | 'added' | 'unread' | 'latest';
+
+export interface TreeSort {
+  key: TreeSortKey;
+  descending: boolean;
+  /** Sort feeds as well as folders. When false, feeds keep their manual order. */
+  feeds: boolean;
 }
 
 export interface Tree {

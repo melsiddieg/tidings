@@ -336,6 +336,12 @@ pub fn move_feed(
     db::move_feed(&state.db(), id, folder_id, before)
 }
 
+/// Sets the type of feeds by hand (`feed_type` None: back to the detected type).
+#[tauri::command]
+pub fn set_feed_type(state: AppStateRef<'_>, ids: Vec<i64>, feed_type: Option<String>) -> Result<usize> {
+    db::set_feed_type(&state.db(), &ids, feed_type.as_deref())
+}
+
 /// Adds a feed or folder to Favorites, or removes it.
 #[tauri::command]
 pub fn set_pinned(state: AppStateRef<'_>, item: Item, pinned: bool) -> Result<()> {

@@ -157,6 +157,7 @@ fn main() {
             commands::discover_feeds,
             commands::add_feed,
             commands::update_feed,
+            commands::set_feed_type,
             commands::delete_feed,
             commands::move_feed,
             commands::create_folder,

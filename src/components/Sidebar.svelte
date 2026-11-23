@@ -3,17 +3,27 @@
   import { drag, endDrag } from '../lib/dnd.svelte';
   import { store } from '../lib/store.svelte';
   import { childKey, countLabel, relativeAgo } from '../lib/util';
+  import { sortLabel } from '../lib/filters';
   import FeedIcon from './FeedIcon.svelte';
   import type { FeedType, ItemRef, SavedSearch } from '../lib/types';
   import TreeFolder from './TreeFolder.svelte';
   import FeedRow from './FeedRow.svelte';
 
   const allSelected = $derived(store.scope.kind === 'all');
+  const sorted = $derived(store.treeSort.key !== 'manual');
+  // The + button adds to the selected folder, or to the folder of the selected feed.
+  const addTitle = $derived.by(() => {
+    const s = store.scope;
+    const id = s.kind === 'folder' ? s.id : s.kind === 'feed' ? store.feedById.get(s.id)?.folderId : null;
+    const folder = id == null ? null : store.folderById.get(id);
+    return folder ? `Add a feed to ${folder.title}` : 'Add feed';
+  });
   const starredSelected = $derived(store.scope.kind === 'starred');
 
   function moreMenu(e: MouseEvent) {
-    store.openMenuAt(e.currentTarget as HTMLElement, [
-      { label: 'Add feed…', icon: 'plus', shortcut: '⌘N', action: () => (store.dialog = { kind: 'add-feed', folderId: null }) },
+    const button = e.currentTarget as HTMLElement;
+    store.openMenuAt(button, [
+      { label: 'Add feed…', icon: 'plus', shortcut: '⌘N', action: () => store.addFeed() },
       { label: 'New folder…', icon: 'folder-plus', action: () => (store.dialog = { kind: 'folder', folderId: null, parentId: null }) },
       { separator: true },
       { label: 'Import OPML…', icon: 'download', action: () => store.importOpml() },
@@ -28,6 +38,7 @@
       { separator: true },
       { label: 'Expand all folders', icon: 'expand', action: () => store.setExpanded(true) },
       { label: 'Collapse all folders', icon: 'collapse', action: () => store.setExpanded(false) },
+      { label: 'Sort subscriptions', icon: 'sort', shortcut: sortLabel(store.treeSort), action: () => store.openMenuAt(button, store.sortMenuItems()) },
       { separator: true },
       { label: 'Refresh all feeds', icon: 'refresh', action: () => store.refresh() },
       { label: 'Mark everything as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'all' }) },
@@ -89,7 +100,7 @@
       <span>Tidings</span>
     </div>
     <div class="head-actions">
-      <button class="icon-btn" title="Add feed" onclick={() => (store.dialog = { kind: 'add-feed', folderId: null })}>
+      <button class="icon-btn" title={addTitle} onclick={() => store.addFeed()}>
         <Icon name="plus" size={17} />
       </button>
       <button class="icon-btn" title="More" onclick={moreMenu}><Icon name="more" size={17} /></button>
@@ -183,6 +194,17 @@
           {@const open = store.anyFolderOpen}
           <button class="icon-btn mini always" title={open ? 'Collapse all folders' : 'Expand all folders'} onclick={() => store.setExpanded(!open)}>
             <Icon name={open ? 'collapse' : 'expand'} size={14} />
+          </button>
+        {/if}
+        {#if store.tree.folders.length + store.tree.feeds.length > 1}
+          <button
+            class="icon-btn mini"
+            class:always={sorted}
+            class:on={sorted}
+            title={sorted ? `Sorted: ${sortLabel(store.treeSort)}` : 'Sort subscriptions'}
+            onclick={(e) => store.openMenuAt(e.currentTarget as HTMLElement, store.sortMenuItems())}
+          >
+            <Icon name="sort" size={14} />
           </button>
         {/if}
         <button class="icon-btn mini" title="New folder" onclick={() => (store.dialog = { kind: 'folder', folderId: null, parentId: null })}>
@@ -369,9 +391,13 @@
   .section-title:hover .icon-btn.mini {
     opacity: 1;
   }
-  /* Collapse/expand all stays visible: it is how you get around a long list. */
+  /* Collapse/expand all stays visible: it is how you get around a long list.
+     So does the sort button while the list is sorted. */
   .icon-btn.mini.always {
     opacity: 0.75;
+  }
+  .icon-btn.mini.on {
+    color: var(--accent);
   }
   .tree {
     display: grid;

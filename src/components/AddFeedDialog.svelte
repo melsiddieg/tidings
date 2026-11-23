@@ -48,6 +48,7 @@
   }
 
   const folders = $derived(folderOptions(store.root));
+  const folderTitle = $derived(folderId == null ? null : (store.folderById.get(folderId)?.title ?? null));
 
   async function find(allowLocal = false) {
     if (!url.trim()) return;
@@ -80,6 +81,7 @@
       const id = await api.addFeed(candidate.url, folderId, title, allowLocal);
       store.watchFeed(id);
       await store.reloadTree();
+      if (folderId != null) store.revealFolder(folderId);
       store.selectScope({ kind: 'feed', id });
       store.dialog = null;
       store.toast(`Subscribed to ${title ?? hostOf(candidate.url)}`, 'success');
@@ -97,7 +99,7 @@
   }
 </script>
 
-<Modal title="Add a feed" width={500}>
+<Modal title={folderTitle ? `Add a feed to ${folderTitle}` : 'Add a feed'} width={500}>
   <form id="add-feed" class="form" {onsubmit}>
     <div class="field">
       <label for="feed-url">Website or feed address</label>

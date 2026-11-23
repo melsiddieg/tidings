@@ -5,6 +5,7 @@
   import { store } from '../lib/store.svelte';
   import type { Feed, ItemRef } from '../lib/types';
   import { countLabel, sameItem } from '../lib/util';
+  import { typeInfo } from '../lib/filters';
 
   let { feed, depth }: { feed: Feed; depth: number } = $props();
 
@@ -18,6 +19,8 @@
 
   function menu(e: MouseEvent) {
     if (marked && store.marked.length > 1) return store.markedMenu(e);
+    const { clientX: x, clientY: y } = e;
+    const type = typeInfo(feed.feedType);
     store.openMenu(e, [
       { label: 'Refresh', icon: 'refresh', action: () => store.refresh({ feedIds: [feed.id] }) },
       { label: 'Mark all as read', icon: 'check-check', action: () => store.markAllRead({ kind: 'feed', id: feed.id }) },
@@ -25,6 +28,7 @@
       { label: 'Open website', icon: 'globe', disabled: !feed.siteUrl, action: () => store.openExternal(feed.siteUrl) },
       { label: pinned ? 'Remove from Favorites' : 'Add to Favorites', icon: 'star', action: () => store.setPinned(ref, !pinned) },
       { label: 'Copy feed address', icon: 'copy', action: () => navigator.clipboard?.writeText(feed.url).then(() => store.toast('Feed address copied')) },
+      { label: 'Change type', icon: type.icon, shortcut: type.one, action: () => store.openMenuAtPoint(x, y, store.typeMenuItems([feed])) },
       { separator: true },
       { label: 'Properties…', icon: 'pencil', action: () => (store.dialog = { kind: 'feed', feedId: feed.id }) },
       { label: 'Unsubscribe…', icon: 'trash', danger: true, action: () => store.deleteFeed(feed) },

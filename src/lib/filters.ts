@@ -1,6 +1,6 @@
 // Feed types and date ranges: the two ways to narrow the article list besides
 // folders and read state.
-import type { DateRange, FeedType } from './types';
+import type { DateRange, FeedType, TreeSort, TreeSortKey } from './types';
 
 export interface TypeInfo {
   value: FeedType;
@@ -22,6 +22,30 @@ export const FEED_TYPES: TypeInfo[] = [
 
 export function typeInfo(type: FeedType): TypeInfo {
   return FEED_TYPES.find((t) => t.value === type) ?? FEED_TYPES[FEED_TYPES.length - 1];
+}
+
+/** Ways to sort the sidebar, with what ascending and descending mean for each. */
+export const SORT_KEYS: { key: TreeSortKey; label: string; up: string; down: string }[] = [
+  { key: 'manual', label: 'Manual order', up: '', down: '' },
+  { key: 'name', label: 'Name', up: 'A to Z', down: 'Z to A' },
+  { key: 'added', label: 'Date added', up: 'oldest first', down: 'newest first' },
+  { key: 'unread', label: 'Unread articles', up: 'fewest first', down: 'most first' },
+  { key: 'latest', label: 'Latest article', up: 'oldest first', down: 'newest first' },
+];
+
+export const MANUAL_SORT: TreeSort = { key: 'manual', descending: false, feeds: true };
+
+/** A saved sort, or manual order when it is not one Tidings knows. */
+export function validSort(value: unknown): TreeSort {
+  const v = value as Partial<TreeSort> | null;
+  if (!v || typeof v !== 'object' || !SORT_KEYS.some((k) => k.key === v.key)) return MANUAL_SORT;
+  return { key: v.key as TreeSortKey, descending: v.descending === true, feeds: v.feeds !== false };
+}
+
+/** "Name, A to Z", for the sort button's tooltip. */
+export function sortLabel(sort: TreeSort): string {
+  const k = SORT_KEYS.find((x) => x.key === sort.key) ?? SORT_KEYS[0];
+  return sort.key === 'manual' ? k.label : `${k.label}, ${sort.descending ? k.down : k.up}`;
 }
 
 type Preset = DateRange['preset'];
