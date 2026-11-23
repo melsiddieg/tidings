@@ -8,6 +8,7 @@
   import ArticleView from './components/ArticleView.svelte';
   import ReaderTab from './components/ReaderTab.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
+  import ImportOpmlDialog from './components/ImportOpmlDialog.svelte';
   import Toasts from './components/Toasts.svelte';
   import BriefView from './components/BriefView.svelte';
   import PlayerBar from './components/PlayerBar.svelte';
@@ -253,6 +254,8 @@
     <RestoreDialog summary={store.dialog.summary} />
   {:else if store.dialog?.kind === 'export-starred'}
     <ExportStarredDialog />
+  {:else if store.dialog?.kind === 'import-opml'}
+    <ImportOpmlDialog preview={store.dialog.preview} />
   {/if}
 
   {#if store.menu}

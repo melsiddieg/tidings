@@ -1504,6 +1504,29 @@ pub fn feed_id_by_url(conn: &Connection, url: &str) -> Result<Option<i64>> {
         .optional()?)
 }
 
+/// Where a feed is, for comparing an OPML file with the subscriptions.
+#[derive(Debug)]
+pub struct FeedPlace {
+    pub id: i64,
+    pub url: String,
+    pub folder_id: Option<i64>,
+    /// Display title: custom title, else feed title, else URL.
+    pub title: String,
+}
+
+pub fn feed_places(conn: &Connection) -> Result<Vec<FeedPlace>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, url, folder_id, COALESCE(NULLIF(custom_title, ''), NULLIF(title, ''), url) FROM feeds ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let (url, title): (String, String) = (r.get(1)?, r.get(3)?);
+        // As in `feed_from_row`: a password in the address must not show.
+        let title = if title == url { crate::net::without_credentials(&url) } else { title };
+        Ok(FeedPlace { id: r.get(0)?, url, folder_id: r.get(2)?, title })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn insert_feed(
     conn: &Connection,
     url: &str,
@@ -1702,20 +1725,6 @@ pub fn create_folder(conn: &Connection, title: &str, parent_id: Option<i64>) -> 
         params![title, parent_id, position],
     )?;
     Ok(conn.last_insert_rowid())
-}
-
-pub fn find_or_create_folder(conn: &Connection, title: &str, parent_id: Option<i64>) -> Result<(i64, bool)> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM folders WHERE parent_id IS ?1 AND title = ?2",
-            params![parent_id, title],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match existing {
-        Some(id) => Ok((id, false)),
-        None => Ok((create_folder(conn, title, parent_id)?, true)),
-    }
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, title: &str) -> Result<()> {

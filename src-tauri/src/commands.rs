@@ -15,7 +15,7 @@ use crate::export;
 use crate::feeds;
 use crate::files;
 use crate::net;
-use crate::opml::{self, ImportStats};
+use crate::opml::{self, ImportPreview, ImportStats, Layout};
 use crate::peertube;
 use crate::reader;
 use crate::rules::Rule;
@@ -438,8 +438,10 @@ pub fn refresh_feeds(
 // OPML
 // ---------------------------------------------------------------------------
 
+/// Reads an OPML file the user picks and compares it with the subscriptions. The
+/// feeds are kept for `import_opml`, which adds them.
 #[tauri::command]
-pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<ImportStats>> {
+pub async fn preview_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Option<ImportPreview>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut dialog = app
         .dialog()
@@ -459,12 +461,36 @@ pub async fn import_opml(app: AppHandle, state: AppStateRef<'_>) -> Result<Optio
     }
     let bytes = std::fs::read(&path)?;
     // Parsing is CPU work on a file from anywhere: keep it off the async threads.
-    let outlines = tokio::task::spawn_blocking(move || opml::parse(&String::from_utf8_lossy(&bytes)))
-        .await
-        .map_err(|e| Error::msg(e.to_string()))??;
-    let stats = opml::import(&state.db(), &outlines)?;
+    let pending = tokio::task::spawn_blocking(move || -> Result<opml::Pending> {
+        Ok(opml::feeds_in(&opml::parse(&String::from_utf8_lossy(&bytes))?))
+    })
+    .await
+    .map_err(|e| Error::msg(e.to_string()))??;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let preview = opml::preview(&state.db(), &pending, &name)?;
+    *state.opml_import.lock().unwrap_or_else(|e| e.into_inner()) = Some(pending);
+    Ok(Some(preview))
+}
+
+/// Adds the new feeds of the file `preview_opml` read. `layout` says whether
+/// subscribed feeds move to the file's folders.
+#[tauri::command]
+pub fn import_opml(app: AppHandle, state: AppStateRef<'_>, layout: Layout) -> Result<ImportStats> {
+    let pending = state
+        .opml_import
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| Error::msg("Choose the OPML file again"))?;
+    let stats = opml::apply(&state.db(), &pending, layout)?;
     spawn_refresh(&app, state.inner(), stats.new_feed_ids.clone());
-    Ok(Some(stats))
+    Ok(stats)
+}
+
+/// Forgets the file `preview_opml` read, when the user cancels.
+#[tauri::command]
+pub fn cancel_opml_import(state: AppStateRef<'_>) {
+    *state.opml_import.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[tauri::command]

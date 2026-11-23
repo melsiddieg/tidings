@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import FeedIcon from './FeedIcon.svelte';
   import { store } from '../lib/store.svelte';
@@ -27,6 +28,18 @@
     return 'folder';
   });
   const dateLabel = $derived(rangeLabel(store.dateRange));
+
+  // The search can change outside this box: a saved search, or a click on a feed
+  // in the results. Typing sets the same value after a pause, so it is left alone.
+  $effect(() => {
+    const q = store.query;
+    untrack(() => {
+      if (q !== draft) {
+        clearTimeout(timer);
+        draft = q;
+      }
+    });
+  });
 
   // Ctrl/Cmd+F and "/" focus the search box.
   $effect(() => {

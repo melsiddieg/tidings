@@ -2707,3 +2707,98 @@ fn live_backup() {
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!("{}", result.expect("panicked").unwrap());
 }
+
+/// Importing a large OPML file adds only the feeds that are missing. Subscribed feeds
+/// keep their folders unless the user chooses the file's folders.
+#[test]
+fn opml_import_adds_only_new_feeds() {
+    let setup = || {
+        let (conn, dir) = temp_db();
+        let tech = db::create_folder(&conn, "Tech", None).unwrap();
+        let news = db::create_folder(&conn, "News", None).unwrap();
+        let a = db::insert_feed(&conn, "https://a.example/feed", Some(tech), Some("A"), None).unwrap();
+        let b = db::insert_feed(&conn, "http://www.b.example/rss/", None, Some("B"), None).unwrap();
+        let c = db::insert_feed(&conn, "https://c.example/feed", Some(news), Some("C"), None).unwrap();
+        (conn, dir, tech, news, [a, b, c])
+    };
+    let xml = r#"<opml><body>
+        <outline text=" tech ">
+          <outline text="A" xmlUrl="https://a.example/feed"/>
+          <outline text="New 1" xmlUrl="https://new1.example/feed"/>
+        </outline>
+        <outline text="Reading">
+          <outline text="B" xmlUrl="https://b.example/rss"/>
+          <outline text="Deep"><outline xmlUrl="https://new2.example/feed"/></outline>
+        </outline>
+        <outline text="Archive"><outline text="C" xmlUrl="https://c.example/feed"/></outline>
+        <outline text="New 1 again" xmlUrl="https://NEW1.example/feed/#top"/>
+        <outline text="Bad" xmlUrl="javascript:alert(1)"/>
+    </body></opml>"#;
+    let pending = opml::feeds_in(&opml::parse(xml).unwrap());
+    assert_eq!(pending.invalid, 1);
+    assert_eq!(pending.feeds[3].path, ["Reading", "Deep"]);
+
+    // The preview: two new feeds, three subscribed (B under another address), one
+    // listed twice, and two subscribed feeds that the file puts elsewhere.
+    let (conn, dir, tech, news, [_, b, c]) = setup();
+    let p = opml::preview(&conn, &pending, "list.opml").unwrap();
+    assert_eq!(
+        (p.in_file, p.new_feeds, p.subscribed, p.repeated, p.invalid),
+        (5, 2, 3, 1, 1),
+    );
+    assert_eq!(p.new_titles, ["New 1", "https://new2.example/feed"]);
+    assert_eq!(p.move_count, 2);
+    let moves: Vec<(&str, &str, &str)> = p.moves.iter().map(|m| (m.title.as_str(), m.from.as_str(), m.to.as_str())).collect();
+    assert_eq!(moves, [("B", "No folder", "Reading"), ("C", "News", "Archive")]);
+    // " tech " is the folder Tech. Keeping your folders makes Reading and Reading/Deep
+    // for the new feed; the file's folders also need Archive.
+    assert_eq!((p.new_folders_keep, p.new_folders_file), (2, 3));
+
+    // Keep my folders: new feeds go into the file's folders, made at the end and closed.
+    let stats = opml::apply(&conn, &pending, opml::Layout::Keep).unwrap();
+    assert_eq!((stats.feeds, stats.folders, stats.moved, stats.skipped), (2, 2, 0, 5));
+    let feeds = db::feeds(&conn).unwrap();
+    let folder_of = |url: &str| feeds.iter().find(|f| f.url == url).unwrap().folder_id;
+    assert_eq!(folder_of("https://new1.example/feed"), Some(tech));
+    assert_eq!(feeds.len(), 5, "no duplicates");
+    assert_eq!(db::feed(&conn, b).unwrap().folder_id, None);
+    assert_eq!(db::feed(&conn, c).unwrap().folder_id, Some(news));
+    let folders = db::folders(&conn).unwrap();
+    let reading = folders.iter().find(|f| f.title == "Reading").unwrap();
+    let deep = folders.iter().find(|f| f.title == "Deep").unwrap();
+    assert_eq!(folder_of("https://new2.example/feed"), Some(deep.id));
+    assert_eq!(deep.parent_id, Some(reading.id));
+    assert!(reading.position > folders.iter().find(|f| f.id == news).unwrap().position, "new folders go at the end");
+    assert!(!reading.expanded && !deep.expanded);
+    assert!(folders.iter().all(|f| f.title != "Archive"));
+    // Importing the same file again adds nothing.
+    let again = opml::preview(&conn, &pending, "list.opml").unwrap();
+    assert_eq!((again.new_feeds, again.move_count, again.new_folders_keep), (0, 2, 0));
+    assert_eq!(opml::apply(&conn, &pending, opml::Layout::Keep).unwrap().feeds, 0);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Use the file's folders: subscribed feeds move too.
+    let (conn, dir, _, news, [_, b, c]) = setup();
+    let stats = opml::apply(&conn, &pending, opml::Layout::File).unwrap();
+    assert_eq!((stats.feeds, stats.folders, stats.moved, stats.skipped), (2, 3, 2, 3));
+    let folders = db::folders(&conn).unwrap();
+    let id_of = |title: &str| folders.iter().find(|f| f.title == title).unwrap().id;
+    assert_eq!(db::feed(&conn, b).unwrap().folder_id, Some(id_of("Reading")));
+    assert_eq!(db::feed(&conn, c).unwrap().folder_id, Some(id_of("Archive")));
+    assert!(folders.iter().any(|f| f.id == news), "a folder left empty is kept");
+    let after = opml::preview(&conn, &pending, "list.opml").unwrap();
+    assert_eq!((after.new_feeds, after.move_count), (0, 0));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn feed_keys_ignore_small_differences() {
+    let key = opml::feed_key;
+    assert_eq!(key("http://www.Example.com/feed/"), key("https://example.com/feed"));
+    assert_eq!(key("https://example.com/feed#x"), key("https://example.com/feed"));
+    assert_ne!(key("https://example.com/feed?tag=a"), key("https://example.com/feed?tag=b"));
+    assert_ne!(key("https://example.com:8443/feed"), key("https://example.com/feed"));
+    assert_ne!(key("https://blog.example.com/feed"), key("https://example.com/feed"));
+}

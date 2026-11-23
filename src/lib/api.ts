@@ -10,6 +10,8 @@ import type {
   FeedPatch,
   FeedType,
   ItemRef,
+  ImportLayout,
+  ImportPreview,
   ImportStats,
   ListQuery,
   PeerTubeHit,
@@ -94,7 +96,10 @@ export const api = {
   deleteAllSubscriptions: () => call<void>('delete_all_subscriptions'),
   refresh: (opts: { feedIds?: number[]; folderId?: number } = {}) =>
     call<number>('refresh_feeds', { feedIds: opts.feedIds ?? null, folderId: opts.folderId ?? null }),
-  importOpml: () => call<ImportStats | null>('import_opml'),
+  /** Opens a file dialog; what importing the chosen file would do. `importOpml` then imports it. */
+  previewOpml: () => call<ImportPreview | null>('preview_opml'),
+  importOpml: (layout: ImportLayout) => call<ImportStats>('import_opml', { layout }),
+  cancelOpmlImport: () => call<void>('cancel_opml_import'),
   exportOpml: () => call<string | null>('export_opml'),
   backup: () => call<string | null>('backup'),
   /** Opens a file dialog; the summary of the chosen backup, which `restoreBackup` then restores. */

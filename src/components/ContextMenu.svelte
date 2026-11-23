@@ -70,6 +70,8 @@
     z-index: 1000;
     min-width: 210px;
     max-width: 320px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
     padding: 5px;
     border-radius: 11px;
     background: var(--bg-elevated);

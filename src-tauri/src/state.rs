@@ -93,6 +93,8 @@ pub struct AppState {
     pub startup_warning: Mutex<Option<String>>,
     /// The backup the user chose to restore, after its summary was shown.
     pub restore_file: Mutex<Option<PathBuf>>,
+    /// The feeds of the OPML file the user chose, after its preview was shown.
+    pub opml_import: Mutex<Option<crate::opml::Pending>>,
     /// Goes up at each restore, which replaces every row. Work that reads an article,
     /// waits for the network and then stores by the article's id checks it
     /// (`db_since`), so it never writes into the restored data.
@@ -139,6 +141,7 @@ impl AppState {
             data_dir,
             startup_warning: Mutex::new(startup_warning),
             restore_file: Mutex::new(None),
+            opml_import: Mutex::new(None),
             generation: AtomicU64::new(0),
         })
     }

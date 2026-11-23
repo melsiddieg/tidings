@@ -450,8 +450,28 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       }, 180);
       return total;
     }
+    case 'preview_opml':
+      return {
+        fileName: 'feedly-export.opml', inFile: 64, newFeeds: 11, subscribed: 52, repeated: 2, invalid: 1,
+        newTitles: ['Simon Willison', 'Latent Space', 'Hacker News: Front Page', 'The Pragmatic Engineer', 'Stratechery', 'Interconnects', 'Import AI', 'One Useful Thing'],
+        moveCount: 9,
+        moves: [
+          { title: 'LWN.net', from: 'Technology / Linux & Free Software', to: 'Linux' },
+          { title: 'Planet KDE', from: 'Technology / Linux & Free Software', to: 'Linux' },
+          { title: 'Ars Technica', from: 'Technology', to: 'News / Tech' },
+          { title: 'The Verge', from: 'Technology', to: 'News / Tech' },
+          { title: 'BBC News · World', from: 'World News', to: 'News' },
+          { title: 'Al Jazeera', from: 'World News', to: 'News' },
+          { title: 'Daring Fireball', from: 'No folder', to: 'Blogs' },
+          { title: 'Julia Evans', from: 'No folder', to: 'Blogs' },
+        ],
+        newFoldersKeep: 2, newFoldersFile: 5,
+      };
     case 'import_opml':
-      return { feeds: 0, folders: 0, skipped: 0 };
+      await wait(500);
+      return { feeds: 11, folders: args.layout === 'file' ? 5 : 2, moved: args.layout === 'file' ? 9 : 0, skipped: 55 };
+    case 'cancel_opml_import':
+      return null;
     case 'export_opml':
       return null;
     case 'backup':

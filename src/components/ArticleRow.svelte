@@ -8,6 +8,8 @@
   let { article }: { article: ArticleItem } = $props();
 
   const feed = $derived(store.feedById.get(article.feedId));
+  // While searching, results come from anywhere: say which folder each feed is in.
+  const path = $derived(store.query && feed ? store.folderPath(feed.folderId) : '');
   const selected = $derived(store.selectedId === article.id);
   const read = $derived(store.isRead(article));
   const starred = $derived(store.isStarred(article));
@@ -15,6 +17,7 @@
 
   function menu(e: MouseEvent) {
     store.selectedId = article.id;
+    const { clientX: x, clientY: y } = e;
     store.openMenu(e, [
       { label: 'Open in new tab', icon: 'book', shortcut: 'O', action: () => store.openArticleTab(article.id) },
       { label: 'Open in browser', icon: 'globe', shortcut: 'V', disabled: !article.url, action: () => store.openExternal(article.url) },
@@ -23,6 +26,17 @@
       { label: read ? 'Mark as unread' : 'Mark as read', icon: read ? 'circle' : 'check', shortcut: 'M', action: () => store.markRead([article.id], !read) },
       { label: starred ? 'Remove star' : 'Star', icon: 'star', shortcut: 'S', action: () => store.setStarred(article.id, !starred) },
       { separator: true },
+      ...(feed
+        ? [
+            {
+              label: 'Move feed to folder',
+              icon: 'folder',
+              shortcut: feed.folderId == null ? 'No folder' : (store.folderById.get(feed.folderId)?.title ?? ''),
+              action: () => store.openMenuAtPoint(x, y, store.folderMenuItems(feed)),
+            },
+            { separator: true },
+          ]
+        : []),
       { label: 'Delete article', icon: 'trash', danger: true, action: () => store.deleteArticle(article.id) },
     ]);
   }
@@ -51,7 +65,9 @@
   <div class="body">
     <div class="meta">
       <FeedIcon {feed} size={14} />
-      <span class="feed">{feed?.title ?? ''}</span>
+      <span class="feed" title={path ? `${feed?.title} · ${path}` : undefined}
+        >{feed?.title ?? ''}{#if path}<span class="path"> · <Icon name="folder" size={10} /> {path}</span>{/if}</span
+      >
       {#if article.hasEnclosure}<span class="clip" title="Has attachment"><Icon name="paperclip" size={11} /></span>{/if}
       <span class="time" title={new Date(article.published * 1000).toLocaleString()}>{shortTime(article.published, store.now)}</span>
     </div>
@@ -121,6 +137,14 @@
     text-overflow: ellipsis;
     font-weight: 500;
     color: var(--text-2);
+  }
+  .path {
+    font-weight: 400;
+    color: var(--text-3);
+  }
+  .path :global(svg) {
+    display: inline-block;
+    vertical-align: -1px;
   }
   .clip {
     display: grid;

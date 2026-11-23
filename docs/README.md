@@ -30,7 +30,9 @@ Source: <https://github.com/melsiddieg/tidings>
 - **Date filter**: Today, Yesterday, Last 7 or 30 days, This year, Older than 30 days or
   a custom range. It combines with everything else, and "Mark all as read" follows it,
   so *Older than 30 days* then *Mark all as read* clears a backlog.
-- Search over titles, text and authors.
+- Search over titles, text and authors. Feeds whose name or address matches come first,
+  each with the folder it is in and a **Move** button; click one to open it. While you
+  search, each article also shows its feed's folder.
 - Next/previous unread across feeds, and Akregator-style keyboard navigation (`?` lists all keys).
 - **Podcast player** with resume, seeking, 0.8×–2× speed and volume. Audio streams
   through Tidings' own proxy in byte ranges, and download-tracking redirects
@@ -90,6 +92,8 @@ Source: <https://github.com/melsiddieg/tidings>
   date added, unread articles or latest article, ascending or descending, with folders
   first. Turn off "Sort feeds too" to sort only folders. Manual order goes back to the
   order you made by dragging, which sorting never changes.
+- Move a feed to another folder from its right-click menu (in the sidebar or on any of
+  its articles), from the search results, or by dragging.
 - Add a feed straight into a folder with the **+** on the folder's row. The **+** at the
   top (and ⌘N) adds to the selected folder, or to the folder of the selected feed.
 - Favorites: pin feeds and folders to the top of the sidebar.
@@ -111,6 +115,11 @@ Source: <https://github.com/melsiddieg/tidings>
   a subreddit or Reddit user, a GitHub project (releases and commits) or user, a Medium
   writer, publication or tag, and an Apple Podcasts or Overcast page give theirs.
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
+  Before an import, Tidings shows what the file adds: only feeds you do not follow yet,
+  so nothing is added twice, even when an address differs only in `http`/`https`,
+  `www.` or a trailing slash. When the file puts feeds you follow in other folders, you
+  choose: keep your folders (new folders from the file go at the end), or move those
+  feeds to the file's folders.
 - **Backup and restore** (Settings → Archive & data, or the `…` menu): one file with
   your feeds, folders, articles with their read and starred state, settings, rules,
   saved searches, briefs and translations. Before a restore replaces everything, Tidings
@@ -218,8 +227,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.13.0-freebsd-x86_64.tar.gz
-./tidings-0.13.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.14.0-freebsd-x86_64.tar.gz
+./tidings-0.14.0-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next

@@ -5,6 +5,27 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-22
+
+### Added
+- OPML import shows what a file adds before it imports it: the new feeds, the feeds you
+  already follow (left out, so nothing is added twice), feeds listed twice in the file
+  and entries without a usable address. Addresses that differ only in `http` or `https`,
+  a leading `www.`, a trailing slash or the case of the host count as the same feed.
+- When the file puts feeds you follow in other folders, the import lists them and lets
+  you choose: keep your folders, where new feeds still go into the file's folders and
+  folders you do not have are added at the end; or use the file's folders, which also
+  moves those feeds. Folders left empty are kept, with their filter rules.
+- Search also finds feeds by name or address. They show above the matching articles,
+  each with the folder it is in, its unread count and a **Move** button; a click opens
+  the feed. While you search, each article shows its feed's folder.
+- **Move to folder** in a feed's right-click menu, and **Move feed to folder** in an
+  article's, list every folder with a check on the current one.
+
+### Changed
+- OPML import matches folder names without regard to case or spaces around them, so a
+  file's "ai" folder uses your "AI" folder instead of making a second one.
+
 ## [0.13.0] - 2026-11-22
 
 ### Added
@@ -512,7 +533,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/melsiddieg/tidings/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/melsiddieg/tidings/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/melsiddieg/tidings/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/melsiddieg/tidings/compare/v0.10.0...v0.11.0

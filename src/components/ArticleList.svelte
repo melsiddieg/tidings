@@ -3,6 +3,8 @@
   import Icon from '../lib/Icon.svelte';
   import ListHeader from './ListHeader.svelte';
   import ArticleRow from './ArticleRow.svelte';
+  import FeedIcon from './FeedIcon.svelte';
+  import { countLabel } from '../lib/util';
   import { store } from '../lib/store.svelte';
   import { dayGroup } from '../lib/util';
 
@@ -38,7 +40,17 @@
     });
   });
 
+  // Feeds that match the search, shown above the articles with the folder each is in.
+  const SHOWN_FEEDS = 5;
+  let allFeeds = $state(false);
+  $effect(() => {
+    store.query;
+    allFeeds = false;
+  });
+  const feedMatches = $derived(allFeeds ? store.feedMatches : store.feedMatches.slice(0, SHOWN_FEEDS));
+
   const emptyText = $derived.by(() => {
+    if (store.query && store.feedMatches.length) return { title: 'No articles match', body: `No articles match “${store.query}”.` };
     if (store.query) return { title: 'No matches', body: `Nothing matches “${store.query}”.` };
     if (store.dateFiltered)
       return { title: 'Nothing in this period', body: `No articles here for “${rangeLabel(store.dateRange)}”. Pick another date range above.` };
@@ -53,6 +65,34 @@
 <section class="list-pane">
   <ListHeader />
   <div class="list-scroll" bind:this={scroller} {onscroll} role="listbox" tabindex="-1">
+    {#if store.feedMatches.length}
+      <div class="day">Feeds</div>
+      <div class="matches">
+        {#each feedMatches as f (f.id)}
+          {@const path = store.folderPath(f.folderId)}
+          <div class="match" role="button" tabindex="-1" title="Show this feed" onclick={() => store.showFeed(f)} onkeydown={() => {}}>
+            <FeedIcon feed={f} size={16} />
+            <span class="m-text">
+              <span class="m-title">{f.title}</span>
+              <span class="m-path"><Icon name="folder" size={11} />{path || 'No folder'}</span>
+            </span>
+            {#if f.unread > 0}<span class="m-count">{countLabel(f.unread)}</span>{/if}
+            <button
+              class="btn small"
+              title="Move this feed to another folder"
+              onclick={(e) => {
+                e.stopPropagation();
+                store.openMenuAt(e.currentTarget as HTMLElement, store.folderMenuItems(f));
+              }}><Icon name="folder" size={12} />Move</button
+            >
+          </div>
+        {/each}
+        {#if !allFeeds && store.feedMatches.length > SHOWN_FEEDS}
+          <button class="more" onclick={() => (allFeeds = true)}>Show {store.feedMatches.length - SHOWN_FEEDS} more feeds</button>
+        {/if}
+      </div>
+      {#if store.articles.length}<div class="day">Articles</div>{/if}
+    {/if}
     {#each groups as { article, header } (article.id)}
       {#if header}<div class="day">{header}</div>{/if}
       <ArticleRow {article} />
@@ -112,6 +152,64 @@
     display: grid;
     place-items: center;
     padding: 24px;
+  }
+  .matches {
+    display: grid;
+    gap: 1px;
+    padding-bottom: 6px;
+  }
+  .match {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 8px;
+    padding: 7px 10px 7px 16px;
+    border-radius: 10px;
+    cursor: default;
+  }
+  .match:hover {
+    background: var(--bg-hover);
+  }
+  .m-text {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 1px;
+  }
+  .m-title,
+  .m-path {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .m-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .m-path {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .m-path :global(svg) {
+    flex: none;
+  }
+  .m-count {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .more {
+    justify-self: start;
+    margin: 2px 0 0 24px;
+    padding: 2px 4px;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 12px;
   }
   .empty {
     display: grid;

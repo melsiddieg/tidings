@@ -24,9 +24,10 @@ import type {
   Tab,
   Tree,
   TreeSort,
+  ImportLayout,
   VideoPlayer,
 } from './types';
-import { buildTree, childRef, flattenFeeds, isVideoLink, sameItem } from './util';
+import { buildTree, childRef, flattenFeeds, folderOptions, hostOf, isVideoLink, sameItem } from './util';
 import {
   FEED_TYPES,
   SORT_KEYS,
@@ -203,6 +204,15 @@ class Store {
   });
   folderById = $derived(new Map(this.tree.folders.map((f) => [f.id, f])));
   unreadTotal = $derived(this.tree.feeds.reduce((sum, f) => sum + f.unread, 0));
+  /** Feeds whose name or address has every word of the search, in sidebar order. */
+  feedMatches = $derived.by(() => {
+    const words = this.query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    return this.feedOrder.filter((f) => {
+      const text = `${f.title} ${f.feedTitle} ${hostOf(f.url)} ${hostOf(f.siteUrl)}`.toLowerCase();
+      return words.every((w) => text.includes(w));
+    });
+  });
   /** Feed types that have at least one feed, with their unread counts, in sidebar order. */
   typeSummary = $derived.by(() => {
     const rows: { info: TypeInfo; feeds: number; unread: number }[] = [];
@@ -1263,6 +1273,46 @@ class Store {
     }
   }
 
+  /** "Technology / Linux" for a folder, "" for the top level. */
+  folderPath(id: number | null): string {
+    const names: string[] = [];
+    let f = id == null ? undefined : this.folderById.get(id);
+    for (let depth = 0; f && depth < 64; depth++) {
+      names.unshift(f.title);
+      f = f.parentId == null ? undefined : this.folderById.get(f.parentId);
+    }
+    return names.join(' / ');
+  }
+
+  /** Folders to move a feed to, in sidebar order; a check marks where it is. */
+  folderMenuItems(feed: Feed): MenuItem[] {
+    const folders = folderOptions(this.root);
+    return [
+      { label: 'No folder', checked: feed.folderId == null, action: () => this.moveFeedTo(feed, null) },
+      ...(folders.length ? [{ separator: true }] : []),
+      ...folders.map((f) => ({
+        // Em spaces indent like the tree; the menu does not collapse them.
+        label: `${'\u2003'.repeat(f.depth)}${f.title}`,
+        checked: feed.folderId === f.id,
+        action: () => this.moveFeedTo(feed, f.id),
+      })),
+    ];
+  }
+
+  async moveFeedTo(feed: Feed, folderId: number | null) {
+    if (feed.folderId === folderId) return;
+    if (!(await this.moveItem({ kind: 'feed', id: feed.id }, folderId, null))) return;
+    if (folderId != null) this.revealFolder(folderId);
+    this.toast(`Moved “${feed.title}” to ${folderId == null ? 'the top level' : this.folderPath(folderId)}`, 'success');
+  }
+
+  /** Leaves the search and shows a feed, with its folder open in the sidebar. */
+  showFeed(feed: Feed) {
+    this.query = '';
+    if (feed.folderId != null) this.revealFolder(feed.folderId);
+    this.selectScope({ kind: 'feed', id: feed.id });
+  }
+
   /** Opens a folder and the folders around it, so a feed added there shows. */
   revealFolder(id: number) {
     const closed: number[] = [];
@@ -1375,22 +1425,24 @@ class Store {
   }
 
   /** Moves a feed or folder into `parentId` (null = top level), before `before` or at the end. */
-  async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null) {
-    if (sameItem(item, before)) return;
+  async moveItem(item: ItemRef, parentId: number | null, before: ItemRef | null): Promise<boolean> {
+    if (sameItem(item, before)) return false;
     // In a sorted list a new place in the same folder would not show. Moving into
     // another folder still works.
     const sorted = this.treeSort.key !== 'manual' && (item.kind === 'folder' || this.treeSort.feeds);
     const parentNow = item.kind === 'feed' ? this.feedById.get(item.id)?.folderId : this.folderById.get(item.id)?.parentId;
     if (sorted && (parentNow ?? null) === parentId) {
       this.toast(`The list is sorted by ${sortLabel(this.treeSort).toLowerCase()}. To arrange it by hand, choose Manual order in the sort menu.`);
-      return;
+      return false;
     }
     try {
       if (item.kind === 'feed') await api.moveFeed(item.id, parentId, before);
       else await api.moveFolder(item.id, parentId, before);
       await this.reloadTree();
+      return true;
     } catch (err) {
       this.error(err);
+      return false;
     }
   }
 
@@ -1419,19 +1471,35 @@ class Store {
     }
   }
 
+  /** Picks an OPML file and shows what importing it would do. */
   async importOpml() {
     try {
-      const stats = await api.importOpml();
-      if (!stats) return;
-      await this.reloadTree();
-      const parts = [`${stats.feeds} feed${stats.feeds === 1 ? '' : 's'}`];
-      if (stats.folders) parts.push(`${stats.folders} folder${stats.folders === 1 ? '' : 's'}`);
-      let text = `Imported ${parts.join(' in ')}`;
-      if (stats.skipped) text += ` · ${stats.skipped} already subscribed or invalid`;
-      this.toast(text, 'success');
+      const preview = await api.previewOpml();
+      if (!preview) return;
+      if (preview.newFeeds === 0 && preview.moveCount === 0) {
+        await api.cancelOpmlImport();
+        const n = preview.inFile;
+        this.toast(n ? `Nothing to import: you already follow all ${n === 1 ? 'the feed' : `${n} feeds`} in ${preview.fileName}, in the same folders` : `${preview.fileName} lists no feeds`);
+        return;
+      }
+      this.dialog = { kind: 'import-opml', preview };
     } catch (err) {
       this.error(err);
     }
+  }
+
+  /** Imports the file the preview showed. True when it was imported. */
+  async finishOpmlImport(layout: ImportLayout): Promise<boolean> {
+    const stats = await api.importOpml(layout);
+    this.dialog = null;
+    await this.reloadTree();
+    const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+    const parts = [`Added ${plural(stats.feeds, 'feed')}`];
+    if (stats.folders) parts[0] += ` and ${plural(stats.folders, 'folder')}`;
+    if (stats.moved) parts.push(`moved ${stats.moved}`);
+    if (stats.skipped) parts.push(`${stats.skipped} left out`);
+    this.toast(parts.join(' · '), 'success');
+    return true;
   }
 
   async exportOpml() {

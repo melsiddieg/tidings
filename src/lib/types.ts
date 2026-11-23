@@ -229,10 +229,33 @@ export interface Candidate {
 }
 
 export interface ImportStats {
+  /** New feeds added and new folders made. */
   feeds: number;
   folders: number;
+  /** Subscribed feeds moved to the file's folders. */
+  moved: number;
+  /** Already subscribed, listed twice, or without a usable address. */
   skipped: number;
 }
+
+/** What an OPML import would do (opml::preview). */
+export interface ImportPreview {
+  fileName: string;
+  inFile: number;
+  newFeeds: number;
+  subscribed: number;
+  repeated: number;
+  invalid: number;
+  newTitles: string[];
+  /** Subscribed feeds the file puts in another folder: how many, and the first few. */
+  moveCount: number;
+  moves: { title: string; from: string; to: string }[];
+  newFoldersKeep: number;
+  newFoldersFile: number;
+}
+
+/** Keep the folders of subscribed feeds, or move them to the file's folders. */
+export type ImportLayout = 'keep' | 'file';
 
 export interface AppInfo {
   version: string;
@@ -428,6 +451,7 @@ export type Dialog =
   | { kind: 'save-search'; id: number | null; title: string }
   | { kind: 'restore'; summary: BackupSummary }
   | { kind: 'export-starred' }
+  | { kind: 'import-opml'; preview: ImportPreview }
   | {
       kind: 'confirm';
       title: string;

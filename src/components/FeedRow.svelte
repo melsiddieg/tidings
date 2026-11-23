@@ -29,6 +29,7 @@
       { label: pinned ? 'Remove from Favorites' : 'Add to Favorites', icon: 'star', action: () => store.setPinned(ref, !pinned) },
       { label: 'Copy feed address', icon: 'copy', action: () => navigator.clipboard?.writeText(feed.url).then(() => store.toast('Feed address copied')) },
       { label: 'Change type', icon: type.icon, shortcut: type.one, action: () => store.openMenuAtPoint(x, y, store.typeMenuItems([feed])) },
+      { label: 'Move to folder', icon: 'folder', action: () => store.openMenuAtPoint(x, y, store.folderMenuItems(feed)) },
       { separator: true },
       { label: 'Properties…', icon: 'pencil', action: () => (store.dialog = { kind: 'feed', feedId: feed.id }) },
       { label: 'Unsubscribe…', icon: 'trash', danger: true, action: () => store.deleteFeed(feed) },
