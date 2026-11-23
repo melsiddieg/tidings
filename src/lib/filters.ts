@@ -1,6 +1,6 @@
 // Feed types and date ranges: the two ways to narrow the article list besides
 // folders and read state.
-import type { DateRange, FeedType, TreeSort, TreeSortKey } from './types';
+import type { DateRange, FeedType, TranslateLang, TreeSort, TreeSortKey } from './types';
 
 export interface TypeInfo {
   value: FeedType;
@@ -22,6 +22,19 @@ export const FEED_TYPES: TypeInfo[] = [
 
 export function typeInfo(type: FeedType): TypeInfo {
   return FEED_TYPES.find((t) => t.value === type) ?? FEED_TYPES[FEED_TYPES.length - 1];
+}
+
+export const LANGUAGE_NAMES: Record<string, string> = { en: 'English', ar: 'Arabic', zh: 'Chinese' };
+
+/** The languages an article can be translated into, the usual one first. Into
+ *  English: Chinese and Arabic articles. Into Arabic: every article not in Arabic,
+ *  but only when Arabic is the usual language or the article is Chinese, so English
+ *  readers do not get a Translate button on every English article. */
+export function translationTargets(language: '' | 'zh' | 'ar', usual: TranslateLang): TranslateLang[] {
+  const english = language === 'zh' || language === 'ar';
+  const arabic = language !== 'ar' && (usual === 'ar' || language === 'zh');
+  const all: TranslateLang[] = [...(english ? (['en'] as const) : []), ...(arabic ? (['ar'] as const) : [])];
+  return all.sort((a, b) => Number(b === usual) - Number(a === usual));
 }
 
 /** Ways to sort the sidebar, with what ascending and descending mean for each. */

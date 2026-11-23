@@ -7,7 +7,8 @@
   import { api, errorText, on } from '../lib/api';
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
-  import type { ArticleDetail, TranslationBlock, TranslationPart } from '../lib/types';
+  import type { ArticleDetail, TranslateLang, TranslationBlock, TranslationPart } from '../lib/types';
+  import { LANGUAGE_NAMES, translationTargets } from '../lib/filters';
   import { copyText, enclosureLabel, hostOf, isVideoFile, longTime, videoSource } from '../lib/util';
 
   let {
@@ -24,8 +25,20 @@
   let imagesOverride = $state<boolean | null>(null);
   // The translation shown instead of the article: filled part by part while the
   // local model works (`translating`).
-  let shown = $state<{ title: string | null; paragraphs: string[]; total: number; model: string | null; cut: boolean } | null>(null);
+  let shown = $state<{
+    title: string | null;
+    paragraphs: string[];
+    total: number;
+    model: string | null;
+    cut: boolean;
+    lang: TranslateLang;
+  } | null>(null);
   let translating = $state(false);
+  // Counts up with each translation, so a stopped one leaves the next one alone.
+  let translationRun = 0;
+  // The languages this article can be translated into, the usual one first.
+  const targets = $derived(detail ? translationTargets(detail.language, store.settings.translateTo) : []);
+  const otherLanguage = $derived(shown ? targets.find((t) => t !== shown?.lang) : undefined);
   // The translation in the article's layout, as far as it is done: each paragraph once
   // the model has translated it, and each image once the text before it is there.
   const translatedBlocks = $derived.by((): TranslationBlock[] => {
@@ -67,8 +80,9 @@
       if (t !== token) return;
       detail = d;
       if (tabId) store.setTabTitle(tabId, d.title);
+      const again = store.translated.get(d.id);
       if (store.feedById.get(d.feedId)?.fullText && d.url) toggleFullText(true);
-      else if (d.chinese && store.translated.has(d.id)) translate();
+      else if (again && translationTargets(d.language, store.settings.translateTo).includes(again)) translate(false, false, again);
     } catch (e) {
       if (t === token) error = errorText(e);
     } finally {
@@ -110,7 +124,7 @@
     if (detail.showingFullText && !force) {
       detail = await api.article(id, loadImages, false);
       // The translation was of the full text: translate the feed's text instead.
-      if (shown) translate(false, true);
+      if (shown) translate(false, true, shown.lang);
       return;
     }
     if (!detail.url) return store.toast('This article has no link to load');
@@ -120,7 +134,8 @@
       if (d.id === articleId) {
         detail = d;
         // The translation was of the feed's text: translate the full text instead.
-        if (shown || (d.chinese && store.translated.has(d.id))) translate(false, true);
+        const lang = shown?.lang ?? store.translated.get(d.id);
+        if (lang) translate(false, true, lang);
       }
     } catch (e) {
       if (!force) store.error(e);
@@ -134,7 +149,7 @@
     let stop: (() => void) | null = null;
     let gone = false;
     on<TranslationPart>('translation-part', (part) => {
-      if (!translating || !shown || part.articleId !== detail?.id || part.full !== detail.showingFullText) return;
+      if (!translating || !shown || part.articleId !== detail?.id || part.full !== detail.showingFullText || part.lang !== shown.lang) return;
       shown.total = part.total;
       if (part.index == null) shown.title = part.text;
       else shown.paragraphs[part.index] = part.text;
@@ -145,36 +160,44 @@
     };
   });
 
-  /** Shows the article in English, or the original again. `again` asks the model anew. */
-  async function translate(again = false, keep = false) {
+  /** Shows the article translated into `lang` (the usual language for this article
+   *  when none is given), or the original again. `again` asks the model anew;
+   *  `keep` translates again in the same language, for other text. */
+  async function translate(again = false, keep = false, lang: TranslateLang | null = null) {
     if (!detail) return;
     const d = detail;
-    if (shown && !again && !keep) {
+    if (shown && !again && !keep && !lang) {
       if (translating) api.stopTranslation();
+      translationRun++;
       shown = null;
       translating = false;
       store.translated.delete(d.id);
       return;
     }
+    const target = lang ?? shown?.lang ?? targets[0];
+    if (!target) return;
     if (!store.translateReady) {
       store.dialog = { kind: 'settings', section: 'ai' };
       return;
     }
-    store.translated.add(d.id);
-    shown = { title: null, paragraphs: [], total: 0, model: null, cut: false };
+    const run = ++translationRun;
+    store.translated.set(d.id, target);
+    shown = { title: null, paragraphs: [], total: 0, model: null, cut: false, lang: target };
     translating = true;
     try {
-      const t = await api.translate(d.id, d.showingFullText, again);
-      if (detail?.id === d.id && shown) shown = { title: t.title, paragraphs: t.paragraphs, total: t.paragraphs.length, model: t.model, cut: t.cut };
+      const t = await api.translate(d.id, d.showingFullText, again, target);
+      if (run === translationRun && detail?.id === d.id && shown) {
+        shown = { title: t.title, paragraphs: t.paragraphs, total: t.paragraphs.length, model: t.model, cut: t.cut, lang: t.lang ?? target };
+      }
     } catch (e) {
-      if (detail?.id !== d.id) return;
+      if (run !== translationRun || detail?.id !== d.id) return;
       shown = null;
       if (errorText(e) !== 'The translation was stopped') {
         store.translated.delete(d.id);
         store.error(e);
       }
     } finally {
-      if (detail?.id === d.id) translating = false;
+      if (run === translationRun && detail?.id === d.id) translating = false;
     }
   }
 
@@ -232,8 +255,8 @@
         toggleImages();
         break;
       case 'translate':
-        if (detail.chinese || shown) translate();
-        else store.toast('This article is not in Chinese');
+        if (targets.length || shown) translate();
+        else store.toast('To translate articles in English, choose Arabic under “Translate into” in Settings → Local AI');
         break;
       case 'browser':
         store.openExternal(detail.url);
@@ -274,11 +297,15 @@
         <button class="icon-btn" class:active={loadImages} title={loadImages ? 'Hide images (I)' : 'Load images (I)'} onclick={toggleImages}>
           <Icon name={loadImages ? 'image' : 'image-off'} size={16} />
         </button>
-        {#if detail.chinese}
+        {#if targets.length || shown}
           <button
             class="tool"
             class:on={!!shown}
-            title={shown ? 'Show the original (T)' : store.translateReady ? 'Translate into English with the local model (T)' : 'Translate: set up a local model'}
+            title={shown
+              ? 'Show the original (T)'
+              : store.translateReady
+                ? `Translate into ${LANGUAGE_NAMES[targets[0]]} with the local model (T)`
+                : 'Translate: set up a local model'}
             onclick={() => translate()}
           >
             {#if translating}<span class="spinner"></span>{:else}<Icon name="languages" size={15} />{/if}
@@ -382,15 +409,18 @@
           <div class="fulltext-note translation-note">
             <Icon name="languages" size={13} />
             {#if translating}
-              <span class="spinner"></span> Translating{shown.total ? ` ${shown.paragraphs.filter(Boolean).length} of ${shown.total}` : ''} with {store.settings.translateModel || store.settings.aiModel}…
+              <span class="spinner"></span> Translating into {LANGUAGE_NAMES[shown.lang]}{shown.total ? ` ${shown.paragraphs.filter(Boolean).length} of ${shown.total}` : ''} with {store.settings.translateModel || store.settings.aiModel}…
               <button class="link" onclick={stopTranslating}>Stop</button>
             {:else}
-              Translated from Chinese by {shown.model} · not checked by a person
+              Translated {detail.language ? `from ${LANGUAGE_NAMES[detail.language]} ` : ''}into {LANGUAGE_NAMES[shown.lang]} by {shown.model} · not checked by a person
               <button class="link" onclick={() => translate()}>Original</button>
               <button class="link" onclick={() => translate(true)}>Translate again</button>
+              {#if otherLanguage}
+                <button class="link" onclick={() => otherLanguage && translate(false, false, otherLanguage)}>{LANGUAGE_NAMES[otherLanguage]}</button>
+              {/if}
             {/if}
           </div>
-          <ArticleBody>
+          <ArticleBody dir={shown.lang === 'ar' ? 'rtl' : 'auto'}>
             {#each translatedBlocks as block, i (i)}
               {#if block.kind === 'image'}
                 <!-- One of the article's images, cleaned and proxied by sanitize::render; not from the model. -->

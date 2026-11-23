@@ -21,6 +21,7 @@ import type {
   RestoreResult,
   Brief,
   Translation,
+  TranslateLang,
   Rule,
   FeedActivity,
   SavedSearch,
@@ -119,8 +120,9 @@ export const api = {
   briefs: () => call<BriefInfo[]>('briefs'),
   brief: (id: number) => call<Brief | null>('brief', { id }),
   deleteBrief: (id: number) => call<void>('delete_brief', { id }),
-  translate: (id: number, fullText: boolean, again = false) =>
-    call<Translation>('translate_article', { id, fullText, again }),
+  /** `lang` null: the usual language from the settings. */
+  translate: (id: number, fullText: boolean, again = false, lang: TranslateLang | null = null) =>
+    call<Translation>('translate_article', { id, fullText, again, lang }),
   stopTranslation: () => call<void>('stop_translation'),
   feedActivity: () => call<FeedActivity[]>('feed_activity'),
   countArticles: (query: ListQuery) => call<number>('count_articles', { query }),

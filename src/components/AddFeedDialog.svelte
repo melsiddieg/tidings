@@ -123,7 +123,8 @@
       </div>
       <p class="hint">
         Paste any page: a website, an article, a YouTube channel or video, a subreddit, a GitHub project, a Medium
-        writer or an Apple Podcasts page. Tidings finds its feed. RSS, Atom and JSON Feed are supported.
+        writer, an Apple Podcasts page or a public Telegram channel (t.me link). Tidings finds its feed. RSS, Atom and
+        JSON Feed are supported.
       </p>
     </div>
 

@@ -240,6 +240,11 @@ pub struct ParsedFeed {
 pub fn parse_raw(bytes: &[u8], url: &Url) -> Result<model::Feed> {
     use feed_rs::parser::{ParseErrorKind, ParseFeedError};
     let parse = |bytes: &[u8]| feed_rs::parser::Builder::new().base_uri(Some(url.as_str())).build().parse(bytes);
+    // A Telegram channel's web preview: its posts, written out as an Atom feed.
+    if crate::telegram::is_telegram(url) {
+        let atom = crate::telegram::to_atom(&String::from_utf8_lossy(bytes), url)?;
+        return parse(atom.as_bytes()).map_err(|e| Error::msg(format!("Could not read the Telegram channel: {e}")));
+    }
     let mut parsed = parse(bytes);
     // feed-rs refuses a whole feed when one text element is empty, such as an empty
     // <media:description> on a YouTube video or an empty Atom <summary>. Try again

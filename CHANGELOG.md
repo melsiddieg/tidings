@@ -5,6 +5,22 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-22
+
+### Added
+- Public Telegram channels as feeds. Paste a channel's `t.me` link (or a link to one of
+  its posts) in Add Feed. Telegram has no feeds, so Tidings reads the channel's public
+  web preview at `t.me/s/name`, which needs no account: the 20 newest posts at each
+  refresh, with text, photos, links, forwarded-from names and the channel's photo as
+  its icon. Videos show their picture and a link to watch them on Telegram. Channels
+  that are private or turned the preview off get a clear error.
+- Translation into Arabic. Settings → Local AI → **Translate into** chooses English (as
+  before: Chinese articles, and now Arabic ones too) or Arabic (every article that is not
+  in Arabic: English, Chinese and others). The Arabic text is shown right to left, with
+  the article's images in place. Under a translation, a link switches to the other
+  language where it fits, such as a Chinese article into Arabic. Translations are kept
+  per language; the ones made before stay as English translations.
+
 ## [0.14.1] - 2026-11-22
 
 ### Fixed
@@ -544,7 +560,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/melsiddieg/tidings/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/melsiddieg/tidings/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/melsiddieg/tidings/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/melsiddieg/tidings/compare/v0.12.0...v0.13.0

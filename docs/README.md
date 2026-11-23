@@ -65,12 +65,14 @@ Source: <https://github.com/melsiddieg/tidings>
   computer or your local network writes it (Ollama, LM Studio, llama.cpp), never a cloud
   service, and it only sees titles, feed names, dates and short excerpts. Off until you
   choose a model in Settings → Local AI.
-- **Translate Chinese articles** into English with the same local model: a Translate
-  button (or `T`) on articles that are mostly Chinese. The translation appears paragraph
-  by paragraph, with the article's images in their places, is kept with the article,
-  and goes when the article goes. Models trained
-  on much Chinese text, such as Qwen, translate best; Settings → Local AI can name a
-  model for translations only.
+- **Translate articles** into English or Arabic with the same local model, paragraph by
+  paragraph, with the article's images in place. Settings → Local AI → **Translate into**
+  picks the usual language. With English, Chinese and Arabic articles get a Translate
+  button (or `T`). With Arabic, every article not in Arabic does, and the Arabic text is
+  shown right to left. Under a translation, one click switches to the other language
+  where it fits (a Chinese article into Arabic, for example). Translations are kept, one
+  per language, until the article's text changes. Qwen models translate Chinese and
+  Arabic well; Settings → Local AI can name a model for translations only.
 - **Filter rules** (Settings → Rules): when the title, the text, the author or the link
   contains certain words, mark the article as read, star it or delete it. For all
   feeds, a folder or one feed. Rules run on new articles; you can also apply a rule to
@@ -114,6 +116,12 @@ Source: <https://github.com/melsiddieg/tidings>
   feeds: a YouTube channel, playlist or video gives the channel's or playlist's feed;
   a subreddit or Reddit user, a GitHub project (releases and commits) or user, a Medium
   writer, publication or tag, and an Apple Podcasts or Overcast page give theirs.
+- **Public Telegram channels** as feeds: paste a channel's `t.me` link (or a link to one
+  of its posts). Telegram has no feeds, so Tidings reads the channel's public web
+  preview (`t.me/s/name`, no account needed): the 20 newest posts at each refresh, with
+  their text, photos and links; a video shows its picture and a link to watch it on
+  Telegram. Only public channels that keep the preview on work, not groups or private
+  channels, and only t.me is contacted.
 - **OPML import and export**, compatible with Akregator, NetNewsWire, Feedly and others.
   Before an import, Tidings shows what the file adds: only feeds you do not follow yet,
   so nothing is added twice, even when an address differs only in `http`/`https`,
@@ -227,8 +235,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.14.1-freebsd-x86_64.tar.gz
-./tidings-0.14.1-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.15.0-freebsd-x86_64.tar.gz
+./tidings-0.15.0-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
@@ -402,7 +410,7 @@ backend is only loaded in development and is not part of release builds.
 | `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
-| `T` | Translate a Chinese article, or show the original |
+| `T` | Translate the article (into English or Arabic, see Settings → Local AI), or show the original |
 | `S` | Star |
 | `M` | Mark read / unread |
 | `C` | Copy link |
@@ -439,7 +447,7 @@ src-tauri/src/
   images.rs              Re-encodes every image before the web view sees it
   updates.rs             Security check: are Tidings, yt-dlp and WebKitGTK up to date?
   brief.rs               AI briefs written by a local model (Ollama, LM Studio, llama.cpp)
-  translate.rs           Chinese-to-English translation by the same local model
+  translate.rs           Translation into English or Arabic by the same local model
   rules.rs               Filter rules: matching words in new articles
   net.rs                 HTTP clients and network safety checks
   scheduler.rs           Background refresh and archive cleanup

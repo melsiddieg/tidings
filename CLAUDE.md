@@ -30,12 +30,13 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src-tauri/src/` — `commands.rs` (IPC surface), `db.rs` (all SQL), `feeds.rs` (fetch, parse,
   store, favicons; `parse_raw` retries without empty text elements, which feed-rs 3.0 refuses), `sanitize.rs` (ammonia cleaning, tracker removal, image proxy rewrite),
   `protocol.rs` (`tidings://` image proxy and icons), `images.rs` (re-encodes every image
-  in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `translate.rs` (Chinese-to-English
-  translation by the same model), `rules.rs` (filter rules on new articles), `updates.rs` (security check: versions of Tidings,
+  in Rust before the web view sees it; draws SVG in a helper process), `brief.rs` (AI briefs by a local model), `translate.rs` (translation into English
+  or Arabic by the same model), `rules.rs` (filter rules on new articles), `updates.rs` (security check: versions of Tidings,
   yt-dlp and WebKitGTK, and what to run to update them), `net.rs` (HTTP clients, private-address
   checks), `reader.rs` (reader mode), `opml.rs`, `discover.rs` (finds the feed of a page: `<link>` tags,
   links that look like feeds, the home page, common paths, and `site_feeds` for YouTube, Reddit,
-  GitHub, Medium, Apple Podcasts and Overcast), `scheduler.rs`, `menu.rs` (macOS menu),
+  GitHub, Medium, Apple Podcasts, Overcast and Telegram), `telegram.rs` (public Telegram channels:
+  reads the web preview at `t.me/s/<name>` and writes its posts as Atom), `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
   `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
   files through the instance API, and Sepia Search), `backup.rs` (backups with `VACUUM
@@ -80,6 +81,11 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   service's feed address for a known site. The one other host is Apple's lookup
   service for Apple Podcasts and Overcast addresses. Do not add lookups that send the
   address to a third party (feed search services and the like).
+- Telegram channels (`telegram.rs`) are read only from `https://t.me/s/<name>`, through
+  `feeds::parse_raw` like any feed: `telegram::to_atom` turns the page into Atom (after
+  `sanitize::too_deep`), and its post HTML then goes through `sanitize::clean`. Never
+  store or show the page's HTML directly. Video posts link to Telegram; do not play
+  their `telesco.pe` files, whose addresses carry a short-lived token.
 - Start image, audio and video requests with `Net::public(url)`. It refuses private and
   local addresses where the request starts, after any rewriting (`media::strip_trackers`,
   cached redirect targets, addresses from yt-dlp or PeerTube). Do not check only in the
@@ -145,6 +151,8 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   (`paragraphs_are_numbered_as_before`): stored translations are matched by paragraph
   index. Keep the cap on the answer length and the stop between passages. Stored translations go with their article: the
   `translations_follow_article` trigger removes them when it is deleted or its text changes.
+  There is one per language (`lang`: "en", "ar"); a new target language needs its own
+  prompt and its own rule for which passages go to the model (`Lang::needs`).
 - Restoring a backup (`backup.rs`) treats the file as untrusted. Open it only through
   `open_backup` (read-only, `immutable`, defensive mode, `trusted_schema` off, a value
   length limit, `quick_check`), read only ordinary tables (`is_table`: no views or virtual

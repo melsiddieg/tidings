@@ -80,7 +80,7 @@ fn candidate(url: &Url, feed: feed_rs::model::Feed, trusted: Option<&Url>) -> Ca
         local: is_local(url, trusted),
         url: url.to_string(),
         title: feed.title.map(|t| t.content.trim().to_string()).unwrap_or_default(),
-        kind: kind_of(&feed.feed_type).into(),
+        kind: if crate::telegram::is_telegram(url) { "Telegram" } else { kind_of(&feed.feed_type) }.into(),
     }
 }
 
@@ -209,6 +209,11 @@ fn site_feeds(url: &Url) -> Vec<Known> {
         }
         (h, _) if h.strip_suffix(".medium.com").is_some_and(|name| plain(name, "-", 100)) => {
             vec![feed(format!("https://{h}/feed"))]
+        }
+
+        // A public Telegram channel: its web preview (telegram.rs).
+        ("t.me" | "telegram.me" | "telegram.dog", _) => {
+            crate::telegram::channel(url).map(|name| vec![Some(Known::Feed(crate::telegram::preview_url(&name)))]).unwrap_or_default()
         }
 
         ("podcasts.apple.com" | "itunes.apple.com", _) => parts
@@ -510,6 +515,11 @@ mod tests {
             ["https://www.youtube.com/feeds/videos.xml?playlist_id=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI"]
         );
         assert_eq!(feeds_of("https://www.youtube.com/user/google"), ["https://www.youtube.com/feeds/videos.xml?user=google"]);
+        // A Telegram channel, from its link, a post or its preview.
+        for link in ["https://t.me/durov", "https://t.me/durov/569", "https://t.me/s/durov", "https://telegram.me/durov"] {
+            assert_eq!(feeds_of(link), ["https://t.me/s/durov"], "{link}");
+        }
+        assert!(feeds_of("https://t.me/joinchat/AbCdEf").is_empty());
         // A handle or a video needs the page.
         assert!(feeds_of("https://www.youtube.com/@YouTube").is_empty());
         assert!(feeds_of("https://www.youtube.com/watch?v=jNQXAC9IVRw").is_empty());

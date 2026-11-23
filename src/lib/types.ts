@@ -113,9 +113,11 @@ export interface ArticleDetail {
   hasFullText: boolean;
   enclosureUrl: string | null;
   enclosureType: string | null;
-  /** Mostly Chinese: the article view offers to translate it. */
+  /** Mostly Chinese. */
   chinese: boolean;
-  /** Where a translation's paragraphs and the article's images go (Chinese articles only). */
+  /** "zh" (Chinese), "ar" (Arabic) or "" (another language), for the translations offered. */
+  language: '' | 'zh' | 'ar';
+  /** Where a translation's paragraphs and the article's images go (articles that can be translated). */
   translationLayout: TranslationBlock[];
 }
 
@@ -189,19 +191,24 @@ export interface Rule {
   hits: number;
 }
 
-/** An article translated into English by the local model (translate.rs). */
+/** The language of a translation: English or Arabic. */
+export type TranslateLang = 'en' | 'ar';
+
+/** An article translated by the local model (translate.rs). */
 export interface Translation {
   title: string;
   paragraphs: string[];
   model: string;
   /** The article was longer than what was translated. */
   cut: boolean;
+  lang: TranslateLang;
 }
 
 /** One part of a translation while the model works ("translation-part" event). */
 export interface TranslationPart {
   articleId: number;
   full: boolean;
+  lang: TranslateLang;
   /** null for the title, else the paragraph's index. */
   index: number | null;
   total: number;
@@ -295,6 +302,8 @@ export interface Settings {
   aiModel: string;
   /** The model that translates articles; empty uses aiModel. */
   translateModel: string;
+  /** The usual translation language: English (Chinese and Arabic articles) or Arabic (all others). */
+  translateTo: TranslateLang;
 }
 
 /** A PeerTube video file chosen by src-tauri/src/peertube.rs. */

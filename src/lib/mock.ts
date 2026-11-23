@@ -162,6 +162,7 @@ let settings: Settings = {
   userAgent: 'Mozilla/5.0 (compatible; Tidings/0.1; feed reader)', markReadDelay: 0, linkTarget: 'tab',
   theme: 'system', accent: 'ember', readerFont: 'serif', readerSize: 18, viewMode: 'widescreen', dockBadge: true,
   concurrency: 6, videoPlayer: '', aiProvider: 'ollama', aiEndpoint: '', aiModel: 'qwen3:4b', translateModel: '',
+  translateTo: 'en',
 };
 
 function counts() {
@@ -217,7 +218,8 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
     chinese: !!a.zh,
-    translationLayout: a.zh ? mockLayout(html) : [],
+    language: a.zh ? 'zh' : '',
+    translationLayout: a.zh || settings.translateTo === 'ar' ? mockLayout(html) : [],
   };
 }
 
@@ -243,21 +245,33 @@ function ruleMatches(r: Rule): typeof articles {
 
 /** The fake model translates one paragraph every 700 ms. Stop and new translations end the one that runs. */
 let translationRun = 0;
-async function mockTranslate(id: number, full: boolean): Promise<Translation> {
+const ZH_AR = [
+  'تغيّر البرمجيات مفتوحة المصدر طريقة تطوّر الذكاء الاصطناعي. تختار شركات أكثر فأكثر نشر أوزان نماذجها، فيستطيع الباحثون تشغيلها على حواسيبهم.',
+  'هذا يخفّض العتبة، ويحمي الخصوصية أيضاً: لا تحتاج البيانات إلى مغادرة جهاز المستخدم.',
+  'لكن الخبراء يحذّرون من أن الانفتاح لا يعني الأمان. ما زالت النماذج تحتاج إلى تقييم دقيق قبل استخدامها حيث يهمّ الأمر.',
+];
+
+async function mockTranslate(id: number, full: boolean, lang: 'en' | 'ar'): Promise<Translation> {
   const run = ++translationRun;
   const a = articles.find((x) => x.id === id);
-  if (!a?.zh) throw 'This article has no Chinese text';
+  if (!a) throw 'Article not found';
+  if (lang === 'en' && !a.zh) throw 'This article is already in English';
   const model = settings.translateModel || settings.aiModel;
-  const title = 'Open models change how AI develops';
+  // An English article into Arabic: one sentence per paragraph of the article.
+  const count = a.zh ? ZH_EN.length : mockLayout(a.html).filter((b) => b.kind === 'text').length;
+  const paragraphs = a.zh
+    ? lang === 'ar' ? ZH_AR : ZH_EN
+    : Array.from({ length: count }, (_, i) => `هذه ترجمة الفقرة ${i + 1} من المقال إلى العربية، كتبها النموذج المحلي.`);
+  const title = lang === 'ar' ? (a.zh ? 'النماذج المفتوحة تغيّر تطوّر الذكاء الاصطناعي' : `ترجمة: ${a.title}`) : 'Open models change how AI develops';
   await wait(500);
   if (run !== translationRun) throw 'The translation was stopped';
-  emit('translation-part', { articleId: id, full, index: null, total: ZH_EN.length, text: title });
-  for (let i = 0; i < ZH_EN.length; i++) {
-    await wait(700);
+  emit('translation-part', { articleId: id, full, lang, index: null, total: paragraphs.length, text: title });
+  for (let i = 0; i < paragraphs.length; i++) {
+    await wait(500);
     if (run !== translationRun) throw 'The translation was stopped';
-    emit('translation-part', { articleId: id, full, index: i, total: ZH_EN.length, text: ZH_EN[i] });
+    emit('translation-part', { articleId: id, full, lang, index: i, total: paragraphs.length, text: paragraphs[i] });
   }
-  return { title, paragraphs: ZH_EN, model, cut: false };
+  return { title, paragraphs, model, cut: false, lang };
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -346,6 +360,9 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
         if (local && !args.allowLocal) throw `local-network:${host}`;
         // A public page that names a feed on the local network.
         if (host === 'evil.example') return [{ url: 'http://192.168.1.1/feed', title: 'Router', kind: 'RSS', local: true }];
+        // A public Telegram channel (telegram.rs).
+        const channel = String(args.url).match(/(?:t|telegram)\.me\/(?:s\/)?([A-Za-z]\w{2,31})/);
+        if (channel) return [{ url: `https://t.me/s/${channel[1]}`, title: channel[1], kind: 'Telegram', local: false }];
         // discover::site_feeds: a GitHub project has two feeds.
         const repo = String(args.url).match(/github\.com\/([\w-]+)\/([\w.-]+)/);
         if (repo) {
@@ -590,7 +607,7 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       return hit.length;
     }
     case 'translate_article':
-      return mockTranslate(args.id, !!args.fullText);
+      return mockTranslate(args.id, !!args.fullText, args.lang ?? settings.translateTo);
     case 'stop_translation':
       translationRun++;
       return null;

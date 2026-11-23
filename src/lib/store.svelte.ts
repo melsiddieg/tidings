@@ -25,6 +25,7 @@ import type {
   Tree,
   TreeSort,
   ImportLayout,
+  TranslateLang,
   VideoPlayer,
 } from './types';
 import { buildTree, childRef, flattenFeeds, folderOptions, hostOf, isVideoLink, sameItem } from './util';
@@ -69,6 +70,7 @@ export const DEFAULT_SETTINGS: Settings = {
   aiEndpoint: '',
   aiModel: '',
   translateModel: '',
+  translateTo: 'en',
 };
 
 // UI preferences that are not worth a database round trip live in localStorage.
@@ -122,8 +124,9 @@ class Store {
   aiReady = $derived(this.settings.aiProvider !== '' && this.settings.aiModel.trim() !== '');
   /** Translations are set up: the same server, and a model for them or for briefs. */
   translateReady = $derived(this.settings.aiProvider !== '' && (this.settings.translateModel.trim() || this.settings.aiModel.trim()) !== '');
-  /** Articles translated in this session: they show translated when opened again. */
-  translated = new Set<number>();
+  /** Articles translated in this session, and into which language: they show
+   *  translated when opened again. */
+  translated = new Map<number, TranslateLang>();
   /** Brief tabs whose brief is being written, and the error of each that failed. */
   briefsRunning = $state<string[]>([]);
   briefErrors = $state<Record<string, string>>({});

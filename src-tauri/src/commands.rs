@@ -46,21 +46,31 @@ pub struct ArticleDetail {
     pub has_full_text: bool,
     pub enclosure_url: Option<String>,
     pub enclosure_type: Option<String>,
-    /// The article is mostly Chinese: the UI offers to translate it.
+    /// The article is mostly Chinese.
     pub chinese: bool,
-    /// For a Chinese article in the article view: where its translated paragraphs
-    /// and its images go (`translate::layout`). Empty otherwise.
+    /// "zh" (Chinese), "ar" (Arabic) or "" (another language): the UI offers the
+    /// translations that fit it and `Settings::translate_to`.
+    pub language: &'static str,
+    /// For an article the UI offers to translate, in the article view: where its
+    /// translated paragraphs and its images go (`translate::layout`). Empty otherwise.
     pub translation_layout: Vec<translate::Block>,
 }
 
-/// `layout`: fill `translation_layout` when the article is Chinese.
-fn detail(row: ArticleRow, load_images: bool, full_text: bool, layout: bool) -> ArticleDetail {
+/// `translate_to`: the usual translation language, with `Some` when the article
+/// view asks, so `translation_layout` is filled for an article it can translate:
+/// with Arabic, every article; with English, Chinese and Arabic ones.
+fn detail(row: ArticleRow, load_images: bool, full_text: bool, translate_to: Option<translate::Lang>) -> ArticleDetail {
     let use_full = full_text && row.full_content.is_some();
     let source = if use_full { row.full_content.as_deref() } else { row.content.as_deref() };
     let rendered = sanitize::render(source.unwrap_or(""), load_images);
     let text = sanitize::plain_text(&rendered.html);
-    let chinese = translate::is_chinese(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
-    let translation_layout = if chinese && layout { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
+    let language = translate::language(&format!("{} {}", row.title, text.chars().take(2_000).collect::<String>()));
+    let translatable = match translate_to {
+        Some(translate::Lang::Arabic) => true,
+        Some(translate::Lang::English) => !language.is_empty(),
+        None => false,
+    };
+    let translation_layout = if translatable { translate::layout(source.unwrap_or(""), load_images) } else { Vec::new() };
     ArticleDetail {
         id: row.id,
         feed_id: row.feed_id,
@@ -77,9 +87,15 @@ fn detail(row: ArticleRow, load_images: bool, full_text: bool, layout: bool) -> 
         has_full_text: row.full_content.is_some(),
         enclosure_url: row.enclosure_url,
         enclosure_type: row.enclosure_type,
-        chinese,
+        chinese: language == "zh",
+        language,
         translation_layout,
     }
+}
+
+/// The language articles are usually translated into.
+fn translate_to(settings: &crate::settings::Settings) -> translate::Lang {
+    translate::Lang::from_code(&settings.translate_to).unwrap_or_default()
 }
 
 fn spawn_refresh(app: &AppHandle, state: &Arc<AppState>, ids: Vec<i64>) {
@@ -123,7 +139,7 @@ pub fn list_articles_full(
     let conn = state.db();
     let ids = db::list_article_ids(&conn, &query)?;
     ids.into_iter()
-        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, false)))
+        .map(|id| db::article(&conn, id).map(|row| detail(row, load, false, None)))
         .collect()
 }
 
@@ -134,9 +150,9 @@ pub fn get_article(
     load_images: Option<bool>,
     full_text: Option<bool>,
 ) -> Result<ArticleDetail> {
-    let load = load_images.unwrap_or(state.settings().load_images);
+    let settings = state.settings();
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load, full_text.unwrap_or(false), true))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), full_text.unwrap_or(false), Some(translate_to(&settings))))
 }
 
 /// Downloads the linked web page and extracts the full article (reader mode).
@@ -160,7 +176,7 @@ pub async fn fetch_full_text(
         db::save_full_content(&*state.db_since(generation)?, id, &extracted.html)?;
     }
     let row = db::article(&state.db(), id)?;
-    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, true))
+    Ok(detail(row, load_images.unwrap_or(settings.load_images), true, Some(translate_to(&settings))))
 }
 
 /// Reader pages kept in memory hold at most this much HTML together.
@@ -796,15 +812,16 @@ pub async fn make_brief(state: AppStateRef<'_>, query: ListQuery, title: String)
 struct TranslationPart {
     article_id: i64,
     full: bool,
+    lang: translate::Lang,
     index: Option<usize>,
     total: usize,
     text: String,
 }
 
-/// Translates an article into English with the local model (translate.rs): the
-/// full text when it is loaded and `full_text` is set, else the feed's text. A
-/// stored translation is returned at once unless `again`. Parts arrive as
-/// "translation-part" events while the model works.
+/// Translates an article with the local model (translate.rs) into `lang`, or the
+/// usual language from the settings: the full text when it is loaded and
+/// `full_text` is set, else the feed's text. A stored translation is returned at
+/// once unless `again`. Parts arrive as "translation-part" events while the model works.
 #[tauri::command]
 pub async fn translate_article(
     app: AppHandle,
@@ -812,25 +829,27 @@ pub async fn translate_article(
     id: i64,
     full_text: Option<bool>,
     again: Option<bool>,
+    lang: Option<translate::Lang>,
 ) -> Result<translate::Translation> {
     let generation = state.generation();
+    let settings = state.settings();
+    let lang = lang.unwrap_or_else(|| translate_to(&settings));
     let row = db::article(&state.db(), id)?;
     let full = full_text.unwrap_or(false) && row.full_content.is_some();
-    let stored = if again.unwrap_or(false) { None } else { db::translation(&state.db(), id, full)? };
+    let stored = if again.unwrap_or(false) { None } else { db::translation(&state.db(), id, full, lang.code())? };
     if let Some(found) = stored.and_then(|json| serde_json::from_str(&json).ok()) {
         return Ok(found);
     }
     let source = if full { row.full_content.as_deref() } else { row.content.as_deref() };
     let paragraphs = sanitize::paragraphs(source.unwrap_or(""));
     let total = paragraphs.len();
-    let settings = state.settings();
     let send = |index: Option<usize>, text: &str| {
-        let part = TranslationPart { article_id: id, full, index, total, text: text.to_string() };
+        let part = TranslationPart { article_id: id, full, lang, index, total, text: text.to_string() };
         let _ = app.emit("translation-part", part);
     };
-    let translation = translate::translate(&state.net(), &settings, &row.title, &paragraphs, send).await?;
+    let translation = translate::translate(&state.net(), &settings, lang, &row.title, &paragraphs, send).await?;
     let json = serde_json::to_string(&translation).map_err(|e| Error::msg(e.to_string()))?;
-    db::save_translation(&*state.db_since(generation)?, id, full, &json)?;
+    db::save_translation(&*state.db_since(generation)?, id, full, lang.code(), &json)?;
     Ok(translation)
 }
 

@@ -45,7 +45,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// The version the last migration in `migrate` sets. A backup of a newer version is
 /// refused (backup.rs). A migration that changes what stored values mean, rather
 /// than adding tables or columns, must also raise `backup::OLDEST_VERSION`.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// 10 November 2026, when 0.9.2 came out: since then a feed on the local network
 /// is added only after the user allowed its address.
@@ -277,6 +277,37 @@ fn migrate(conn: &Connection) -> Result<()> {
                     OR (full = 1 AND NEW.full_content IS NOT OLD.full_content));
             END;
             PRAGMA user_version = 8;
+            COMMIT;",
+        )?;
+    }
+    if version < 9 {
+        // v9: a translation per language (`lang`: "en" or "ar"); the ones before
+        // were all English. The primary key changes, so the table is made again.
+        // The trigger names the table, so it goes first and comes back unchanged.
+        conn.execute_batch(
+            "BEGIN;
+            DROP TRIGGER IF EXISTS translations_follow_article;
+            CREATE TABLE translations_v9 (
+                article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                full       INTEGER NOT NULL,
+                lang       TEXT NOT NULL DEFAULT 'en',
+                created_at INTEGER NOT NULL,
+                body       TEXT NOT NULL,
+                PRIMARY KEY (article_id, full, lang)
+            );
+            INSERT INTO translations_v9 (article_id, full, lang, created_at, body)
+                SELECT article_id, full, 'en', created_at, body FROM translations;
+            DROP TABLE translations;
+            ALTER TABLE translations_v9 RENAME TO translations;
+            CREATE TRIGGER translations_follow_article
+            AFTER UPDATE OF is_deleted, title, content, full_content ON articles
+            BEGIN
+                DELETE FROM translations WHERE article_id = NEW.id AND (
+                    NEW.is_deleted = 1 OR NEW.title IS NOT OLD.title
+                    OR (full = 0 AND NEW.content IS NOT OLD.content)
+                    OR (full = 1 AND NEW.full_content IS NOT OLD.full_content));
+            END;
+            PRAGMA user_version = 9;
             COMMIT;",
         )?;
     }
@@ -806,22 +837,23 @@ pub fn get_brief(conn: &Connection, id: i64) -> Result<Option<(BriefInfo, String
         .optional()?)
 }
 
-/// A stored translation of an article (JSON), of its full text when `full`.
-pub fn translation(conn: &Connection, article_id: i64, full: bool) -> Result<Option<String>> {
+/// A stored translation of an article (JSON) into `lang` ("en", "ar"), of its full
+/// text when `full`.
+pub fn translation(conn: &Connection, article_id: i64, full: bool, lang: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            "SELECT body FROM translations WHERE article_id = ?1 AND full = ?2",
-            params![article_id, full],
+            "SELECT body FROM translations WHERE article_id = ?1 AND full = ?2 AND lang = ?3",
+            params![article_id, full, lang],
             |r| r.get(0),
         )
         .optional()?)
 }
 
-pub fn save_translation(conn: &Connection, article_id: i64, full: bool, body: &str) -> Result<()> {
+pub fn save_translation(conn: &Connection, article_id: i64, full: bool, lang: &str, body: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO translations (article_id, full, created_at, body) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(article_id, full) DO UPDATE SET created_at = excluded.created_at, body = excluded.body",
-        params![article_id, full, now(), body],
+        "INSERT INTO translations (article_id, full, lang, created_at, body) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(article_id, full, lang) DO UPDATE SET created_at = excluded.created_at, body = excluded.body",
+        params![article_id, full, lang, now(), body],
     )?;
     Ok(())
 }

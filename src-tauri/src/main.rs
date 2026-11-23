@@ -25,6 +25,7 @@ mod sanitize;
 mod scheduler;
 mod settings;
 mod state;
+mod telegram;
 mod translate;
 mod updates;
 mod video;

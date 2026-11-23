@@ -48,6 +48,9 @@ pub struct Settings {
     /// The model that translates articles (translate.rs), on the same server. Empty
     /// uses `ai_model`.
     pub translate_model: String,
+    /// The language articles are translated into: "en" (Chinese and Arabic articles)
+    /// or "ar" (articles in any other language).
+    pub translate_to: String,
 }
 
 impl Default for Settings {
@@ -77,6 +80,7 @@ impl Default for Settings {
             ai_endpoint: String::new(),
             ai_model: String::new(),
             translate_model: String::new(),
+            translate_to: "en".into(),
         }
     }
 }
@@ -102,6 +106,7 @@ impl Settings {
         self.reader_font = pick(&self.reader_font, &["serif", "sans", "mono"], "serif");
         self.reader_size = self.reader_size.clamp(13, 28);
         self.view_mode = pick(&self.view_mode, &["widescreen", "normal", "combined"], "widescreen");
+        self.translate_to = pick(&self.translate_to, &["en", "ar"], "en");
         self.concurrency = self.concurrency.clamp(1, 16);
 
         self.proxy = self.proxy.trim().to_string();

@@ -450,8 +450,8 @@
               <div class="row-text">
                 <span class="row-title">Translation model</span>
                 <span class="hint">
-                  Translates a Chinese article into English when you click Translate (or press T), paragraph by paragraph.
-                  Models trained on much Chinese text, such as Qwen (for example qwen3:4b), translate best.
+                  Translates an article when you click Translate (or press T), paragraph by paragraph. Qwen models (for
+                  example qwen3:4b) translate Chinese and Arabic well; larger models translate better.
                 </span>
               </div>
               <div class="inline">
@@ -465,6 +465,24 @@
                   <input class="input mono" bind:value={translateModel} onblur={() => saveTranslateModel(translateModel)} onkeydown={onEnter(() => saveTranslateModel(translateModel))} placeholder="Same as briefs" spellcheck="false" autocomplete="off" />
                 {/if}
               </div>
+            </div>
+            <div class="row">
+              <div class="row-text">
+                <span class="row-title">Translate into</span>
+                <span class="hint">
+                  {s.translateTo === 'ar'
+                    ? 'Every article not in Arabic gets a Translate button. Arabic articles can be translated into English.'
+                    : 'Chinese and Arabic articles get a Translate button. Chinese articles can also be translated into Arabic.'}
+                </span>
+              </div>
+              <select
+                class="input"
+                value={s.translateTo}
+                onchange={(e) => store.updateSettings({ translateTo: (e.currentTarget as HTMLSelectElement).value as 'en' | 'ar' })}
+              >
+                <option value="en">English</option>
+                <option value="ar">Arabic (العربية)</option>
+              </select>
             </div>
           {/if}
         </div>
