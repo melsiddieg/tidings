@@ -50,7 +50,10 @@ impl Net {
     pub fn new(settings: &Settings) -> Result<Self> {
         let proxied = !settings.proxy.is_empty();
         let web = public_only(base_builder(settings)?, proxied, 8).build()?;
-        let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 5).build()?;
+        // Podcast audio often passes through several trackers and an ad server before
+        // the file: Team Coco's episodes take nine redirects when no tracker is
+        // removed. Each one is checked like the first.
+        let image = public_only(base_builder(settings)?.timeout(Duration::from_secs(25)), proxied, 10).build()?;
         // A private host may redirect within itself (http to https, a moved path),
         // and nowhere else. This client does not check DNS answers (the host it is
         // for is private), so a redirect to another name could lead to any other

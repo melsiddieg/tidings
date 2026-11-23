@@ -37,6 +37,13 @@ export function translationTargets(language: '' | 'zh' | 'ar', usual: TranslateL
   return all.sort((a, b) => Number(b === usual) - Number(a === usual));
 }
 
+/** Every language an article can be translated into, whatever the usual one: the
+ *  Translate button's menu. English only for Chinese and Arabic articles (an English
+ *  article would come back as it is); Arabic for everything not in Arabic. */
+export function possibleTargets(language: '' | 'zh' | 'ar'): TranslateLang[] {
+  return language === 'zh' ? ['en', 'ar'] : language === 'ar' ? ['en'] : ['ar'];
+}
+
 /** Ways to sort the sidebar, with what ascending and descending mean for each. */
 export const SORT_KEYS: { key: TreeSortKey; label: string; up: string; down: string }[] = [
   { key: 'manual', label: 'Manual order', up: '', down: '' },

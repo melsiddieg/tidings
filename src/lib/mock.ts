@@ -219,7 +219,7 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
     chinese: !!a.zh,
     language: a.zh ? 'zh' : '',
-    translationLayout: a.zh || settings.translateTo === 'ar' ? mockLayout(html) : [],
+    translationLayout: mockLayout(html),
   };
 }
 

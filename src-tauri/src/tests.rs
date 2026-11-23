@@ -3024,3 +3024,32 @@ fn telegram_channels_are_read() {
     };
     assert_eq!(err.to_string(), crate::telegram::NO_PREVIEW);
 }
+
+/// Team Coco's episodes sit behind four trackers, the first of them Podroll
+/// (pdrl.fm), and Simplecast's own redirects: nine in all. Before 0.15.1 Tidings
+/// knew no Podroll prefix and allowed five redirects, so every episode failed with
+/// "too many redirects".
+#[tokio::test]
+#[ignore = "needs the network"]
+async fn live_podcast_trackers() {
+    use crate::media::{fetch, strip_trackers, Media};
+    let net = crate::net::Net::new(&crate::settings::Settings::default()).unwrap();
+    let feed_url = Url::parse("https://feeds.simplecast.com/dHoohVNH").unwrap();
+    let response = net.get(&feed_url, None).await.unwrap().send().await.unwrap();
+    let body = crate::net::read_limited(response, crate::net::MAX_FEED_BYTES).await.unwrap();
+    let feed = crate::feeds::parse_feed(&body, &feed_url, true).unwrap();
+    let enclosure = feed.articles.iter().find_map(|a| a.enclosure_url.clone()).expect("an episode");
+    let media = std::sync::Arc::new(Media::default());
+    // With the trackers removed, and with all of them in place.
+    for source in [strip_trackers(&enclosure), enclosure.clone()] {
+        let chunk = fetch(&net, &media, &source, Some("bytes=0-1")).await.unwrap_or_else(|e| panic!("{source}: {e}"));
+        println!("{} → {} {:?}", &source[..source.len().min(60)], chunk.status, chunk.content_range);
+        assert_eq!(chunk.status, 206);
+    }
+    assert!(strip_trackers(&enclosure).contains("simplecastaudio.com"), "{}", strip_trackers(&enclosure));
+    // A seek into the middle: the bytes that were asked for, MP3 data.
+    let middle = fetch(&net, &media, &strip_trackers(&enclosure), Some("bytes=30000000-")).await.unwrap();
+    assert_eq!(middle.status, 206);
+    assert!(middle.content_range.as_deref().unwrap().starts_with("bytes 30000000-"), "{:?}", middle.content_range);
+    assert!(middle.bytes.windows(2).any(|w| w[0] == 0xFF && w[1] & 0xE0 == 0xE0), "an MP3 frame header");
+}

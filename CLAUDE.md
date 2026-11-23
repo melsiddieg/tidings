@@ -13,6 +13,7 @@ cargo test --manifest-path src-tauri/Cargo.toml                 # offline tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored    # + live network test
 TIDINGS_LIVE_PLAYER=1 cargo test --manifest-path src-tauri/Cargo.toml live_player -- --ignored  # plays a clip in mpv/IINA
 cargo test --manifest-path src-tauri/Cargo.toml live_listen -- --ignored   # yt-dlp finds a clip's audio ("Listen")
+cargo test --manifest-path src-tauri/Cargo.toml live_podcast_trackers -- --ignored   # Team Coco's audio through its trackers
 cargo test --manifest-path src-tauri/Cargo.toml live_discovery -- --ignored   # finds feeds on YouTube, GitHub, Medium, Apple Podcasts
 TIDINGS_LIVE_DB=<path to tidings.db> cargo test --manifest-path src-tauri/Cargo.toml live_backup -- --ignored  # backs up and restores a real database (read-only)
 npm run tauri dev                        # run the app (Vite on port 1420)

@@ -5,6 +5,33 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-23
+
+### Changed
+- The Translate button has an arrow that opens a language menu: translate this article
+  into English or Arabic, or show the original, and choose the usual language. The
+  button shows the usual language ("Translate · AR"), and on an article that is already
+  in it, the button opens the menu. Before, Arabic had to be chosen in Settings first,
+  and English articles showed no Translate button at all.
+
+### Fixed
+- Podcasts behind many tracking redirects play again, such as Team Coco's (Conan
+  O'Brien Needs A Friend). Their audio links pass through four trackers, the first
+  one Podroll (`pdrl.fm`), before Simplecast's own redirects: up to nine in all, and
+  the media proxy allowed five, so every episode failed with "too many redirects".
+  Tidings now removes Podroll, `play.podtrac.com`, `swap.fm` and `pdcn.co` prefixes
+  like the trackers it already knew, and allows ten redirects for audio, video and
+  images.
+- The media proxy asks again once when a host does not answer within 20 seconds,
+  sends a request around in circles, or closes the connection before any data;
+  when the connection closes partway, it keeps what came and asks for the rest.
+  Simplecast's ad server does each of these at times.
+
+### Security
+- cookie 0.18.3 (RUSTSEC-2026-0594: nonces of private cookies can repeat in a process
+  that forks). Tidings uses neither private cookies nor `fork()`; Tauri uses the crate
+  only for its cookie types.
+
 ## [0.15.0] - 2026-11-22
 
 ### Added
@@ -560,7 +587,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/melsiddieg/tidings/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/melsiddieg/tidings/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/melsiddieg/tidings/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/melsiddieg/tidings/compare/v0.13.0...v0.14.0

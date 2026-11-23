@@ -66,13 +66,13 @@ Source: <https://github.com/melsiddieg/tidings>
   service, and it only sees titles, feed names, dates and short excerpts. Off until you
   choose a model in Settings → Local AI.
 - **Translate articles** into English or Arabic with the same local model, paragraph by
-  paragraph, with the article's images in place. Settings → Local AI → **Translate into**
-  picks the usual language. With English, Chinese and Arabic articles get a Translate
-  button (or `T`). With Arabic, every article not in Arabic does, and the Arabic text is
-  shown right to left. Under a translation, one click switches to the other language
-  where it fits (a Chinese article into Arabic, for example). Translations are kept, one
-  per language, until the article's text changes. Qwen models translate Chinese and
-  Arabic well; Settings → Local AI can name a model for translations only.
+  paragraph, with the article's images in place. The arrow next to Translate (in the
+  article's toolbar) chooses the language for this article and sets the usual one; the
+  button itself, or `T`, translates into the usual one. Into English: Chinese and Arabic
+  articles. Into Arabic: any article not in Arabic, shown right to left. Translations
+  are kept, one per language, until the article's text changes. Qwen models translate
+  Chinese and Arabic well; Settings → Local AI can name a model for translations only
+  and also sets the usual language.
 - **Filter rules** (Settings → Rules): when the title, the text, the author or the link
   contains certain words, mark the article as read, star it or delete it. For all
   feeds, a folder or one feed. Rules run on new articles; you can also apply a rule to
@@ -235,8 +235,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.15.0-freebsd-x86_64.tar.gz
-./tidings-0.15.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.15.1-freebsd-x86_64.tar.gz
+./tidings-0.15.1-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
@@ -410,7 +410,7 @@ backend is only loaded in development and is not part of release builds.
 | `L` | Listen to the video's sound in the podcast player |
 | `F` | Load the full article |
 | `I` | Show or hide images |
-| `T` | Translate the article (into English or Arabic, see Settings → Local AI), or show the original |
+| `T` | Translate the article into the usual language (or choose one), or show the original |
 | `S` | Star |
 | `M` | Mark read / unread |
 | `C` | Copy link |

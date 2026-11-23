@@ -8,7 +8,7 @@
   import { player, isAudio } from '../lib/player.svelte';
   import { store } from '../lib/store.svelte';
   import type { ArticleDetail, TranslateLang, TranslationBlock, TranslationPart } from '../lib/types';
-  import { LANGUAGE_NAMES, translationTargets } from '../lib/filters';
+  import { LANGUAGE_NAMES, possibleTargets, translationTargets } from '../lib/filters';
   import { copyText, enclosureLabel, hostOf, isVideoFile, longTime, videoSource } from '../lib/util';
 
   let {
@@ -36,9 +36,29 @@
   let translating = $state(false);
   // Counts up with each translation, so a stopped one leaves the next one alone.
   let translationRun = 0;
-  // The languages this article can be translated into, the usual one first.
+  // The languages the Translate button offers at one click, the usual one first,
+  // and every language its menu offers.
   const targets = $derived(detail ? translationTargets(detail.language, store.settings.translateTo) : []);
-  const otherLanguage = $derived(shown ? targets.find((t) => t !== shown?.lang) : undefined);
+  const possible = $derived(detail ? possibleTargets(detail.language) : []);
+  const otherLanguage = $derived(shown ? possible.find((t) => t !== shown?.lang) : undefined);
+  let languageButton: HTMLButtonElement | undefined = $state();
+
+  /** The Translate button's menu: translate into either language, and the usual one. */
+  function translateMenu() {
+    if (!languageButton || !detail) return;
+    const usual = store.settings.translateTo;
+    store.openMenuAt(languageButton, [
+      ...possible.map((lang) => ({
+        label: lang === 'ar' ? 'Translate into Arabic (العربية)' : 'Translate into English',
+        checked: shown?.lang === lang,
+        action: () => translate(false, false, lang),
+      })),
+      ...(shown ? [{ label: 'Show the original', checked: false, action: () => translate() }] : []),
+      { separator: true },
+      { label: 'Usually translate into English', checked: usual === 'en', action: () => store.updateSettings({ translateTo: 'en' }) },
+      { label: 'Usually translate into Arabic', checked: usual === 'ar', action: () => store.updateSettings({ translateTo: 'ar' }) },
+    ]);
+  }
   // The translation in the article's layout, as far as it is done: each paragraph once
   // the model has translated it, and each image once the text before it is there.
   const translatedBlocks = $derived.by((): TranslationBlock[] => {
@@ -256,7 +276,7 @@
         break;
       case 'translate':
         if (targets.length || shown) translate();
-        else store.toast('To translate articles in English, choose Arabic under “Translate into” in Settings → Local AI');
+        else translateMenu();
         break;
       case 'browser':
         store.openExternal(detail.url);
@@ -297,20 +317,27 @@
         <button class="icon-btn" class:active={loadImages} title={loadImages ? 'Hide images (I)' : 'Load images (I)'} onclick={toggleImages}>
           <Icon name={loadImages ? 'image' : 'image-off'} size={16} />
         </button>
-        {#if targets.length || shown}
-          <button
-            class="tool"
-            class:on={!!shown}
-            title={shown
-              ? 'Show the original (T)'
-              : store.translateReady
-                ? `Translate into ${LANGUAGE_NAMES[targets[0]]} with the local model (T)`
-                : 'Translate: set up a local model'}
-            onclick={() => translate()}
-          >
-            {#if translating}<span class="spinner"></span>{:else}<Icon name="languages" size={15} />{/if}
-            <span>{shown ? 'Original' : 'Translate'}</span>
-          </button>
+        {#if possible.length || shown}
+          <span class="split">
+            <button
+              class="tool"
+              class:on={!!shown}
+              title={shown
+                ? 'Show the original (T)'
+                : !store.translateReady
+                  ? 'Translate: set up a local model'
+                  : targets.length
+                    ? `Translate into ${LANGUAGE_NAMES[targets[0]]} with the local model (T)`
+                    : 'Translate: choose a language (T)'}
+              onclick={() => (shown || targets.length ? translate() : translateMenu())}
+            >
+              {#if translating}<span class="spinner"></span>{:else}<Icon name="languages" size={15} />{/if}
+              <span>{shown ? 'Original' : targets.length ? `Translate · ${targets[0].toUpperCase()}` : 'Translate'}</span>
+            </button>
+            <button class="tool more" class:on={!!shown} bind:this={languageButton} title="Choose the language" aria-label="Choose the translation language" onclick={translateMenu}>
+              <Icon name="chevron-down" size={12} stroke={2.2} />
+            </button>
+          </span>
         {/if}
       </div>
       <div class="group">

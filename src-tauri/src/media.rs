@@ -43,6 +43,9 @@ const CHECKED_FILES: usize = 64;
 /// file with more is refused like a playlist: what follows cannot be checked.
 const MAX_TAG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TAGS: usize = 16;
+/// How long a media host may take to start answering before the request is made
+/// again, once (`fetch_range`).
+const ANSWER_TIME: Duration = Duration::from_secs(20);
 /// The error for an address that answers with a playlist instead of a file.
 const PLAYLIST: &str = "This is a streaming playlist (HLS or DASH), not an audio or video file. \
     Tidings plays single files only";
@@ -258,7 +261,12 @@ fn tracker_prefix(host: &str, seg: &[&str]) -> Option<usize> {
     match host {
         "dts.podtrac.com" | "podtrac.com" if s(0).starts_with("redirect.") => Some(1),
         "www.podtrac.com" if s(0) == "pts" && s(1).starts_with("redirect.") => Some(2),
-        "chtbl.com" | "chrt.fm" | "tracking.swap.fm" if s(0) == "track" => Some(2),
+        // play.podtrac.com/<show>/host/path
+        "play.podtrac.com" if s(1).contains('.') => Some(1),
+        // Podroll: pdrl.fm/<id>/host/path (Team Coco wraps four trackers in it).
+        "pdrl.fm" if !s(0).is_empty() && s(0).chars().all(|c| c.is_ascii_alphanumeric()) && s(1).contains('.') => Some(1),
+        "chtbl.com" | "chrt.fm" | "tracking.swap.fm" | "swap.fm" if s(0) == "track" => Some(2),
+        "pdcn.co" if s(0) == "e" => Some(1),
         "pdst.fm" | "prfx.byspotify.com" if s(0) == "e" => Some(1),
         "mgln.ai" if s(0) == "e" => Some(2),
         "op3.dev" if s(0) == "e" || s(0).starts_with("e,") => Some(1),
@@ -434,25 +442,60 @@ fn total_size(chunk: &Chunk) -> Option<u64> {
     chunk.content_range.as_deref()?.rsplit_once('/')?.1.parse().ok()
 }
 
+/// The body of a range answer, at most `max` bytes. When the host closes the
+/// connection partway (Simplecast does at times), the bytes that came are the
+/// answer: `block` then asks for the rest, as it does when a host sends less.
+async fn read_partly(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    if response.content_length().is_some_and(|len| len as usize > max) {
+        return Err(Error::msg("The response is too large"));
+    }
+    let mut out = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(piece)) => {
+                if out.len() + piece.len() > max {
+                    return Err(Error::msg("The response is too large"));
+                }
+                out.extend_from_slice(&piece);
+            }
+            Ok(None) => return Ok(out),
+            Err(_) if !out.is_empty() => return Ok(out),
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// Fetches bytes `start..=end` of a file from its host (fewer at the end of the file).
 async fn fetch_range(net: &Net, cache: &ResolvedUrls, source: &str, start: u64, end: u64) -> Result<Chunk> {
-
     let mut retried = false;
     loop {
         let url = cache.get(source).unwrap_or_else(|| source.to_string());
         // `Net::public` refuses private addresses, also for a redirect target kept
         // from an earlier request.
-        let response = net
+        let request = net
             .public(&url)?
             .header(ACCEPT, "audio/*, video/*;q=0.8, */*;q=0.5")
             .header(RANGE, format!("bytes={start}-{end}"))
             .timeout(Duration::from_secs(60))
-            .send()
-            .await;
+            .send();
+        // Some ad servers (Simplecast's stitcher) at times never answer a request,
+        // while the same request a moment later answers at once. Wait this long for
+        // the headers, then ask again once.
+        let response = match tokio::time::timeout(ANSWER_TIME, request).await {
+            Ok(sent) => sent,
+            Err(_) if !retried => {
+                cache.forget(source);
+                retried = true;
+                continue;
+            }
+            Err(_) => return Err(Error::msg("The media host did not answer")),
+        };
         let response = match response {
             Ok(r) => r,
-            Err(_) if !retried && url != source => {
-                // A cached CDN link may have expired; resolve again once.
+            // A cached CDN link may have expired, or the host failed this once: an
+            // ad server at times sends a request around in circles until the
+            // redirect limit. Resolve again, once. A refused address is refused again.
+            Err(_) if !retried => {
                 cache.forget(source);
                 retried = true;
                 continue;
@@ -484,7 +527,17 @@ async fn fetch_range(net: &Net, cache: &ResolvedUrls, source: &str, start: u64, 
                 .get(CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            let bytes = net::read_limited(response, CHUNK as usize + 64 * 1024).await?;
+            let bytes = match read_partly(response, CHUNK as usize + 64 * 1024).await {
+                Ok(bytes) => bytes,
+                // The host closed the connection before any byte came. Ask again once,
+                // from the same address: an ad server gives each listening session its
+                // own file, so a new address may differ.
+                Err(_) if !retried => {
+                    retried = true;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             return Ok(Chunk { status: 206, mime, bytes, content_range });
         }
 
@@ -547,6 +600,20 @@ mod tests {
             strip_trackers("https://www.podtrac.com/pts/redirect.mp3/pdst.fm/e/chtbl.com/track/X/cdn.example.org/ep.m4a"),
             "https://cdn.example.org/ep.m4a"
         );
+        // Team Coco: four trackers in front of Simplecast, the first one Podroll.
+        assert_eq!(
+            strip_trackers(
+                "https://pdrl.fm/f3efd0/dts.podtrac.com/redirect.mp3/arttrk.com/p/ST44R/claritaspod.com/measure/\
+                 stitcher.simplecastaudio.com/c945bd13/episodes/e973b0be/audio/128/default.mp3?aid=rss_feed&feed=dHoohVNH"
+            ),
+            "https://stitcher.simplecastaudio.com/c945bd13/episodes/e973b0be/audio/128/default.mp3?aid=rss_feed&feed=dHoohVNH"
+        );
+        assert_eq!(strip_trackers("https://play.podtrac.com/npr-510289/edge1.pod.npr.org/a.mp3"), "https://edge1.pod.npr.org/a.mp3");
+        assert_eq!(strip_trackers("https://pdcn.co/e/www.buzzsprout.com/1/2.mp3"), "https://www.buzzsprout.com/1/2.mp3");
+        assert_eq!(strip_trackers("https://swap.fm/track/abc123/traffic.example.com/ep.mp3"), "https://traffic.example.com/ep.mp3");
+        // Not a Podroll prefix: left as it is.
+        let other = "https://pdrl.fm/about/team";
+        assert_eq!(strip_trackers(other), other);
         let plain = "https://aphid.fireside.fm/d/1437767933/c91b/280e.mp3";
         assert_eq!(strip_trackers(plain), plain);
     }
