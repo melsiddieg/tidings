@@ -24,7 +24,46 @@ export function typeInfo(type: FeedType): TypeInfo {
   return FEED_TYPES.find((t) => t.value === type) ?? FEED_TYPES[FEED_TYPES.length - 1];
 }
 
-export const LANGUAGE_NAMES: Record<string, string> = { en: 'English', ar: 'Arabic', zh: 'Chinese' };
+/** The languages language.rs tells apart: the name in English, and the language's
+ *  own name for the menu. "und" holds the rest (and text that shows no language). */
+export const LANGUAGES: Record<string, { name: string; own: string }> = {
+  en: { name: 'English', own: 'English' },
+  fr: { name: 'French', own: 'Français' },
+  de: { name: 'German', own: 'Deutsch' },
+  es: { name: 'Spanish', own: 'Español' },
+  pt: { name: 'Portuguese', own: 'Português' },
+  it: { name: 'Italian', own: 'Italiano' },
+  nl: { name: 'Dutch', own: 'Nederlands' },
+  ar: { name: 'Arabic', own: 'العربية' },
+  fa: { name: 'Persian', own: 'فارسی' },
+  ur: { name: 'Urdu', own: 'اردو' },
+  zh: { name: 'Chinese', own: '中文' },
+  ja: { name: 'Japanese', own: '日本語' },
+  ko: { name: 'Korean', own: '한국어' },
+  ru: { name: 'Russian', own: 'Русский' },
+  uk: { name: 'Ukrainian', own: 'Українська' },
+  el: { name: 'Greek', own: 'Ελληνικά' },
+  he: { name: 'Hebrew', own: 'עברית' },
+  th: { name: 'Thai', own: 'ไทย' },
+  hi: { name: 'Hindi', own: 'हिन्दी' },
+  und: { name: 'Other', own: 'Other' },
+};
+
+export const LANGUAGE_NAMES: Record<string, string> = Object.fromEntries(
+  Object.entries(LANGUAGES).map(([code, l]) => [code, l.name]),
+);
+
+/** "Arabic", for the list header; the code itself for one Tidings does not know. */
+export function languageName(code: string): string {
+  return LANGUAGES[code]?.name ?? code;
+}
+
+/** "Arabic · العربية", for the language menu. */
+export function languageLabel(code: string): string {
+  const l = LANGUAGES[code];
+  if (!l) return code;
+  return l.own === l.name ? l.name : `${l.name} · ${l.own}`;
+}
 
 /** The languages an article can be translated into, the usual one first. Into
  *  English: Chinese and Arabic articles. Into Arabic: every article not in Arabic,

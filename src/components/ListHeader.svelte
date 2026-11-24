@@ -4,7 +4,7 @@
   import FeedIcon from './FeedIcon.svelte';
   import { store } from '../lib/store.svelte';
   import type { Filter, Settings } from '../lib/types';
-  import { DATE_PRESETS, rangeLabel, typeInfo } from '../lib/filters';
+  import { DATE_PRESETS, languageLabel, languageName, rangeLabel, typeInfo } from '../lib/filters';
   import { countLabel } from '../lib/util';
 
   let searchInput: HTMLInputElement | undefined = $state();
@@ -28,6 +28,17 @@
     return 'folder';
   });
   const dateLabel = $derived(rangeLabel(store.dateRange));
+  /** "Podcasts · Arabic · ", before the unread count. Built here: Svelte drops the
+   *  space at the end of an {#if} block. */
+  const narrowedBy = $derived(
+    [store.typeFilter && typeInfo(store.typeFilter).label, store.languageFilter && languageName(store.languageFilter)]
+      .filter(Boolean)
+      .map((part) => `${part} · `)
+      .join(''),
+  );
+  /** The language menu shows when the scope has articles in two or more languages,
+   *  or when one is chosen (it may have none left). */
+  const showLanguages = $derived(store.scopeLanguages.length > 1 || store.languageFilter !== null);
 
   // The search can change outside this box: a saved search, or a click on a feed
   // in the results. Typing sets the same value after a pause, so it is left alone.
@@ -85,6 +96,23 @@
     ]);
   }
 
+  function languageMenu(e: MouseEvent) {
+    const chosen = store.languageFilter;
+    const rows = store.scopeLanguages.map((l) => l.language);
+    if (chosen && !rows.includes(chosen)) rows.push(chosen);
+    const unread = (code: string) => (store.scope.kind === 'starred' ? 0 : store.scopeLanguages.find((l) => l.language === code)?.unread ?? 0);
+    store.openMenuAt(e.currentTarget as HTMLElement, [
+      { label: 'All languages', checked: chosen === null, action: () => store.setLanguageFilter(null) },
+      { separator: true },
+      ...rows.map((code) => ({
+        label: languageLabel(code),
+        checked: chosen === code,
+        shortcut: unread(code) > 0 ? countLabel(unread(code)) : undefined,
+        action: () => store.setLanguageFilter(code),
+      })),
+    ]);
+  }
+
   function viewMenu(e: MouseEvent) {
     const views: { value: Settings['viewMode']; label: string }[] = [
       { value: 'widescreen', label: 'Widescreen' },
@@ -118,7 +146,7 @@
       <div class="scope-text">
         <h2 dir="auto">{store.scopeTitle}</h2>
         <span class="sub">
-          {#if store.typeFilter}{typeInfo(store.typeFilter).label} · {/if}{#if store.scopeUnread > 0}{store.scopeUnread} unread{:else if store.scope.kind === 'starred'}{store.tree.starred} starred{:else}All caught up{/if}
+          {narrowedBy}{#if store.scopeUnread > 0}{store.scopeUnread} unread{:else if store.scope.kind === 'starred'}{store.tree.starred} starred{:else}All caught up{/if}
         </span>
       </div>
     </div>
@@ -174,23 +202,39 @@
       <Icon name="chevron-down" size={12} stroke={2.2} />
     </button>
   </div>
-  {#if store.scopeTypes.length > 0}
-    <div class="types" role="group" aria-label="Show one kind of feed">
-      <button class="type" class:on={!store.typeFilter} title="All kinds of feeds" onclick={() => store.setTypeFilter(null)}>All</button>
-      {#each store.scopeTypes as row (row.info.value)}
-        {@const on = store.typeFilter === row.info.value}
+  {#if store.scopeTypes.length > 0 || showLanguages}
+    <div class="facets">
+      {#if store.scopeTypes.length > 0}
+        <div class="types" role="group" aria-label="Show one kind of feed">
+          <button class="type" class:on={!store.typeFilter} title="All kinds of feeds" onclick={() => store.setTypeFilter(null)}>All</button>
+          {#each store.scopeTypes as row (row.info.value)}
+            {@const on = store.typeFilter === row.info.value}
+            <button
+              class="type"
+              class:on
+              title={`${row.info.label}${row.unread > 0 && store.scope.kind !== 'starred' ? ` · ${row.unread} unread` : ''}`}
+              aria-pressed={on}
+              onclick={() => store.setTypeFilter(on ? null : row.info.value)}
+            >
+              <Icon name={row.info.icon} size={14} />
+              {#if on}<span class="type-label">{row.info.label}</span>{/if}
+              {#if row.unread > 0 && store.scope.kind !== 'starred'}<span class="type-count">{countLabel(row.unread)}</span>{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if showLanguages}
         <button
-          class="type"
-          class:on
-          title={`${row.info.label}${row.unread > 0 && store.scope.kind !== 'starred' ? ` · ${row.unread} unread` : ''}`}
-          aria-pressed={on}
-          onclick={() => store.setTypeFilter(on ? null : row.info.value)}
+          class="chip language"
+          class:active={store.languageFilter !== null}
+          onclick={languageMenu}
+          title="Show articles in one language"
         >
-          <Icon name={row.info.icon} size={14} />
-          {#if on}<span class="type-label">{row.info.label}</span>{/if}
-          {#if row.unread > 0 && store.scope.kind !== 'starred'}<span class="type-count">{countLabel(row.unread)}</span>{/if}
+          <Icon name="languages" size={12} />
+          <span class="chip-text">{store.languageFilter ? languageName(store.languageFilter) : 'All languages'}</span>
+          <Icon name="chevron-down" size={12} stroke={2.2} />
         </button>
-      {/each}
+      {/if}
     </div>
   {/if}
 </header>
@@ -318,10 +362,21 @@
     background: var(--accent-softer);
     border-color: rgb(var(--accent-rgb) / 0.25);
   }
+  .facets {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
   .types {
+    flex: 1;
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+    min-width: 0;
+  }
+  .chip.language {
+    height: 26px;
+    margin-left: auto;
   }
   .type {
     display: inline-flex;

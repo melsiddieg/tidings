@@ -13,6 +13,7 @@ import type {
   Filter,
   FolderNode,
   ItemRef,
+  LanguageCount,
   TreeChild,
   ListQuery,
   MenuItem,
@@ -37,6 +38,7 @@ import {
   rangeLabel,
   sortLabel,
   typeInfo,
+  languageName,
   validRange,
   validSort,
   type TypeInfo,
@@ -145,6 +147,11 @@ class Store {
   /** Only feeds of this type inside the scope (the type icons above the list). Resets
    *  when another feed or folder is selected. */
   typeFilter = $state<FeedType | null>(null);
+  /** Only articles in this language (the language menu above the list), a code
+   *  from language.rs. Resets with the type filter. */
+  languageFilter = $state<string | null>(null);
+  /** The languages of the articles in the scope (and type filter), with counts. */
+  scopeLanguages = $state<LanguageCount[]>([]);
   /** Saved searches in the sidebar, and the unread articles each finds now. */
   searches = $state<SavedSearch[]>([]);
   searchCounts = $state<Record<number, number>>({});
@@ -277,6 +284,10 @@ class Store {
   });
   scopeUnread = $derived.by(() => {
     const s = this.scope;
+    if (this.languageFilter) {
+      if (s.kind === 'starred') return 0;
+      return this.scopeLanguages.find((l) => l.language === this.languageFilter)?.unread ?? 0;
+    }
     const typed = this.typeFilter && this.scopeTypes.find((r) => r.info.value === this.typeFilter);
     if (typed) return s.kind === 'starred' ? 0 : typed.unread;
     if (s.kind === 'all') return this.unreadTotal;
@@ -287,6 +298,7 @@ class Store {
   });
 
   private listToken = 0;
+  private languagesToken = 0;
   private readTimer: ReturnType<typeof setTimeout> | undefined;
   private updateTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingFeeds = new Set<number>();
@@ -325,6 +337,7 @@ class Store {
       if (!this.scopeExists(this.scope)) this.scope = { kind: 'all' };
       this.loadSearches();
       this.restoreTabs();
+      this.loadLanguages();
       await this.loadArticles(false);
       await on<FeedUpdated>('feed-updated', (e) => this.onFeedUpdated(e));
       await on<RefreshProgress>('refresh-progress', (p) => this.onProgress(p));
@@ -411,6 +424,7 @@ class Store {
       this.tree = await api.tree();
       if (!this.scopeExists(this.scope)) this.selectScope({ kind: 'all' });
       this.loadSearchCounts();
+      this.loadLanguages();
     } catch (err) {
       this.error(err);
     }
@@ -425,6 +439,7 @@ class Store {
         for (const feed of this.tree.feeds) feed.unread = map.get(feed.id) ?? 0;
         this.tree.starred = counts.starred;
         this.loadSearchCounts();
+        this.loadLanguages();
       } catch {
         /* counts are cosmetic */
       }
@@ -447,6 +462,9 @@ class Store {
       query: this.query.trim(),
       dateRange: $state.snapshot(this.dateRange),
       typeFilter: this.typeFilter,
+      // Only when set, so searches saved before there was a language menu still
+      // match the list they show (activeSearchId).
+      ...(this.languageFilter ? { language: this.languageFilter } : {}),
     };
   }
 
@@ -484,6 +502,7 @@ class Store {
         offset: 0,
         ...rangeBounds(validRange(state.dateRange)),
         feedType: state.typeFilter,
+        language: state.language ?? null,
       };
       try {
         counts[search.id] = await api.countArticles(query);
@@ -506,11 +525,13 @@ class Store {
     this.query = state.query;
     this.dateRange = validRange(state.dateRange);
     this.typeFilter = state.typeFilter;
+    this.languageFilter = typeof state.language === 'string' ? state.language : null;
     local.set('scope', this.scope);
     local.set('filter', this.filter);
     local.set('dateRange', this.dateRange);
     this.selectedId = null;
     this.activeTabId = 'main';
+    this.loadLanguages();
     this.loadArticles(false);
   }
 
@@ -550,7 +571,19 @@ class Store {
       offset,
       ...rangeBounds(this.dateRange),
       feedType: this.typeFilter,
+      language: this.languageFilter,
     };
+  }
+
+  /** The languages of the scope's articles, for the language menu. */
+  async loadLanguages() {
+    const token = ++this.languagesToken;
+    try {
+      const rows = await api.languageCounts({ ...this.listQuery(0, 0), language: null });
+      if (token === this.languagesToken) this.scopeLanguages = rows;
+    } catch {
+      /* the menu is a convenience */
+    }
   }
 
   async loadArticles(keepSelection = true) {
@@ -607,9 +640,11 @@ class Store {
   selectScope(scope: Scope) {
     this.scope = scope;
     this.typeFilter = null;
+    this.languageFilter = null;
     local.set('scope', scope);
     this.selectedId = null;
     this.activeTabId = 'main';
+    this.loadLanguages();
     this.loadArticles(false);
   }
 
@@ -622,6 +657,13 @@ class Store {
   /** Shows only one feed type inside the scope, or all types (null). */
   setTypeFilter(type: FeedType | null) {
     this.typeFilter = type;
+    this.loadLanguages();
+    this.loadArticles();
+  }
+
+  /** Shows only the articles in one language, or in all (null). */
+  setLanguageFilter(language: string | null) {
+    this.languageFilter = language;
     this.loadArticles();
   }
 
@@ -714,8 +756,9 @@ class Store {
     const target = scope ?? this.scope;
     const { since, until } = current ? rangeBounds(this.dateRange) : { since: null, until: null };
     const feedType = current ? this.typeFilter : null;
+    const language = current ? this.languageFilter : null;
     try {
-      const n = await api.markAllRead($state.snapshot(target), since, until, feedType);
+      const n = await api.markAllRead($state.snapshot(target), since, until, feedType, language);
       if (JSON.stringify(target) === JSON.stringify(this.scope)) {
         for (const a of this.articles) {
           a.isRead = true;
@@ -943,6 +986,7 @@ class Store {
   briefTitle(): string {
     const parts = [this.scopeTitle];
     if (this.typeFilter) parts.push(typeInfo(this.typeFilter).label);
+    if (this.languageFilter) parts.push(languageName(this.languageFilter));
     if (this.filter !== 'all') parts.push(this.filter[0].toUpperCase() + this.filter.slice(1));
     if (!isAnyTime(this.dateRange)) parts.push(rangeLabel(this.dateRange));
     if (this.query.trim()) parts.push(`“${this.query.trim()}”`);

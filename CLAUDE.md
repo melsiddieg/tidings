@@ -39,7 +39,9 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
   GitHub, Medium, Apple Podcasts, Overcast and Telegram), `telegram.rs` (public Telegram channels:
   reads the web preview at `t.me/s/<name>` and writes its posts as Atom), `scheduler.rs`, `menu.rs` (macOS menu),
   `feed_types.rs` (podcast/video/code/... detection; `db::detect_feed_type` stores it after each refresh),
-  `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
+  `language.rs` (each article's language for the language filter: by writing system,
+  then common words for Latin letters; `usual` is a feed's language for articles that show
+  none), `video.rs` (finds and starts mpv or IINA for video links), `peertube.rs` (PeerTube video
   files through the instance API, and Sepia Search), `backup.rs` (backups with `VACUUM
   INTO`, and restoring them), `export.rs` (starred articles as HTML or Markdown),
   `files.rs` (`write_private` and `private_temp` for files the user saves).
@@ -49,8 +51,13 @@ The `tauri` crate and the `@tauri-apps/api` npm package must share major.minor
 - `src/lib/store.svelte.ts` holds UI state and actions; components in `src/components/`.
   `src/lib/filters.ts` has the feed type list and the date range presets (`rangeBounds`).
 - Article filters all go through `db::where_clause` (scope, read state, search, `DateRange`,
-  feed type inside the scope), so the list, "mark all as read" and ID lists always agree.
-  Extend it there, not per query.
+  feed type inside the scope, language), so the list, "mark all as read" and ID lists always
+  agree. Extend it there, not per query.
+- Article languages live in `article_langs`, not in a column of `articles`: filling a new
+  column would rewrite every article row, long texts and all, and the upgrade runs at
+  startup. An article's `lang` is "" when its text does not show it; `db::LANG_SQL` then
+  falls back to the feed's `lang`, then "und". A restore does not copy `article_langs` and
+  works every language out again (`db::fill_languages`).
 
 ## Rules that keep the app private and safe
 

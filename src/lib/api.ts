@@ -13,6 +13,7 @@ import type {
   ImportLayout,
   ImportPreview,
   ImportStats,
+  LanguageCount,
   ListQuery,
   PeerTubeHit,
   PeerTubeVideo,
@@ -69,8 +70,13 @@ export const api = {
     call<ReaderPage>('read_url', { url, loadImages, reload }),
   setRead: (ids: number[], read: boolean) => call<void>('set_read', { ids, read }),
   setStarred: (id: number, starred: boolean) => call<void>('set_starred', { id, starred }),
-  markAllRead: (scope: Scope, since: number | null = null, until: number | null = null, feedType: FeedType | null = null) =>
-    call<number>('mark_all_read', { scope, since, until, feedType }),
+  markAllRead: (
+    scope: Scope,
+    since: number | null = null,
+    until: number | null = null,
+    feedType: FeedType | null = null,
+    language: string | null = null,
+  ) => call<number>('mark_all_read', { scope, since, until, feedType, language }),
   deleteArticles: (ids: number[]) => call<void>('delete_articles', { ids }),
   /** `allowLocal`: the user agreed to connect to this address on the local network. */
   discover: (url: string, allowLocal = false) => call<Candidate[]>('discover_feeds', { url, allowLocal }),
@@ -126,6 +132,7 @@ export const api = {
   stopTranslation: () => call<void>('stop_translation'),
   feedActivity: () => call<FeedActivity[]>('feed_activity'),
   countArticles: (query: ListQuery) => call<number>('count_articles', { query }),
+  languageCounts: (query: ListQuery) => call<LanguageCount[]>('language_counts', { query }),
   searches: () => call<SavedSearch[]>('list_searches'),
   saveSearch: (title: string, search: string) => call<SavedSearch>('save_search', { title, search }),
   renameSearch: (id: number, title: string) => call<void>('rename_search', { id, title }),

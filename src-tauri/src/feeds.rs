@@ -212,10 +212,12 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
                 description: parsed.description.clone(),
                 etag,
                 last_modified,
+                language: parsed.language.clone(),
             },
         )?;
         db::apply_retention(&tx, id, &mode, value)?;
         db::detect_feed_type(&tx, id)?;
+        db::detect_feed_language(&tx, id)?;
         tx.commit()?;
         added
     };
@@ -234,6 +236,8 @@ pub struct ParsedFeed {
     pub site_url: Option<String>,
     pub description: Option<String>,
     pub icon_url: Option<String>,
+    /// The language the feed says it is written in ("en-US"), if it says.
+    pub language: Option<String>,
     pub articles: Vec<NewArticle>,
 }
 
@@ -341,7 +345,8 @@ pub fn parse_feed(bytes: &[u8], url: &Url, strip_tracking: bool) -> Result<Parse
     // Feeds list the newest items first. A feed with more items than this is either
     // a huge archive or built to waste time and memory.
     let articles = feed.entries.iter().take(MAX_ENTRIES).map(|e| entry_to_article(e, url, strip_tracking)).collect();
-    Ok(ParsedFeed { title, site_url, description, icon_url, articles })
+    let language = feed.language.as_deref().map(|l| l.trim().chars().take(35).collect());
+    Ok(ParsedFeed { title, site_url, description, icon_url, language, articles })
 }
 
 fn is_html_type(t: &impl ToString) -> bool {

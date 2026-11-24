@@ -146,6 +146,25 @@ articles.unshift({
   zh: true,
 });
 
+// Two Arabic articles, for the language menu above the list.
+const AR = [
+  'تتجه شركات كثيرة إلى نشر نماذجها مفتوحة المصدر، حتى يتمكن الباحثون من تشغيلها على أجهزتهم.',
+  'ويرى خبراء أن هذا يحمي خصوصية المستخدمين، لأن البيانات لا تغادر الجهاز.',
+];
+for (const [i, title] of ['الذكاء الاصطناعي يغير طريقة عملنا', 'حلقة جديدة عن تاريخ الخط العربي'].entries()) {
+  articles.unshift({
+    id: 66 + i, feedId: i === 0 ? 1 : 2, title, url: `https://example.com/ar-${i}`, author: 'سارة',
+    excerpt: AR[i], published: now - 1800 - i * 3600, isRead: false, isStarred: false, isNew: false, hasEnclosure: false, thumb: null,
+    html: AR.map((p) => `<p>${p}</p>`).join(''),
+  });
+}
+
+/** language::detect, simplified: by the writing system only. */
+function mockLanguage(a: ArticleItem): string {
+  const text = `${a.title} ${a.excerpt ?? ''}`;
+  return /[\u0600-\u06FF]/.test(text) ? 'ar' : /[\u4E00-\u9FFF]/.test(text) ? 'zh' : 'en';
+}
+
 /** translate::layout, simplified: paragraphs in order and the images between them. */
 function mockLayout(html: string): TranslationBlock[] {
   let index = 0;
@@ -200,6 +219,7 @@ function query(q: ListQuery) {
     .filter((a) => words.every((w) => `${a.title} ${a.excerpt}`.toLowerCase().includes(w)))
     .filter((a) => inRange(a, q.since, q.until))
     .filter((a) => !q.feedType || feeds.find((f) => f.id === a.feedId)?.feedType === q.feedType)
+    .filter((a) => !q.language || mockLanguage(a) === q.language)
     .sort((a, b) => (q.oldestFirst ? a.published - b.published : b.published - a.published))
     .slice(q.offset, q.offset + q.limit);
 }
@@ -218,7 +238,7 @@ function detail(a: (typeof articles)[number], full = false, images = settings.lo
     enclosureUrl: a.hasEnclosure ? 'https://aphid.fireside.fm/d/1437767933/c91b88f1-e824-4815-bcb8-5227818d6010/280ea95c-b8fc-4dcd-8563-0b3342ac2a54.mp3' : null,
     enclosureType: a.hasEnclosure ? 'audio/mpeg' : null,
     chinese: !!a.zh,
-    language: a.zh ? 'zh' : '',
+    language: a.zh ? 'zh' : mockLanguage(a) === 'ar' ? 'ar' : '',
     translationLayout: mockLayout(html),
   };
 }
@@ -255,14 +275,20 @@ async function mockTranslate(id: number, full: boolean, lang: 'en' | 'ar'): Prom
   const run = ++translationRun;
   const a = articles.find((x) => x.id === id);
   if (!a) throw 'Article not found';
-  if (lang === 'en' && !a.zh) throw 'This article is already in English';
+  const arabic = mockLanguage(a) === 'ar';
+  if (lang === 'en' && !a.zh && !arabic) throw 'This article is already in English';
   const model = settings.translateModel || settings.aiModel;
   // An English article into Arabic: one sentence per paragraph of the article.
   const count = a.zh ? ZH_EN.length : mockLayout(a.html).filter((b) => b.kind === 'text').length;
   const paragraphs = a.zh
     ? lang === 'ar' ? ZH_AR : ZH_EN
-    : Array.from({ length: count }, (_, i) => `هذه ترجمة الفقرة ${i + 1} من المقال إلى العربية، كتبها النموذج المحلي.`);
-  const title = lang === 'ar' ? (a.zh ? 'النماذج المفتوحة تغيّر تطوّر الذكاء الاصطناعي' : `ترجمة: ${a.title}`) : 'Open models change how AI develops';
+    : arabic
+      ? Array.from({ length: count }, (_, i) => `This is the English translation of paragraph ${i + 1}, written by the local model.`)
+      : Array.from({ length: count }, (_, i) => `هذه ترجمة الفقرة ${i + 1} من المقال إلى العربية، كتبها النموذج المحلي.`);
+  const title =
+    lang === 'ar'
+      ? a.zh ? 'النماذج المفتوحة تغيّر تطوّر الذكاء الاصطناعي' : `ترجمة: ${a.title}`
+      : arabic ? 'Translated from Arabic' : 'Open models change how AI develops';
   await wait(500);
   if (run !== translationRun) throw 'The translation was stopped';
   emit('translation-part', { articleId: id, full, lang, index: null, total: paragraphs.length, text: title });
@@ -345,7 +371,8 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
     case 'mark_all_read': {
       let n = 0;
       const typed = (a: ArticleItem) => !args.feedType || feeds.find((f) => f.id === a.feedId)?.feedType === args.feedType;
-      for (const a of articles) if (inScope(a, args.scope) && inRange(a, args.since, args.until) && typed(a) && !a.isRead) { a.isRead = true; n++; }
+      const inLanguage = (a: ArticleItem) => !args.language || mockLanguage(a) === args.language;
+      for (const a of articles) if (inScope(a, args.scope) && inRange(a, args.since, args.until) && typed(a) && inLanguage(a) && !a.isRead) { a.isRead = true; n++; }
       return n;
     }
     case 'delete_articles':
@@ -567,6 +594,17 @@ export async function invoke(cmd: string, args: Record<string, any> = {}): Promi
       });
     case 'count_articles':
       return query({ ...args.query, offset: 0, limit: 100000 }).length;
+    case 'language_counts': {
+      const rows = new Map<string, { language: string; total: number; unread: number }>();
+      for (const a of query({ ...args.query, filter: 'all', query: '', since: null, until: null, language: null, offset: 0, limit: 100000 })) {
+        const code = mockLanguage(a);
+        const row = rows.get(code) ?? { language: code, total: 0, unread: 0 };
+        row.total++;
+        if (!a.isRead) row.unread++;
+        rows.set(code, row);
+      }
+      return [...rows.values()].sort((x, y) => y.total - x.total || x.language.localeCompare(y.language));
+    }
     case 'list_searches':
       return structuredClone(searches);
     case 'save_search': {

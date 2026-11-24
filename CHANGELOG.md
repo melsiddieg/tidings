@@ -5,6 +5,25 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-23
+
+### Added
+- A language filter above the list, in folders, feed types (Podcasts, Articles, ...),
+  All articles and Starred: when the list holds articles in more than one language, a
+  menu shows one language at a time, with unread counts. Tidings works out each
+  article's language on this computer from its title and excerpt, by the writing system
+  and, for Latin letters, by common words. An article that shows no language (a release
+  called "v2.4.1") goes with the usual language of its feed, else the language the feed
+  declares, else Other. "Mark all as read", briefs and saved searches follow it.
+
+### Changed
+- Upgrading works out the language of every stored article once, at the first start:
+  about a second for 45,000 articles.
+
+### Fixed
+- The line under the list title showed "Podcasts ·12 unread" without a space after
+  the dot.
+
 ## [0.15.1] - 2026-11-23
 
 ### Changed
@@ -587,7 +606,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/melsiddieg/tidings/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/melsiddieg/tidings/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/melsiddieg/tidings/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/melsiddieg/tidings/compare/v0.14.0...v0.14.1

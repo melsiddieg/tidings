@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::feed_types;
+use crate::language;
 use crate::rules::{self, Rule};
 
 pub fn now() -> i64 {
@@ -45,7 +46,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// The version the last migration in `migrate` sets. A backup of a newer version is
 /// refused (backup.rs). A migration that changes what stored values mean, rather
 /// than adding tables or columns, must also raise `backup::OLDEST_VERSION`.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// 10 November 2026, when 0.9.2 came out: since then a feed on the local network
 /// is added only after the user allowed its address.
@@ -311,6 +312,92 @@ fn migrate(conn: &Connection) -> Result<()> {
             COMMIT;",
         )?;
     }
+    if version < 10 {
+        // v10: the language of each article and of each feed, for the language
+        // filter (language.rs). An article's `lang` is "" when its text does not
+        // show it; a feed's `lang` is its usual language, `declared_lang` the one
+        // the feed says it is in. Articles get a table of their own: a new column
+        // in `articles` would make the upgrade write every article again, long
+        // texts and all (seconds for a large database, at startup). One
+        // transaction, like v3.
+        conn.execute_batch(
+            "BEGIN;
+            CREATE TABLE IF NOT EXISTS article_langs (
+                article_id INTEGER PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+                lang       TEXT NOT NULL
+            );",
+        )?;
+        let upgrade = (|| -> Result<()> {
+            // A column that is there already stays: the upgrade tests set an older
+            // version on a database made by this one.
+            for (table, column) in [("feeds", "lang"), ("feeds", "declared_lang")] {
+                let has: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    params![table, column],
+                    |r| r.get(0),
+                )?;
+                if has == 0 {
+                    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;"))?;
+                }
+            }
+            fill_languages(conn, false)
+        })();
+        match upgrade {
+            Ok(()) => conn.execute_batch("PRAGMA user_version = 10; COMMIT;")?,
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stores the language of an article (`language::detect`).
+const SET_LANG_SQL: &str =
+    "INSERT INTO article_langs (article_id, lang) VALUES (?1, ?2) ON CONFLICT(article_id) DO UPDATE SET lang = excluded.lang";
+
+/// Works out the language of each article that has none yet (with `redo`, of every
+/// article), then the usual language of every feed. Run by the v10 migration, and
+/// after a restore, which does not copy the backup's languages.
+pub fn fill_languages(conn: &Connection, redo: bool) -> Result<()> {
+    if redo {
+        conn.execute("DELETE FROM article_langs", [])?;
+    }
+    let rows: Vec<(i64, String, Option<String>)> = conn
+        .prepare(
+            "SELECT a.id, a.title, a.excerpt FROM articles a
+             WHERE a.is_deleted = 0 AND NOT EXISTS (SELECT 1 FROM article_langs al WHERE al.article_id = a.id)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut set = conn.prepare(SET_LANG_SQL)?;
+    for (id, title, excerpt) in rows {
+        set.execute(params![id, language::detect(&title, excerpt.as_deref().unwrap_or(""))])?;
+    }
+    let feeds: Vec<i64> =
+        conn.prepare("SELECT id FROM feeds")?.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+    for id in feeds {
+        detect_feed_language(conn, id)?;
+    }
+    Ok(())
+}
+
+/// Works out a feed's usual language from its newest articles and the language it
+/// declares (`language::usual`), and stores it. Run after each refresh.
+pub fn detect_feed_language(conn: &Connection, feed_id: i64) -> Result<()> {
+    let langs: Vec<String> = conn
+        .prepare(
+            "SELECT COALESCE(al.lang, '') FROM articles a LEFT JOIN article_langs al ON al.article_id = a.id
+             WHERE a.feed_id = ?1 AND a.is_deleted = 0 ORDER BY a.published DESC, a.id DESC LIMIT ?2",
+        )?
+        .query_map(params![feed_id, language::RECENT_ITEMS], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let declared: Option<String> =
+        conn.query_row("SELECT declared_lang FROM feeds WHERE id = ?1", [feed_id], |r| r.get(0)).optional()?.flatten();
+    let langs: Vec<&str> = langs.iter().map(String::as_str).collect();
+    let usual = language::usual(&langs, declared.as_deref());
+    conn.execute("UPDATE feeds SET lang = ?2 WHERE id = ?1", params![feed_id, usual])?;
     Ok(())
 }
 
@@ -494,6 +581,9 @@ pub struct ListQuery {
     /// Only feeds of this type inside the scope (the type icons above the list).
     #[serde(default)]
     pub feed_type: Option<String>,
+    /// Only articles in this language: a code from `language::CODES`.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Published between `since` (inclusive) and `until` (exclusive), Unix seconds.
@@ -650,6 +740,25 @@ fn type_sql(feed_type: Option<&str>, args: &mut Vec<Value>) -> String {
     }
 }
 
+/// The language an article is listed under: its own, else its feed's usual one, else
+/// "und" (Other). Both are always a code from `language::CODES` or "".
+const LANG_SQL: &str = "COALESCE(
+    NULLIF((SELECT al.lang FROM article_langs al WHERE al.article_id = a.id), ''),
+    NULLIF((SELECT fl.lang FROM feeds fl WHERE fl.id = a.feed_id), ''),
+    'und')";
+
+/// Articles in one language (the language menu above the list).
+fn lang_sql(lang: Option<&str>, args: &mut Vec<Value>) -> String {
+    match lang {
+        None => "1 = 1".into(),
+        Some(code) if language::is_code(code) => {
+            args.push(Value::Text(code.to_string()));
+            format!("{LANG_SQL} = ?")
+        }
+        Some(_) => "1 = 0".into(),
+    }
+}
+
 fn range_sql(range: &DateRange, args: &mut Vec<Value>) -> String {
     let mut parts = vec!["1 = 1"];
     if let Some(since) = range.since {
@@ -697,13 +806,20 @@ fn where_clause(
     query: &str,
     range: &DateRange,
     feed_type: Option<&str>,
+    lang: Option<&str>,
     args: &mut Vec<Value>,
 ) -> String {
     let scope = scope_sql(scope, args);
     let search = search_sql(query, args);
     let range = range_sql(range, args);
     let types = type_sql(feed_type, args);
-    format!("a.is_deleted = 0 AND {scope} AND {} AND {search} AND {range} AND {types}", filter_sql(filter))
+    let lang = lang_sql(lang, args);
+    format!("a.is_deleted = 0 AND {scope} AND {} AND {search} AND {range} AND {types} AND {lang}", filter_sql(filter))
+}
+
+/// `where_clause` with every filter of `q`.
+fn query_clause(q: &ListQuery, args: &mut Vec<Value>) -> String {
+    where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), q.language.as_deref(), args)
 }
 
 pub fn list_articles(
@@ -712,7 +828,7 @@ pub fn list_articles(
     thumb: impl Fn(&str) -> String,
 ) -> Result<Vec<ArticleItem>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let clause = query_clause(q, &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(200).min(1000) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -765,7 +881,7 @@ pub struct BriefSource {
 /// many it shows in all.
 pub fn brief_sources(conn: &Connection, q: &ListQuery, limit: u32) -> Result<(Vec<BriefSource>, usize)> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let clause = query_clause(q, &mut args);
     let total: i64 =
         conn.query_row(&format!("SELECT COUNT(*) FROM articles a WHERE {clause}"), params_from_iter(args.clone()), |r| r.get(0))?;
     args.push(Value::Integer(i64::from(limit)));
@@ -865,7 +981,7 @@ pub fn delete_brief(conn: &Connection, id: i64) -> Result<()> {
 
 pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let clause = query_clause(q, &mut args);
     let order = if q.oldest_first { "ASC" } else { "DESC" };
     args.push(Value::Integer(q.limit.unwrap_or(20).min(100) as i64));
     args.push(Value::Integer(q.offset.unwrap_or(0) as i64));
@@ -881,7 +997,7 @@ pub fn list_article_ids(conn: &Connection, q: &ListQuery) -> Result<Vec<i64>> {
 /// Every starred article, newest first, with the name of its feed (export.rs).
 pub fn starred_articles(conn: &Connection) -> Result<Vec<(ArticleRow, String)>> {
     let mut args = Vec::new();
-    let clause = where_clause(&Scope::Starred, "all", "", &DateRange::default(), None, &mut args);
+    let clause = where_clause(&Scope::Starred, "all", "", &DateRange::default(), None, None, &mut args);
     let sql = format!("SELECT a.id FROM articles a WHERE {clause} ORDER BY a.published DESC, a.id DESC");
     let ids: Vec<i64> = conn
         .prepare(&sql)?
@@ -900,9 +1016,34 @@ pub fn starred_articles(conn: &Connection) -> Result<Vec<(ArticleRow, String)>> 
 /// How many articles the list would show for `q` (its limit and offset aside).
 pub fn count_articles(conn: &Connection, q: &ListQuery) -> Result<i64> {
     let mut args = Vec::new();
-    let clause = where_clause(&q.scope, &q.filter, &q.query, &q.range, q.feed_type.as_deref(), &mut args);
+    let clause = query_clause(q, &mut args);
     let sql = format!("SELECT COUNT(*) FROM articles a WHERE {clause}");
     Ok(conn.query_row(&sql, params_from_iter(args), |r| r.get(0))?)
+}
+
+/// How many articles in one language the scope holds, and how many of them are unread.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageCount {
+    pub language: String,
+    pub total: i64,
+    pub unread: i64,
+}
+
+/// The languages of the articles in a scope, most articles first: the language menu
+/// above the list. Like the type icons, it leaves out read state, dates and search.
+pub fn language_counts(conn: &Connection, scope: &Scope, feed_type: Option<&str>) -> Result<Vec<LanguageCount>> {
+    let mut args = Vec::new();
+    let clause = where_clause(scope, "all", "", &DateRange::default(), feed_type, None, &mut args);
+    let sql = format!(
+        "SELECT {LANG_SQL}, COUNT(*), SUM(a.is_read = 0) FROM articles a
+         WHERE {clause} GROUP BY 1 ORDER BY 2 DESC, 1"
+    );
+    let rows = conn
+        .prepare(&sql)?
+        .query_map(params_from_iter(args), |r| Ok(LanguageCount { language: r.get(0)?, total: r.get(1)?, unread: r.get(2)? }))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
 }
 
 /// How active a feed is, for the feed health page.
@@ -1034,9 +1175,15 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn mark_scope_read(conn: &Connection, scope: &Scope, range: &DateRange, feed_type: Option<&str>) -> Result<usize> {
+pub fn mark_scope_read(
+    conn: &Connection,
+    scope: &Scope,
+    range: &DateRange,
+    feed_type: Option<&str>,
+    lang: Option<&str>,
+) -> Result<usize> {
     let mut args = Vec::new();
-    let clause = where_clause(scope, "unread", "", range, feed_type, &mut args);
+    let clause = where_clause(scope, "unread", "", range, feed_type, lang, &mut args);
     let sql = format!(
         "UPDATE articles SET is_read = 1, is_new = 0
          WHERE id IN (SELECT a.id FROM articles a WHERE {clause})"
@@ -1127,6 +1274,8 @@ pub struct FeedMeta {
     pub description: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    /// The language the feed says it is written in, as the feed gives it ("en-US").
+    pub language: Option<String>,
 }
 
 /// Inserts new articles and updates changed ones. Returns the number of new articles.
@@ -1152,6 +1301,7 @@ pub fn store_articles(
             full_content = NULL, last_seen = ?11
          WHERE id = ?1",
     )?;
+    let mut set_lang = tx.prepare_cached(SET_LANG_SQL)?;
     let mut touch = tx.prepare_cached("UPDATE articles SET last_seen = ?2 WHERE id = ?1")?;
 
     let mut added = 0;
@@ -1181,8 +1331,10 @@ pub fn store_articles(
                     now,
                     item.hash
                 ])?;
+                let id = tx.last_insert_rowid();
+                set_lang.execute(params![id, language::detect(&item.title, &item.excerpt)])?;
                 added += 1;
-                new.push((tx.last_insert_rowid(), item));
+                new.push((id, item));
             }
             Some((id, false, hash)) if hash != Some(item.hash) => {
                 update.execute(params![
@@ -1198,6 +1350,7 @@ pub fn store_articles(
                     item.hash,
                     now
                 ])?;
+                set_lang.execute(params![id, language::detect(&item.title, &item.excerpt)])?;
             }
             Some((id, _, _)) => {
                 touch.execute(params![id, now])?;
@@ -1395,9 +1548,18 @@ pub fn update_feed_meta(tx: &Transaction<'_>, id: i64, meta: &FeedMeta) -> Resul
     tx.execute(
         "UPDATE feeds SET title = COALESCE(?2, title), site_url = COALESCE(?3, site_url),
             description = COALESCE(?4, description), etag = ?5, last_modified = ?6,
-            last_fetched = ?7, last_success = ?7, last_error = NULL
+            last_fetched = ?7, last_success = ?7, last_error = NULL, declared_lang = ?8
          WHERE id = ?1",
-        params![id, meta.title, meta.site_url, meta.description, meta.etag, meta.last_modified, now],
+        params![
+            id,
+            meta.title,
+            meta.site_url,
+            meta.description,
+            meta.etag,
+            meta.last_modified,
+            now,
+            meta.language.as_deref().and_then(language::declared)
+        ],
     )?;
     Ok(())
 }

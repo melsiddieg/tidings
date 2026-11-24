@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use crate::brief::{self, Kind, Server};
 use crate::error::{Error, Result};
+use crate::language::{is_arabic_letter, is_han, is_kana};
 use crate::net::Net;
 use crate::sanitize::{self, Piece};
 use crate::settings::Settings;
@@ -149,22 +150,8 @@ pub fn layout(html: &str, load_images: bool) -> Vec<Block> {
     out
 }
 
-/// Chinese characters (CJK ideographs), which Japanese also uses.
-fn is_han(c: char) -> bool {
-    matches!(c,
-        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}'
-        | '\u{20000}'..='\u{2EBEF}' | '\u{30000}'..='\u{3134F}')
-}
-
 fn has_han(text: &str) -> bool {
     text.chars().any(is_han)
-}
-
-/// Arabic letters, also those of Persian and Urdu, which use the same script.
-fn is_arabic_letter(c: char) -> bool {
-    c.is_alphabetic()
-        && matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}'
-            | '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}')
 }
 
 /// How many letters of `text` are Arabic and how many are not.
@@ -198,7 +185,7 @@ pub fn is_chinese(text: &str) -> bool {
     for c in text.chars().take(4_000) {
         if is_han(c) {
             han += 1;
-        } else if matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}') {
+        } else if is_kana(c) {
             kana += 1;
         } else if c.is_alphabetic() {
             letters += 1;

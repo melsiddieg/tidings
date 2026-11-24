@@ -82,6 +82,7 @@ fn query(scope: Scope, filter: &str, q: &str) -> ListQuery {
         offset: Some(0),
         range: db::DateRange::default(),
         feed_type: None,
+        language: None,
     }
 }
 
@@ -173,6 +174,7 @@ fn full_database_workflow() {
                 description: parsed.description.clone(),
                 etag: Some("\"abc\"".into()),
                 last_modified: None,
+                language: parsed.language.clone(),
             },
         )
         .unwrap();
@@ -207,7 +209,7 @@ fn full_database_workflow() {
     assert_eq!(unread.len(), 2);
     let starred = db::list_articles(&conn, &query(Scope::Starred, "all", ""), thumb).unwrap();
     assert_eq!(starred.len(), 1);
-    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }, &db::DateRange::default(), None).unwrap();
+    let marked = db::mark_scope_read(&conn, &Scope::Folder { id: tech }, &db::DateRange::default(), None, None).unwrap();
     assert_eq!(marked, 2);
 
     // Tree has display titles and counts.
@@ -383,7 +385,7 @@ fn migration_keeps_the_old_look() {
     // Folders stay first, as the old sidebar showed them.
     assert_eq!(root_order(&conn), ["folder:A", "folder:B", "feed:F"]);
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 9);
+    assert_eq!(v, 10);
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -408,6 +410,7 @@ fn store(conn: &mut rusqlite::Connection, feed: i64, items: &[db::NewArticle]) {
     let tx = conn.transaction().unwrap();
     db::store_articles(&tx, feed, items, None).unwrap();
     db::detect_feed_type(&tx, feed).unwrap();
+    db::detect_feed_language(&tx, feed).unwrap();
     tx.commit().unwrap();
 }
 
@@ -508,10 +511,10 @@ fn feed_types_and_date_ranges() {
 
     // "Mark all as read" honors the range: clear everything older than 20 days ago.
     let older = db::DateRange { since: None, until: Some(t0 + 20 * day) };
-    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &older, None).unwrap(), 4);
+    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &older, None, None).unwrap(), 4);
     assert_eq!(titles(&conn, &query(Scope::All, "unread", "")), ["post2", "post3"]);
     // Both podcast episodes were in that range, so the podcast scope has nothing left.
-    assert_eq!(db::mark_scope_read(&conn, &Scope::Type { feed_type: "podcast".into() }, &db::DateRange::default(), None).unwrap(), 0);
+    assert_eq!(db::mark_scope_read(&conn, &Scope::Type { feed_type: "podcast".into() }, &db::DateRange::default(), None, None).unwrap(), 0);
 
     // One type inside a folder (the type icons above the list). The list and
     // "mark all as read" cover the same articles.
@@ -530,9 +533,156 @@ fn feed_types_and_date_ranges() {
     assert!(titles(&conn, &typed("all", Some("nonsense"))).is_empty());
     assert_eq!(titles(&conn, &typed("unread", Some("article"))), ["post2", "post3"]);
     let folder = Scope::Folder { id: mixed };
-    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("podcast")).unwrap(), 0);
-    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("article")).unwrap(), 2);
+    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("podcast"), None).unwrap(), 0);
+    assert_eq!(db::mark_scope_read(&conn, &folder, &db::DateRange::default(), Some("article"), None).unwrap(), 2);
 
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The language menu above the list. An article is listed under its own language,
+/// else its feed's usual one, else the one the feed declares, else Other ("und").
+/// The list, the menu's counts and "mark all as read" cover the same articles.
+#[test]
+fn articles_are_filtered_by_language() {
+    let (mut conn, dir) = temp_db();
+    let t = db::now() - 10_000;
+    let titled = |guid: &str, at: i64, title: &str, excerpt: &str| db::NewArticle {
+        title: title.into(),
+        excerpt: excerpt.into(),
+        ..item(guid, at, None)
+    };
+    let news = db::create_folder(&conn, "News", None).unwrap();
+    let english = db::insert_feed(&conn, "https://en.example/feed", Some(news), Some("English"), None).unwrap();
+    let arabic = db::insert_feed(&conn, "https://ar.example/feed", Some(news), Some("Arabic"), None).unwrap();
+    let chinese = db::insert_feed(&conn, "https://zh.example/feed", None, Some("Chinese"), None).unwrap();
+    let numbers = db::insert_feed(&conn, "https://numbers.example/feed", None, Some("Numbers"), None).unwrap();
+    let tags = db::insert_feed(&conn, "https://github.com/x/y/tags.atom", None, Some("Tags"), None).unwrap();
+    store(
+        &mut conn,
+        english,
+        &[
+            titled("e1", t, "How to build a compiler in Rust", "The first part of the series is about the parser."),
+            titled("e2", t + 1, "What is new in the latest release", "It is faster and uses less memory than before."),
+            // Only a version number: it goes with the rest of its feed.
+            titled("e3", t + 2, "v2.54.1", ""),
+        ],
+    );
+    store(
+        &mut conn,
+        arabic,
+        &[
+            titled("a1", t + 3, "الذكاء الاصطناعي يغير طريقة عملنا", "مقالة عن مستقبل العمل في المنطقة العربية."),
+            titled("a2", t + 4, "تنوين بودكاست | Tanween Podcasts", "حلقة جديدة عن تاريخ الخط العربي"),
+        ],
+    );
+    store(
+        &mut conn,
+        chinese,
+        &[
+            titled("z1", t + 5, "开源模型改变人工智能的发展", "越来越多的公司选择公开模型的权重。"),
+            titled("z2", t + 6, "Neovim 悬浮滚动条 scrollbar.nvim", "插件介绍：为 Neovim 提供悬浮滚动条功能。"),
+            titled("z3", t + 7, "如题", ""),
+            // An English post in a Chinese feed is English.
+            titled("z4", t + 8, "Notes from the conference", "What we learned about the future of the web."),
+        ],
+    );
+    store(&mut conn, numbers, &[titled("n1", t + 9, "2.4.71", ""), titled("n2", t + 10, "2.4.70", "")]);
+    // Version numbers only, in a feed that says it is in English (GitHub's do).
+    store(&mut conn, tags, &[titled("g1", t + 11, "v1.5.0", ""), titled("g2", t + 12, "v1.4.9", "")]);
+    {
+        let tx = conn.transaction().unwrap();
+        let meta = db::FeedMeta {
+            title: None,
+            site_url: None,
+            description: None,
+            etag: None,
+            last_modified: None,
+            language: Some("en-US".into()),
+        };
+        db::update_feed_meta(&tx, tags, &meta).unwrap();
+        db::detect_feed_language(&tx, tags).unwrap();
+        tx.commit().unwrap();
+    }
+    let lang_of = |id: i64| conn.query_row("SELECT lang FROM feeds WHERE id = ?1", [id], |r| r.get::<_, String>(0)).unwrap();
+    assert_eq!([lang_of(english), lang_of(arabic), lang_of(chinese), lang_of(numbers), lang_of(tags)], ["en", "ar", "zh", "", "en"]);
+
+    let in_lang = |scope: Scope, filter: &str, lang: &str| {
+        let mut q = query(scope, filter, "");
+        q.language = Some(lang.into());
+        q
+    };
+    assert_eq!(
+        titles(&conn, &in_lang(Scope::All, "all", "en")),
+        ["How to build a compiler in Rust", "Notes from the conference", "What is new in the latest release", "v1.4.9", "v1.5.0", "v2.54.1"]
+    );
+    assert_eq!(titles(&conn, &in_lang(Scope::All, "all", "ar")), ["الذكاء الاصطناعي يغير طريقة عملنا", "تنوين بودكاست | Tanween Podcasts"]);
+    assert_eq!(titles(&conn, &in_lang(Scope::All, "all", "zh")), ["Neovim 悬浮滚动条 scrollbar.nvim", "如题", "开源模型改变人工智能的发展"]);
+    assert_eq!(titles(&conn, &in_lang(Scope::All, "all", "und")), ["2.4.70", "2.4.71"]);
+    assert!(titles(&conn, &in_lang(Scope::All, "all", "xx")).is_empty(), "unknown languages match nothing");
+    assert!(titles(&conn, &in_lang(Scope::All, "all", "")).is_empty());
+    // Inside a folder, a feed and a feed type.
+    assert_eq!(titles(&conn, &in_lang(Scope::Folder { id: news }, "all", "ar")).len(), 2);
+    assert!(titles(&conn, &in_lang(Scope::Folder { id: news }, "all", "zh")).is_empty());
+    assert_eq!(titles(&conn, &in_lang(Scope::Feed { id: chinese }, "all", "en")), ["Notes from the conference"]);
+    assert_eq!(titles(&conn, &in_lang(Scope::Type { feed_type: "code".into() }, "all", "en")), ["v1.4.9", "v1.5.0"]);
+    assert_eq!(db::count_articles(&conn, &in_lang(Scope::All, "all", "zh")).unwrap(), 3);
+    assert_eq!(db::list_article_ids(&conn, &in_lang(Scope::All, "all", "und")).unwrap().len(), 2);
+
+    // The menu: each language with its articles and unread ones, most first.
+    let id = |guid: &str| conn.query_row("SELECT id FROM articles WHERE guid = ?1", [guid], |r| r.get::<_, i64>(0)).unwrap();
+    db::set_read(&conn, &[id("a1"), id("e1")], true).unwrap();
+    let counts = |scope: Scope, feed_type: Option<&str>| -> Vec<(String, i64, i64)> {
+        db::language_counts(&conn, &scope, feed_type).unwrap().into_iter().map(|c| (c.language, c.total, c.unread)).collect()
+    };
+    let row = |l: &str, total: i64, unread: i64| (l.to_string(), total, unread);
+    assert_eq!(counts(Scope::All, None), [row("en", 6, 5), row("zh", 3, 3), row("ar", 2, 1), row("und", 2, 2)]);
+    assert_eq!(counts(Scope::Folder { id: news }, None), [row("en", 3, 2), row("ar", 2, 1)]);
+    assert_eq!(counts(Scope::All, Some("code")), [row("en", 2, 2)]);
+    db::delete_articles(&conn, &[id("n1"), id("n2")]).unwrap();
+    assert_eq!(counts(Scope::All, None).last(), Some(&row("ar", 2, 1)), "deleted articles are not counted");
+
+    // "Mark all as read" in one language.
+    assert_eq!(db::mark_scope_read(&conn, &Scope::All, &db::DateRange::default(), None, Some("ar")).unwrap(), 1);
+    assert!(titles(&conn, &in_lang(Scope::All, "unread", "ar")).is_empty());
+    assert_eq!(titles(&conn, &query(Scope::All, "unread", "")).len(), 8, "the others stay unread");
+
+    // A changed article is looked at again.
+    let tx = conn.transaction().unwrap();
+    db::store_articles(&tx, english, &[db::NewArticle { hash: 1, ..titled("e3", t + 2, "Die neue Version ist da", "Sie bringt mehr Tempo und weniger Fehler mit sich.") }], None).unwrap();
+    tx.commit().unwrap();
+    let e3 = "SELECT al.lang FROM article_langs al JOIN articles a ON a.id = al.article_id WHERE a.guid = 'e3'";
+    assert_eq!(conn.query_row(e3, [], |r| r.get::<_, String>(0)).unwrap(), "de");
+
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The upgrade to v10 works out the language of the articles already stored.
+#[test]
+fn upgrade_works_out_languages_of_stored_articles() {
+    let (mut conn, dir) = temp_db();
+    let path = dir.join("test.db");
+    let feed = db::insert_feed(&conn, "https://ar.example/feed", None, Some("F"), None).unwrap();
+    let now = db::now();
+    store(&mut conn, feed, &[db::NewArticle { title: "الذكاء الاصطناعي يغير طريقة عملنا".into(), ..item("a1", now, None) }, item("1.0", now - 1, None)]);
+    conn.execute_batch(
+        "DROP TABLE article_langs;
+         ALTER TABLE feeds DROP COLUMN lang;
+         ALTER TABLE feeds DROP COLUMN declared_lang;
+         PRAGMA user_version = 9;",
+    )
+    .unwrap();
+    drop(conn);
+    let conn = db::open(&path).unwrap();
+    assert_eq!(table_count(&conn, "PRAGMA user_version"), 10);
+    let langs: Vec<String> =
+        conn.prepare("SELECT al.lang FROM articles a JOIN article_langs al ON al.article_id = a.id ORDER BY a.guid").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(langs, ["", "ar"]);
+    assert_eq!(conn.query_row("SELECT lang FROM feeds", [], |r| r.get::<_, String>(0)).unwrap(), "ar");
+    let mut q = query(Scope::All, "all", "");
+    q.language = Some("ar".into());
+    assert_eq!(db::count_articles(&conn, &q).unwrap(), 2, "the version number goes with its feed");
     drop(conn);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -562,7 +712,7 @@ fn migration_detects_types_of_existing_feeds() {
 
     let conn = db::open(&path).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 9);
+    assert_eq!(v, 10);
     let mut types: Vec<(String, String)> = db::feeds(&conn).unwrap().into_iter().map(|f| (f.url, f.feed_type)).collect();
     types.sort();
     assert_eq!(
@@ -1218,7 +1368,7 @@ fn real_db_migration() {
     };
     let conn = db::open(std::path::Path::new(&path)).unwrap();
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 9);
+    assert_eq!(v, 10);
     let tree = db::tree(&conn).unwrap();
 
     // Nothing moved. (From v1, folders come first in each parent: the old look.)
@@ -2496,6 +2646,8 @@ fn backup_and_restore() {
     assert_eq!(table_count(&old, "PRAGMA application_id"), backup::APPLICATION_ID as i64);
     assert_eq!(table_count(&old, "PRAGMA user_version"), db::SCHEMA_VERSION);
     let (feed, nas) = sample_reader(&mut old);
+    // Languages in the file are not used: they are worked out again.
+    old.execute_batch("UPDATE article_langs SET lang = 'xx'; UPDATE feeds SET lang = 'yy', declared_lang = 'zz';").unwrap();
     let file = old_dir.join("reader.tidings");
     backup::copy_to(&old, &file).unwrap();
     #[cfg(unix)]
@@ -2564,6 +2716,9 @@ fn backup_and_restore() {
     assert_eq!(table_count(&live, "SELECT COUNT(*) FROM translations"), 2);
     assert_eq!(table_count(&live, "SELECT COUNT(*) FROM translations WHERE lang = 'ar'"), 1);
     assert_eq!(table_count(&live, "SELECT COUNT(*) FROM articles WHERE is_new = 1"), 0);
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM article_langs WHERE lang = 'xx'"), 0);
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM article_langs"), 3, "one per article that was not deleted");
+    assert_eq!(table_count(&live, "SELECT COUNT(*) FROM feeds WHERE lang = 'yy' OR lang IS NULL"), 0);
 
     // The data from before is kept, and can be restored to go back.
     let before = backup::inspect(&previous, &current).unwrap();

@@ -312,6 +312,8 @@ pub fn restore(live: &mut Connection, path: &Path, previous: &Path, current: &Se
         copy_table(&source, &tx, table)?;
     }
     drop_invalid(&tx)?;
+    // Languages are worked out again: the file's could be anything.
+    db::fill_languages(&tx, true)?;
     db::clear_new_flags(&tx)?;
     settings::save(&tx, &restored.settings)?;
     // What the rest of Tidings reads must load.

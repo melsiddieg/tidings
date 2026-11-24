@@ -253,8 +253,10 @@ pub fn mark_all_read(
     since: Option<i64>,
     until: Option<i64>,
     feed_type: Option<String>,
+    language: Option<String>,
 ) -> Result<usize> {
-    db::mark_scope_read(&state.db(), &scope, &db::DateRange { since, until }, feed_type.as_deref())
+    let range = db::DateRange { since, until };
+    db::mark_scope_read(&state.db(), &scope, &range, feed_type.as_deref(), language.as_deref())
 }
 
 #[tauri::command]
@@ -867,6 +869,12 @@ pub fn feed_activity(state: AppStateRef<'_>) -> Result<Vec<db::FeedActivity>> {
 #[tauri::command]
 pub fn count_articles(state: AppStateRef<'_>, query: ListQuery) -> Result<i64> {
     db::count_articles(&state.db(), &query)
+}
+
+/// The languages of the articles in the list's scope and feed type, with counts.
+#[tauri::command]
+pub fn language_counts(state: AppStateRef<'_>, query: ListQuery) -> Result<Vec<db::LanguageCount>> {
+    db::language_counts(&state.db(), &query.scope, query.feed_type.as_deref())
 }
 
 #[tauri::command]

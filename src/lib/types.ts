@@ -166,6 +166,8 @@ export interface SearchState {
   query: string;
   dateRange: DateRange;
   typeFilter: FeedType | null;
+  /** A language code (language.rs); missing in searches saved before 0.16. */
+  language?: string | null;
 }
 
 /** A saved search in the sidebar; `state` is a SearchState as JSON. */
@@ -378,6 +380,16 @@ export interface ListQuery {
   until?: number | null;
   /** Only feeds of this type inside the scope (the type icons above the list). */
   feedType?: FeedType | null;
+  /** Only articles in this language (the language menu above the list). */
+  language?: string | null;
+}
+
+/** How many articles in one language the scope holds (db::LanguageCount). */
+export interface LanguageCount {
+  /** A code from language.rs: "en", "ar", ..., "und" for Other. */
+  language: string;
+  total: number;
+  unread: number;
 }
 
 export interface FeedUpdated {
