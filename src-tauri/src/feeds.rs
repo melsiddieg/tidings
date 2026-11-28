@@ -124,7 +124,34 @@ pub fn retention_for(mode: Option<&str>, value: Option<i64>, s: &Settings) -> (S
     }
 }
 
-fn http_error(status: StatusCode) -> Error {
+/// Whether `url` is YouTube's feed server (`/feeds/videos.xml`).
+fn is_youtube_feed(url: &Url) -> bool {
+    matches!(url.host_str(), Some("www.youtube.com" | "youtube.com")) && url.path() == "/feeds/videos.xml"
+}
+
+/// The error for an HTTP status that is not a success. `url` is the address that answered.
+fn http_error(status: StatusCode, url: &Url) -> Error {
+    // YouTube's feed server often answers 404 or 5xx for channels that exist, for
+    // hours and for many channels at once. Say so, or a working feed looks broken.
+    if is_youtube_feed(url) {
+        let code = status.as_u16();
+        match code {
+            404 => {
+                return Error::msg(
+                    "YouTube did not find this feed (HTTP 404). If the channel or playlist still exists, this \
+                     is a fault on YouTube's side that clears up by itself. Tidings tries again at each refresh.",
+                )
+            }
+            500..=599 => {
+                return Error::msg(format!(
+                    "YouTube's feed server is not answering for this feed right now (HTTP {code}). This is a \
+                     fault on YouTube's side that often affects many channels for a few hours. Tidings tries \
+                     again at each refresh."
+                ))
+            }
+            _ => {}
+        }
+    }
     let text = match status.as_u16() {
         401 | 403 => "The server refused access to this feed".to_string(),
         404 => "The feed was not found on the server (HTTP 404)".to_string(),
@@ -176,7 +203,7 @@ async fn fetch_and_store(state: &AppState, id: i64) -> Result<usize> {
         return Ok(0);
     }
     if !status.is_success() {
-        return Err(http_error(status));
+        return Err(http_error(status, response.url()));
     }
     let final_url = response.url().clone();
     let header = |name: reqwest::header::HeaderName| {
@@ -605,4 +632,26 @@ pub async fn fetch_icon(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_text(status: u16, url: &str) -> String {
+        http_error(StatusCode::from_u16(status).unwrap(), &Url::parse(url).unwrap()).to_string()
+    }
+
+    #[test]
+    fn youtube_feed_errors_say_the_fault_is_youtubes() {
+        let channel = "https://www.youtube.com/feeds/videos.xml?channel_id=UCWyEDE8MxOyGmdsluOpRqwQ";
+        let busy = error_text(503, channel);
+        assert!(busy.starts_with("YouTube's feed server is not answering") && busy.contains("(HTTP 503)"), "{busy}");
+        assert!(error_text(500, "https://youtube.com/feeds/videos.xml?playlist_id=PL1").contains("(HTTP 500)"));
+        assert!(error_text(404, channel).starts_with("YouTube did not find this feed (HTTP 404)"));
+        // Other answers from YouTube, and the same answers from other servers, keep their usual text.
+        assert_eq!(error_text(429, channel), "The server is rate limiting requests. Try again later");
+        assert_eq!(error_text(503, "https://example.com/feeds/videos.xml"), "The server had an error (HTTP 503)");
+        assert_eq!(error_text(404, "https://www.youtube.com/@bvdlio"), "The feed was not found on the server (HTTP 404)");
+    }
 }

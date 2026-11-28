@@ -5,6 +5,18 @@ All notable changes to Tidings are listed here. Versions follow
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-28
+
+### Changed
+- A feed that has never loaded, such as a new feed whose server failed at the first
+  try, is tried again after 5 minutes instead of at its usual interval (an hour by
+  default). The wait then doubles (5, 5, 10, 20, 40 minutes) until it reaches the
+  usual interval. Feeds that have loaded before keep their interval.
+- When YouTube's feed server answers HTTP 503, another 5xx or 404, the error says
+  that the fault is on YouTube's side and that Tidings tries again, instead of "The
+  server had an error (HTTP 503)". YouTube's feed server refuses channels that exist
+  for hours at a time, often many at once.
+
 ## [0.16.0] - 2026-11-23
 
 ### Added
@@ -606,7 +618,8 @@ First release.
 - macOS 11+ (universal: Apple silicon and Intel).
 - Linux x86_64: `.deb`, `.rpm`, AppImage and a portable tarball (glibc 2.34+).
 
-[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/melsiddieg/tidings/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/melsiddieg/tidings/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/melsiddieg/tidings/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/melsiddieg/tidings/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/melsiddieg/tidings/compare/v0.14.1...v0.15.0

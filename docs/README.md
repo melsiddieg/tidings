@@ -244,8 +244,8 @@ There are no prebuilt BSD packages yet. Build the portable tarball on the machin
 itself (see "Building on FreeBSD and OpenBSD" below), then install it into `~/.local`:
 
 ```sh
-tar xzf release/freebsd/tidings-0.16.0-freebsd-x86_64.tar.gz
-./tidings-0.16.0-freebsd-x86_64/install.sh
+tar xzf release/freebsd/tidings-0.16.1-freebsd-x86_64.tar.gz
+./tidings-0.16.1-freebsd-x86_64/install.sh
 ```
 
 For podcasts and videos inside Tidings, install the GStreamer plugins listed in the next
@@ -474,6 +474,10 @@ src-tauri/src/
   start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1 tidings`.
 - **A feed shows a warning icon.** Hover it or open its properties to see the error.
   Some sites block unknown user agents; you can change the user agent in
-  Settings → Privacy & network.
+  Settings → Privacy & network. A feed that has never loaded, such as one you just
+  added, is tried again after 5 minutes, then after longer waits up to its usual interval.
+- **YouTube feeds fail with HTTP 503 or 404.** YouTube's feed server sometimes refuses
+  channels that exist, often many of them at once and for a few hours. Nothing is wrong
+  with the feed or with Tidings; it loads again by itself once YouTube answers.
 - **A page does not open in a reader tab.** Not every page has article text that can be
   extracted. Use "Open in browser".

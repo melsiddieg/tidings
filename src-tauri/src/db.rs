@@ -1666,17 +1666,23 @@ pub struct Schedule {
     pub id: i64,
     pub update_interval: Option<i64>,
     pub last_fetched: Option<i64>,
+    /// None: the feed has never loaded.
+    pub last_success: Option<i64>,
+    pub created_at: i64,
     pub paused: bool,
 }
 
 pub fn schedules(conn: &Connection) -> Result<Vec<Schedule>> {
-    let mut stmt = conn.prepare("SELECT id, update_interval, last_fetched, paused FROM feeds")?;
+    let mut stmt =
+        conn.prepare("SELECT id, update_interval, last_fetched, last_success, created_at, paused FROM feeds")?;
     let rows = stmt.query_map([], |r| {
         Ok(Schedule {
             id: r.get(0)?,
             update_interval: r.get(1)?,
             last_fetched: r.get(2)?,
-            paused: r.get(3)?,
+            last_success: r.get(3)?,
+            created_at: r.get(4)?,
+            paused: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)

@@ -320,6 +320,24 @@ fn folders_can_be_reordered() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn schedules_tell_feeds_that_never_loaded() {
+    let (conn, dir) = temp_db();
+    let id = db::insert_feed(&conn, "https://www.youtube.com/feeds/videos.xml?channel_id=UC1", None, None, None).unwrap();
+    let schedule = |conn: &rusqlite::Connection| db::schedules(conn).unwrap().into_iter().find(|s| s.id == id).unwrap();
+    let s = schedule(&conn);
+    assert!(s.created_at > 0 && s.last_fetched.is_none() && s.last_success.is_none() && !s.paused);
+    db::set_fetch_error(&conn, id, "HTTP 503").unwrap();
+    let s = schedule(&conn);
+    assert!(s.last_fetched.is_some() && s.last_success.is_none());
+    db::set_not_modified(&conn, id).unwrap();
+    let s = schedule(&conn);
+    assert_eq!(s.last_success, s.last_fetched);
+    assert!(s.last_success.is_some());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Top-level children in display order, as "kind:title".
 fn root_order(conn: &rusqlite::Connection) -> Vec<String> {
     let mut out: Vec<(i64, u8, String)> = Vec::new();
